@@ -1,0 +1,17 @@
+# Keep the Trunk version requirement open until the first browser build is verified.
+trunk-version = "=0.21.14"
+
+[build]
+target = "index.html"
+dist = "../dist"
+locked = true
+
+[watch]
+watch = [
+  ".",
+  "../crates",
+  "../Cargo.toml",
+  "../Cargo.lock",
+  "../rust-toolchain.toml",
+]
+ignore = ["../target", "../dist"]
