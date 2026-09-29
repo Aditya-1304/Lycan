@@ -729,6 +729,7 @@ name = "gba-app"
 version = "0.1.0"
 dependencies = [
  "eframe",
+ "gba-core",
  "gba-session",
  "wasm-bindgen-futures",
  "web-sys",
@@ -748,6 +749,9 @@ dependencies = [
 [[package]]
 name = "gba-tools"
 version = "0.1.0"
+dependencies = [
+ "gba-core",
+]
 
 [[package]]
 name = "gethostname"

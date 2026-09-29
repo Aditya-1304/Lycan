@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+gba-core = { path = "../gba-core" }
 gba-session = { path = "../gba-session" }
 eframe = { version = "=0.36.2", default-features = false, features = ["default_fonts", "glow"] }
 

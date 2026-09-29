@@ -1,11 +1,11 @@
-use std::time::Duration;
-
 use eframe::egui;
+use gba_core::fixtures::pixels_gba;
+use gba_core::{SCREEN_HEIGHT, SCREEN_WIDTH};
 use gba_session::{BUTTONS, Button, Session};
 
-const WIDTH: usize = 240;
-const HEIGHT: usize = 160;
-const FRAME_INTERVAL: Duration = Duration::from_millis(16);
+const WIDTH: usize = SCREEN_WIDTH;
+const HEIGHT: usize = SCREEN_HEIGHT;
+const GUEST_INSTRUCTION_LIMIT: usize = 64;
 
 /// Keyboard bindings translate host keys into the session's platform-neutral buttons.
 const KEY_BINDINGS: [(Button, egui::Key); 10] = [
@@ -21,46 +21,65 @@ const KEY_BINDINGS: [(Button, egui::Key); 10] = [
     (Button::Right, egui::Key::ArrowRight),
 ];
 
-/// Slice 0 host application with a temporary animated image in place of emulated video.
+/// Shared native/browser application displaying pixels produced by guest execution.
 pub struct GbaApp {
     session: Session,
-    test_image: egui::ColorImage,
+    demo_rom: Vec<u8>,
+    screen_image: egui::ColorImage,
     texture: Option<egui::TextureHandle>,
-    frame: u64,
-    uploaded_frame: Option<u64>,
+    image_generation: u64,
+    uploaded_generation: Option<u64>,
+    status: String,
 }
 
 impl GbaApp {
-    /// Creates a fresh session and its fixed-resolution test image.
+    /// Creates a session, executes the built-in guest fixture, and prepares its image.
     pub fn new(_cc: &eframe::CreationContext<'_>) -> Self {
         let mut app = Self {
             session: Session::new(),
-            test_image: egui::ColorImage::filled([WIDTH, HEIGHT], egui::Color32::BLACK),
+            demo_rom: pixels_gba(),
+            screen_image: egui::ColorImage::filled([WIDTH, HEIGHT], egui::Color32::BLACK),
             texture: None,
-            frame: 0,
-            uploaded_frame: None,
+            image_generation: 0,
+            uploaded_generation: None,
+            status: "Loading pixels.gba".to_owned(),
         };
-        app.render_test_pattern();
+        app.load_demo_rom();
         app
     }
 
-    /// Updates the temporary color bars without changing the logical screen dimensions.
-    fn render_test_pattern(&mut self) {
-        let offset = (self.frame % WIDTH as u64) as usize;
+    /// Loads the fixture bytes into the core and runs its bounded guest program.
+    fn load_demo_rom(&mut self) {
+        match self.session.load_rom(&self.demo_rom) {
+            Ok(()) => self.execute_guest(),
+            Err(error) => self.status = format!("ROM load failed: {error}"),
+        }
+        self.copy_framebuffer_to_image();
+        self.image_generation = self.image_generation.wrapping_add(1);
+    }
 
-        for y in 0..HEIGHT {
-            for x in 0..WIDTH {
-                let shifted_x = (x + offset) % WIDTH;
-                let color = if shifted_x < 80 {
-                    egui::Color32::from_rgb(255, 80, 80)
-                } else if shifted_x < 160 {
-                    egui::Color32::from_rgb(80, 255, 80)
-                } else {
-                    egui::Color32::from_rgb(80, 80, 255)
-                };
-
-                self.test_image.pixels[y * WIDTH + x] = color;
+    /// Executes until the guest reaches its self-branch terminal point.
+    fn execute_guest(&mut self) {
+        match self.session.run_until_self_branch(GUEST_INSTRUCTION_LIMIT) {
+            Ok(report) => {
+                self.status = format!("pixels.gba completed at {:#010x}", report.terminal_pc);
             }
+            Err(error) => self.status = format!("Guest execution failed: {error}"),
+        }
+    }
+
+    /// Converts the core's row-major BGR555 pixels into the shared egui image.
+    fn copy_framebuffer_to_image(&mut self) {
+        for (destination, &pixel) in self
+            .screen_image
+            .pixels
+            .iter_mut()
+            .zip(self.session.framebuffer())
+        {
+            let red = expand_five_bit(pixel & 0x1F);
+            let green = expand_five_bit((pixel >> 5) & 0x1F);
+            let blue = expand_five_bit((pixel >> 10) & 0x1F);
+            *destination = egui::Color32::from_rgb(red, green, blue);
         }
     }
 
@@ -73,24 +92,32 @@ impl GbaApp {
         });
     }
 
-    /// Creates one nearest-neighbor texture and reuses it for later image uploads.
+    /// Creates one nearest-neighbor texture and reuses it when guest pixels change.
     fn sync_texture(&mut self, ctx: &egui::Context) {
         if self.texture.is_none() {
             self.texture = Some(ctx.load_texture(
-                "gba-test-framebuffer",
-                self.test_image.clone(),
+                "gba-framebuffer",
+                self.screen_image.clone(),
                 egui::TextureOptions::NEAREST,
             ));
-            self.uploaded_frame = Some(self.frame);
-        } else if self.uploaded_frame != Some(self.frame) {
+            self.uploaded_generation = Some(self.image_generation);
+        } else if self.uploaded_generation != Some(self.image_generation) {
             if let Some(texture) = &mut self.texture {
-                texture.set(self.test_image.clone(), egui::TextureOptions::NEAREST);
+                texture.set(self.screen_image.clone(), egui::TextureOptions::NEAREST);
             }
-            self.uploaded_frame = Some(self.frame);
+            self.uploaded_generation = Some(self.image_generation);
         }
     }
 
-    /// Draws the Slice 0 controls, button state, and aspect-preserving image.
+    /// Resets the machine, reruns the loaded demo, and refreshes its displayed pixels.
+    fn reset_demo(&mut self) {
+        self.session.reset();
+        self.execute_guest();
+        self.copy_framebuffer_to_image();
+        self.image_generation = self.image_generation.wrapping_add(1);
+    }
+
+    /// Draws controls, guest status, input state, and the aspect-preserving framebuffer.
     fn draw_ui(&mut self, ui: &mut egui::Ui) {
         self.sync_texture(ui.ctx());
 
@@ -104,20 +131,16 @@ impl GbaApp {
 
             if ui.button(pause_label).clicked() {
                 self.session.toggle_pause();
-                if !self.session.paused() {
-                    ui.ctx().request_repaint_after(FRAME_INTERVAL);
-                }
             }
-
             if ui.button("Reset").clicked() {
-                self.session.reset();
-                self.frame = 0;
-                self.render_test_pattern();
-                self.uploaded_frame = None;
-                ui.ctx().request_repaint_after(FRAME_INTERVAL);
+                self.reset_demo();
             }
 
-            ui.label(format!("Frame: {}", self.frame));
+            ui.label(format!(
+                "Instructions: {} | GBA cycles: {}",
+                self.session.executed_instructions(),
+                self.session.cycles().0
+            ));
             ui.label(if self.session.paused() {
                 "Paused"
             } else {
@@ -125,6 +148,7 @@ impl GbaApp {
             });
         });
 
+        ui.label(&self.status);
         ui.separator();
         ui.label("Logical buttons");
         ui.horizontal_wrapped(|ui| {
@@ -148,24 +172,23 @@ impl GbaApp {
 }
 
 impl eframe::App for GbaApp {
-    /// Advances the temporary frame and schedules another wake only while running.
+    /// Keeps logical input current and releases keys when the window loses focus.
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         if ctx.input(|input| input.focused) {
             self.poll_keyboard(ctx);
         } else {
             self.session.release_all_buttons();
         }
-
-        if !self.session.paused() {
-            self.frame = self.frame.wrapping_add(1);
-            self.render_test_pattern();
-            ctx.request_repaint_after(FRAME_INTERVAL);
-        }
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.draw_ui(ui);
     }
+}
+
+fn expand_five_bit(component: u16) -> u8 {
+    let value = component as u8;
+    (value << 3) | (value >> 2)
 }
 
 /// Returns the largest 3:2 presentation size that fits inside the available UI area.
