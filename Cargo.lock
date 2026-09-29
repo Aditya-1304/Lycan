@@ -729,6 +729,8 @@ name = "gba-app"
 version = "0.1.0"
 dependencies = [
  "eframe",
+ "wasm-bindgen-futures",
+ "web-sys",
 ]
 
 [[package]]
@@ -738,6 +740,9 @@ version = "0.1.0"
 [[package]]
 name = "gba-session"
 version = "0.1.0"
+dependencies = [
+ "gba-core",
+]
 
 [[package]]
 name = "gba-tools"
