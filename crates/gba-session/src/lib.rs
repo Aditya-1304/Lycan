@@ -1,6 +1,11 @@
 #![forbid(unsafe_code)]
 
-use gba_core::{CoreError, Cycle, Machine, RunError, RunReport};
+use gba_core::{CoreError, Machine, RunError, RunReport};
+
+pub use gba_core::{CYCLES_PER_FRAME, Cycle, GBA_CLOCK_HZ, SCREEN_HEIGHT, SCREEN_WIDTH};
+
+/// The same assembled guest artifact is used by native, browser, and headless runs.
+pub const PIXELS_ROM: &[u8] = include_bytes!("../../../roms/pixels.gba");
 
 /// Host-independent identity for one of the ten physical GBA buttons.
 #[repr(u8)]
@@ -66,6 +71,8 @@ pub struct Session {
     machine: Machine,
     buttons: ButtonState,
     paused: bool,
+    loaded: bool,
+    frame_target: Cycle,
 }
 
 impl Default for Session {
@@ -74,6 +81,8 @@ impl Default for Session {
             machine: Machine::new(),
             buttons: ButtonState::default(),
             paused: false,
+            loaded: false,
+            frame_target: Cycle(0),
         }
     }
 }
@@ -86,15 +95,29 @@ impl Session {
 
     /// Loads guest bytes into the owned machine and resets its execution state.
     pub fn load_rom(&mut self, rom: &[u8]) -> Result<(), CoreError> {
-        self.machine.load_rom(rom)
+        self.machine.load_rom(rom)?;
+        self.buttons.release_all();
+        self.paused = false;
+        self.loaded = true;
+        self.frame_target = Cycle(0);
+        Ok(())
     }
 
-    /// Runs guest instructions until the ROM reaches its self-branch terminal point.
-    pub fn run_until_self_branch(
-        &mut self,
-        instruction_limit: usize,
-    ) -> Result<RunReport, RunError> {
-        self.machine.run_until_self_branch(instruction_limit)
+    /// Advances one emulated frame toward an absolute deadline with bounded work.
+    /// Host wake scheduling belongs to the app; master-clock input pacing follows in Slice 2.
+    pub fn advance_frame(&mut self) -> Result<Option<RunReport>, RunError> {
+        if self.paused || !self.loaded {
+            return Ok(None);
+        }
+        self.frame_target.0 += CYCLES_PER_FRAME;
+        self.machine
+            .advance_to(self.frame_target, 200_000)
+            .map(Some)
+    }
+
+    /// Identifies the completed framebuffer independently of host redraw requests.
+    pub fn framebuffer_generation(&self) -> u64 {
+        self.machine.framebuffer_generation()
     }
 
     /// Returns the current framebuffer without copying the core-owned pixels.
@@ -142,12 +165,33 @@ impl Session {
         self.machine.reset();
         self.buttons.release_all();
         self.paused = false;
+        self.frame_target = Cycle(0);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn paused_session_preserves_guest_time_and_resume_produces_a_frame() {
+        let mut session = Session::new();
+        let rom: Vec<u8> = [0xEAFFFFFEu32, 0, 0]
+            .into_iter()
+            .flat_map(u32::to_le_bytes)
+            .collect();
+        session.load_rom(&rom).unwrap();
+        session.toggle_pause();
+        assert!(session.advance_frame().unwrap().is_none());
+        assert_eq!(session.cycles(), Cycle(0));
+        session.toggle_pause();
+        assert!(session.advance_frame().unwrap().is_some());
+        assert!(session.cycles().0 >= CYCLES_PER_FRAME);
+        assert_eq!(session.framebuffer_generation(), 1);
+        session.reset();
+        assert_eq!(session.cycles(), Cycle(0));
+        assert_eq!(session.framebuffer_generation(), 0);
+    }
 
     #[test]
     fn logical_buttons_can_be_pressed_and_released() {
