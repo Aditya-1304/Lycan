@@ -40,3 +40,38 @@ This document records the reference environment for repeatable native and browse
 - Focus loss releases held buttons.
 - Pause stops animation and does not busy-spin.
 - Reset restores initial Slice 0 state.
+
+## Slice 1 verification status
+
+### Headless
+
+- Fixture: `pixels.gba`
+- SHA-256: `4fb24cb1f126ac04638a3c5819ecee7f3c4fd0bc2b948e186daa79bbdc9c1a12`
+- Terminal PC: `0x08000200`
+- Completion mailbox: passed
+- Exact 240×160 framebuffer verification: passed
+- Guest-store mutation test: passed
+
+### Native Linux
+
+- Mode 3 image visually verified:
+- Core execution mean: 0.946 ms
+- Core execution p95: 1.531 ms
+- BGR555 conversion mean: 0.119 ms
+- BGR555 conversion p95: 0.168 ms
+- Texture submission mean: 0.026 ms
+- Texture submission p95: 0.041 ms
+
+### Google Chrome
+
+- Mode 3 image visually verified:
+Core execution: mean 1.004 ms | p95 1.400 ms | samples 120
+Pixel conversion: mean 0.202 ms | p95 0.300 ms | samples 120
+Texture submission: mean 0.021 ms | p95 0.100 ms | samples 120
+
+### Brave
+
+- Mode 3 image visually verified:
+Core execution: mean 1.085 ms | p95 1.300 ms | samples 120
+Pixel conversion: mean 0.211 ms | p95 0.300 ms | samples 120
+Texture submission: mean 0.032 ms | p95 0.100 ms | samples 120

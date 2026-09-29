@@ -28,6 +28,21 @@ const IO_BYTES: usize = 0x400;
 const VRAM_START: u32 = 0x0600_0000;
 const VRAM_BYTES: usize = 96 * 1024;
 
+const CPSR_N: u32 = 1 << 31;
+const CPSR_Z: u32 = 1 << 30;
+const CPSR_C: u32 = 1 << 29;
+const CPSR_V: u32 = 1 << 28;
+
+const CPSR_I: u32 = 1 << 7;
+const CPSR_F: u32 = 1 << 6;
+const CPSR_T: u32 = 1 << 5;
+
+const CPSR_SYSTEM_MODE: u32 = 0x1F;
+
+const CONTROLLED_START_CPSR: u32 = CPSR_I | CPSR_F | CPSR_SYSTEM_MODE;
+
+const CONTROLLED_START_SP: u32 = 0x0300_7F00;
+
 /// An absolute position on the emulated hardware cycle timeline.
 #[repr(transparent)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
@@ -153,45 +168,49 @@ struct Access {
     sequential: bool,
 }
 
+trait CpuBus {
+    fn read32(&mut self, address: u32, access: Access) -> Result<u32, CoreError>;
+
+    fn write16(&mut self, address: u32, value: u16, access: Access) -> Result<(), CoreError>;
+
+    fn idle(&mut self, cycles: u64);
+}
+
 struct Cpu {
     registers: [u32; 16],
     pipeline: [u32; 2],
     pipeline_valid: bool,
     next_fetch_is_sequential: bool,
-    // ARM subtraction flags needed by the fixture's SUBS/BNE loop.
-    negative: bool,
-    zero: bool,
-    carry: bool,
-    overflow: bool,
+    cpsr: u32,
 }
 
 impl Cpu {
     fn new() -> Self {
         let mut registers = [0; 16];
+
+        registers[13] = CONTROLLED_START_SP;
         registers[15] = ROM_START;
+
         Self {
             registers,
             pipeline: [0; 2],
             pipeline_valid: false,
             next_fetch_is_sequential: true,
-            negative: false,
-            zero: false,
-            carry: false,
-            overflow: false,
+            cpsr: CONTROLLED_START_CPSR,
         }
     }
 
     /// Fills the two-stage instruction pipeline after reset or a taken branch.
-    fn refill(&mut self, system: &mut System) -> Result<(), CoreError> {
+    fn refill<B: CpuBus>(&mut self, bus: &mut B) -> Result<(), CoreError> {
         let pc = self.registers[15];
-        self.pipeline[0] = system.read32(
+        self.pipeline[0] = bus.read32(
             pc,
             Access {
                 kind: AccessKind::Fetch,
                 sequential: false,
             },
         )?;
-        self.pipeline[1] = system.read32(
+        self.pipeline[1] = bus.read32(
             pc.wrapping_add(4),
             Access {
                 kind: AccessKind::Fetch,
@@ -204,13 +223,13 @@ impl Cpu {
     }
 
     /// Executes from the pipeline and accounts for fetch, data, and internal cycles once.
-    fn step(&mut self, system: &mut System) -> Result<StepOutcome, CoreError> {
+    fn step<B: CpuBus>(&mut self, bus: &mut B) -> Result<StepOutcome, CoreError> {
         if !self.pipeline_valid {
-            self.refill(system)?;
+            self.refill(bus)?;
         }
         let address = self.registers[15];
         let instruction = self.pipeline[0];
-        let next = system.read32(
+        let next = bus.read32(
             address.wrapping_add(8),
             Access {
                 kind: AccessKind::Fetch,
@@ -227,7 +246,7 @@ impl Cpu {
             let offset = ((instruction & 0x00FF_FFFF) << 8) as i32 >> 6;
             let target = address.wrapping_add(8).wrapping_add(offset as u32);
             self.registers[15] = target;
-            self.refill(system)?;
+            self.refill(bus)?;
         } else if self.execute_data_processing(address, instruction) {
             // Immediate ALU operations use only the pipeline fetch cycle.
         } else if instruction & 0x0F7F_0000 == 0x051F_0000 && (instruction >> 12) & 15 != 15 {
@@ -239,16 +258,16 @@ impl Cpu {
                 base.wrapping_sub(offset)
             };
             let destination = ((instruction >> 12) & 15) as usize;
-            self.registers[destination] = system.read32(
+            self.registers[destination] = bus.read32(
                 target,
                 Access {
                     kind: AccessKind::Data,
                     sequential: false,
                 },
             )?;
-            system.idle(1);
+            bus.idle(1);
             self.next_fetch_is_sequential = false;
-        } else if self.execute_store_halfword(address, instruction, system)? {
+        } else if self.execute_store_halfword(address, instruction, bus)? {
             self.next_fetch_is_sequential = false;
         } else {
             return Err(CoreError::UnsupportedInstruction {
@@ -260,21 +279,26 @@ impl Cpu {
     }
 
     fn condition_passes(&self, condition: u32) -> bool {
+        let n = self.cpsr & CPSR_N != 0;
+        let z = self.cpsr & CPSR_Z != 0;
+        let c = self.cpsr & CPSR_C != 0;
+        let v = self.cpsr & CPSR_V != 0;
+
         match condition {
-            0 => self.zero,
-            1 => !self.zero,
-            2 => self.carry,
-            3 => !self.carry,
-            4 => self.negative,
-            5 => !self.negative,
-            6 => self.overflow,
-            7 => !self.overflow,
-            8 => self.carry && !self.zero,
-            9 => !self.carry || self.zero,
-            10 => self.negative == self.overflow,
-            11 => self.negative != self.overflow,
-            12 => !self.zero && self.negative == self.overflow,
-            13 => self.zero || self.negative != self.overflow,
+            0 => z,
+            1 => !z,
+            2 => c,
+            3 => !c,
+            4 => n,
+            5 => !n,
+            6 => v,
+            7 => !v,
+            8 => c && !z,
+            9 => !c || z,
+            10 => n == v,
+            11 => n != v,
+            12 => !z && n == v,
+            13 => z || n != v,
             14 => true,
             _ => false,
         }
@@ -302,10 +326,25 @@ impl Cpu {
             0x0380_0000 => lhs | operand,
             _ => {
                 let result = lhs.wrapping_sub(operand);
-                self.negative = result & 0x8000_0000 != 0;
-                self.zero = result == 0;
-                self.carry = lhs >= operand;
-                self.overflow = ((lhs ^ operand) & (lhs ^ result)) & 0x8000_0000 != 0;
+
+                self.cpsr &= !(CPSR_N | CPSR_Z | CPSR_C | CPSR_V);
+
+                if result & 0x8000_0000 != 0 {
+                    self.cpsr |= CPSR_N;
+                }
+
+                if result == 0 {
+                    self.cpsr |= CPSR_Z;
+                }
+
+                if lhs >= operand {
+                    self.cpsr |= CPSR_C;
+                }
+
+                if ((lhs ^ operand) & (lhs ^ result) & 0x8000_0000) != 0 {
+                    self.cpsr |= CPSR_V;
+                }
+
                 result
             }
         };
@@ -313,11 +352,11 @@ impl Cpu {
     }
 
     /// Routes immediate STRH pre/post-indexed stores through the shared timed bus.
-    fn execute_store_halfword(
+    fn execute_store_halfword<B: CpuBus>(
         &mut self,
         address: u32,
         instruction: u32,
-        system: &mut System,
+        bus: &mut B,
     ) -> Result<bool, CoreError> {
         if instruction & 0x0E50_00F0 != 0x0040_00B0 {
             return Ok(false);
@@ -340,9 +379,13 @@ impl Cpu {
         } else {
             base.wrapping_sub(offset)
         };
-        system.write16(
+        bus.write16(
             if pre { updated } else { base },
             self.registers[source] as u16,
+            Access {
+                kind: AccessKind::Data,
+                sequential: false,
+            },
         )?;
         if !pre || writeback {
             self.registers[base_register] = updated;
@@ -378,7 +421,7 @@ impl System {
         }
     }
 
-    fn read32(&mut self, address: u32, access: Access) -> Result<u32, CoreError> {
+    fn read32_impl(&mut self, address: u32, access: Access) -> Result<u32, CoreError> {
         if address & 3 != 0 {
             return Err(CoreError::InvalidAccessAlignment { address, width: 4 });
         }
@@ -387,36 +430,37 @@ impl System {
         Ok(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
     }
 
-    fn write16(&mut self, address: u32, value: u16) -> Result<(), CoreError> {
+    fn write16_impl(&mut self, address: u32, value: u16, access: Access) -> Result<(), CoreError> {
         if address & 1 != 0 {
             return Err(CoreError::InvalidAccessAlignment { address, width: 2 });
         }
-        self.charge(
-            address,
-            2,
-            Access {
-                kind: AccessKind::Data,
-                sequential: false,
-            },
-        );
+
+        self.charge(address, 2, access);
+
         let bytes = value.to_le_bytes();
 
         if let Some(range) = range_for(address, EWRAM_START, self.ewram.len(), 2) {
             self.ewram[range].copy_from_slice(&bytes);
             return Ok(());
         }
+
         if let Some(range) = range_for(address, IWRAM_START, self.iwram.len(), 2) {
             self.iwram[range].copy_from_slice(&bytes);
             return Ok(());
         }
+
         if let Some(range) = range_for(address, IO_START, self.io.len(), 2) {
             let offset = range.start;
+
             self.io[range].copy_from_slice(&bytes);
+
             if offset == 0 {
                 self.display.control = value;
             }
+
             return Ok(());
         }
+
         if let Some(range) = range_for(address, VRAM_START, self.vram.len(), 2) {
             self.vram[range].copy_from_slice(&bytes);
             return Ok(());
@@ -463,14 +507,28 @@ impl System {
             } else {
                 beats
             };
-        self.idle(cycles);
+        self.advance_time(cycles);
     }
 
     /// Advances display events before any access changes the state observed by scanout.
-    fn idle(&mut self, cycles: u64) {
+    fn advance_time(&mut self, cycles: u64) {
         let target = self.cycles.saturating_add(cycles);
         self.display.synchronize_to(target, &self.vram);
         self.cycles = target;
+    }
+}
+
+impl CpuBus for System {
+    fn read32(&mut self, address: u32, access: Access) -> Result<u32, CoreError> {
+        self.read32_impl(address, access)
+    }
+
+    fn write16(&mut self, address: u32, value: u16, access: Access) -> Result<(), CoreError> {
+        self.write16_impl(address, value, access)
+    }
+
+    fn idle(&mut self, cycles: u64) {
+        self.advance_time(cycles);
     }
 }
 
@@ -633,7 +691,12 @@ impl Machine {
 
     /// Reads diagnostic RAM without changing bus timing or device state.
     pub fn inspect16(&self, address: u32) -> Result<u16, CoreError> {
+        if address & 1 != 0 {
+            return Err(CoreError::InvalidAccessAlignment { address, width: 2 });
+        }
+
         let bytes = self.system.read_bytes(address, 2)?;
+
         Ok(u16::from_le_bytes([bytes[0], bytes[1]]))
     }
 
@@ -724,5 +787,19 @@ mod tests {
             machine.advance_to(Cycle(2 * CYCLES_PER_FRAME), 1),
             Err(RunError::StepLimitExceeded { .. })
         ));
+    }
+
+    #[test]
+    fn controlled_startup_is_arm_system_with_interrupts_masked() {
+        let machine = Machine::new();
+
+        assert_eq!(machine.cpu.registers[13], 0x0300_7F00);
+
+        assert_eq!(machine.cpu.cpsr & 0xFF, CONTROLLED_START_CPSR);
+
+        assert_eq!(machine.cpu.cpsr & CPSR_T, 0);
+        assert_ne!(machine.cpu.cpsr & CPSR_I, 0);
+        assert_ne!(machine.cpu.cpsr & CPSR_F, 0);
+        assert_eq!(machine.cpu.cpsr & 0x1F, CPSR_SYSTEM_MODE);
     }
 }

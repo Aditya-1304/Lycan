@@ -1,7 +1,6 @@
 use eframe::egui;
 use gba_session::{
-    BUTTONS, Button, CYCLES_PER_FRAME, GBA_CLOCK_HZ, PIXELS_ROM, SCREEN_HEIGHT, SCREEN_WIDTH,
-    Session,
+    BUTTONS, Button, CYCLES_PER_FRAME, GBA_CLOCK_HZ, SCREEN_HEIGHT, SCREEN_WIDTH, Session,
 };
 use std::time::Duration;
 use web_time::Instant;
@@ -12,6 +11,11 @@ type PendingRom = Option<(String, Result<Vec<u8>, String>)>;
 const WIDTH: usize = SCREEN_WIDTH;
 const HEIGHT: usize = SCREEN_HEIGHT;
 const WAKE_SECONDS: f64 = CYCLES_PER_FRAME as f64 / GBA_CLOCK_HZ as f64;
+
+const PIXELS_ROM: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../roms/pixels.gba"
+));
 
 /// Keyboard bindings translate host keys into the session's platform-neutral buttons.
 const KEY_BINDINGS: [(Button, egui::Key); 10] = [
