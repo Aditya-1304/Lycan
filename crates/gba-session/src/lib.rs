@@ -4,9 +4,6 @@ use gba_core::{CoreError, Machine, RunError, RunReport};
 
 pub use gba_core::{CYCLES_PER_FRAME, Cycle, GBA_CLOCK_HZ, SCREEN_HEIGHT, SCREEN_WIDTH};
 
-/// The same assembled guest artifact is used by native, browser, and headless runs.
-pub const PIXELS_ROM: &[u8] = include_bytes!("../../../roms/pixels.gba");
-
 /// Host-independent identity for one of the ten physical GBA buttons.
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
