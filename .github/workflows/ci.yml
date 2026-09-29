@@ -1,0 +1,91 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            pkg-config \
+            libxkbcommon-dev \
+            libxcb-render0-dev \
+            libxcb-shape0-dev \
+            libxcb-xfixes0-dev \
+            libwayland-dev \
+            libssl-dev \
+            binutils-arm-none-eabi
+
+      - name: Install pinned Rust toolchain
+        run: |
+          rustup toolchain install 1.98.1 \
+            --profile minimal \
+            --component rustfmt \
+            --component clippy \
+            --target wasm32-unknown-unknown
+
+      - name: Build fixtures
+        run: |
+          cargo run --locked -p gba-tools -- build-fixtures
+
+      - name: Ensure fixture is reproducible
+        run: |
+          git diff --exit-code -- roms/pixels.gba
+
+      - name: Formatting
+        run: |
+          cargo fmt --all -- --check
+
+      - name: Core tests
+        run: |
+          cargo test --locked -p gba-core
+
+      - name: Session tests
+        run: |
+          cargo test --locked -p gba-session
+
+      - name: Headless fixture
+        run: |
+          cargo run --locked -p gba-tools --release -- \
+            fixtures run \
+            --manifest fixtures/manifest.toml
+
+      - name: Clippy
+        run: |
+          cargo clippy \
+            --locked \
+            --workspace \
+            --all-targets \
+            -- \
+            -D warnings
+
+      - name: WASM compile
+        run: |
+          cargo check \
+            --locked \
+            -p gba-app \
+            --target wasm32-unknown-unknown
+
+      - name: Install Trunk
+        run: |
+          cargo install \
+            --locked \
+            trunk \
+            --version 0.21.14
+
+      - name: Browser release build
+        run: |
+          trunk \
+            --config web/Trunk.toml \
+            build \
+            --release
