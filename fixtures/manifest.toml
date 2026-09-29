@@ -1,0 +1,21 @@
+version = 1
+
+[[fixture]]
+name = "pixels"
+rom = "../roms/pixels.gba"
+source = "../roms/pixels/pixels.s"
+linker = "../roms/pixels/linker.ld"
+sha256 = "4fb24cb1f126ac04638a3c5819ecee7f3c4fd0bc2b948e186daa79bbdc9c1a12"
+origin = "Original MIT guest assembly in roms/pixels/pixels.s"
+startup = "cartridge-direct-arm"
+bios_required = false
+terminal_pc = 0x08000200
+mailbox_address = 0x03000000
+completion_id = 0x005a
+result = 1
+max_instructions = 150000
+max_cycles = 3000000
+band_height = 20
+colors = [0x001f, 0x03e0, 0x7c00, 0x03ff, 0x7c1f, 0x7fe0, 0x7fff, 0x0000]
+input_events = []
+time_events = []
