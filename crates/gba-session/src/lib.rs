@@ -1,6 +1,6 @@
 #![forbid(unsafe_code)]
 
-use gba_core::Machine;
+use gba_core::{CoreError, Cycle, Machine, RunError, RunReport};
 
 /// Host-independent identity for one of the ten physical GBA buttons.
 #[repr(u8)]
@@ -82,6 +82,34 @@ impl Session {
     /// Creates a fresh machine with all buttons released and execution unpaused.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Loads guest bytes into the owned machine and resets its execution state.
+    pub fn load_rom(&mut self, rom: &[u8]) -> Result<(), CoreError> {
+        self.machine.load_rom(rom)
+    }
+
+    /// Runs guest instructions until the ROM reaches its self-branch terminal point.
+    pub fn run_until_self_branch(
+        &mut self,
+        instruction_limit: usize,
+    ) -> Result<RunReport, RunError> {
+        self.machine.run_until_self_branch(instruction_limit)
+    }
+
+    /// Returns the current framebuffer without copying the core-owned pixels.
+    pub fn framebuffer(&self) -> &[u16] {
+        self.machine.framebuffer()
+    }
+
+    /// Returns the number of guest instructions completed by the machine.
+    pub fn executed_instructions(&self) -> usize {
+        self.machine.executed_instructions()
+    }
+
+    /// Returns the current emulated hardware cycle position.
+    pub fn cycles(&self) -> Cycle {
+        self.machine.cycles()
     }
 
     /// Updates a host-independent logical button state.

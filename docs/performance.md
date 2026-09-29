@@ -33,5 +33,10 @@ This document records the reference environment for repeatable native and browse
 - Browser release build and local Trunk page: passed; Chrome/Brave interaction was not verified because no browser UI was available in the check environment.
 - Performance measurements: deferred until runnable emulation and audio exist
 - Comparative native/WASM benchmark runs: not performed
-
-Record later measurements with the build profile, browser, display, power conditions, and tracing state above. Keep native and browser results separate.
+- Brave browser build: passed.
+- 240×160 animated test image verified on all targets.
+- Resize and 3:2 aspect preservation verified.
+- Keyboard-to-logical-button mapping verified.
+- Focus loss releases held buttons.
+- Pause stops animation and does not busy-spin.
+- Reset restores initial Slice 0 state.
