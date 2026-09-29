@@ -6,6 +6,21 @@
   <base data-trunk-public-url>
   <link data-trunk rel="rust" href="../crates/gba-app/Cargo.toml" data-bin="gba-app">
   <title>gba-rs</title>
+  <style>
+    html,
+    body {
+      width: 100%;
+      height: 100%;
+      margin: 0;
+      overflow: hidden;
+    }
+
+    #gba_canvas {
+      display: block;
+      width: 100%;
+      height: 100%;
+    }
+  </style>
 </head>
 <body>
   <canvas id="gba_canvas"></canvas>
