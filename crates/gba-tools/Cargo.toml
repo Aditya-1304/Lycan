@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 gba-core = { path = "../gba-core" }
+gba-session = { path = "../gba-session" }
 serde = { version = "1", features = ["derive"] }
 sha2 = "0.10"
 toml = "0.8"

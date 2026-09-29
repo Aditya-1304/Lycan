@@ -1,6 +1,6 @@
 use eframe::egui;
 use gba_session::{
-    BUTTONS, Button, CYCLES_PER_FRAME, GBA_CLOCK_HZ, SCREEN_HEIGHT, SCREEN_WIDTH, Session,
+    BUTTONS, Button, CYCLES_PER_FRAME, Cycle, GBA_CLOCK_HZ, SCREEN_HEIGHT, SCREEN_WIDTH, Session,
 };
 use std::time::Duration;
 use web_time::Instant;
@@ -12,9 +12,15 @@ const WIDTH: usize = SCREEN_WIDTH;
 const HEIGHT: usize = SCREEN_HEIGHT;
 const WAKE_SECONDS: f64 = CYCLES_PER_FRAME as f64 / GBA_CLOCK_HZ as f64;
 
-const PIXELS_ROM: &[u8] = include_bytes!(concat!(
+const BUTTONS_ROM: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/../../roms/pixels.gba"
+    "/../../roms/buttons.gba"
+));
+
+/// The replay uses the same ordered cycle transitions verified by gba-tools.
+const DEMO_INPUT: &[(Cycle, Button, bool)] = &include!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../roms/buttons/input.rs"
 ));
 
 /// Keyboard bindings translate host keys into the session's platform-neutral buttons.
@@ -36,7 +42,8 @@ pub struct GbaApp {
     session: Session,
     rom_name: String,
     loaded: bool,
-    next_wake: f64,
+    host_origin: Instant,
+    replay_deadline: Option<Cycle>,
     last_guest_generation: u64,
     core_times: Measurements,
     conversion_times: Measurements,
@@ -64,7 +71,8 @@ impl GbaApp {
             session: Session::new(),
             rom_name: String::new(),
             loaded: false,
-            next_wake: 0.0,
+            host_origin: Instant::now(),
+            replay_deadline: None,
             last_guest_generation: 0,
             core_times: Measurements::default(),
             conversion_times: Measurements::default(),
@@ -73,7 +81,7 @@ impl GbaApp {
             texture: None,
             image_generation: 0,
             uploaded_generation: None,
-            status: "Loading pixels.gba".to_owned(),
+            status: "Loading buttons.gba".to_owned(),
             #[cfg(not(target_arch = "wasm32"))]
             capture_path: std::env::var_os("GBA_CAPTURE_PATH").map(Into::into),
             #[cfg(not(target_arch = "wasm32"))]
@@ -83,7 +91,7 @@ impl GbaApp {
             #[cfg(target_arch = "wasm32")]
             load_generation: Default::default(),
         };
-        app.load_rom_bytes("pixels.gba", PIXELS_ROM);
+        app.load_rom_bytes("buttons.gba", BUTTONS_ROM);
         app
     }
 
@@ -94,7 +102,8 @@ impl GbaApp {
                 self.rom_name = name.to_owned();
                 self.loaded = true;
                 self.status = format!("Loaded {name}");
-                self.next_wake = 0.0;
+                self.host_origin = Instant::now();
+                self.replay_deadline = None;
                 self.last_guest_generation = 0;
                 self.screen_image.pixels.fill(egui::Color32::BLACK);
                 self.image_generation = self.image_generation.wrapping_add(1);
@@ -156,7 +165,8 @@ impl GbaApp {
     /// Resets guest execution while preserving the loaded ROM and resuming wake requests.
     fn reset_demo(&mut self) {
         self.session.reset();
-        self.next_wake = 0.0;
+        self.host_origin = Instant::now();
+        self.replay_deadline = None;
         self.last_guest_generation = 0;
         self.screen_image.pixels.fill(egui::Color32::BLACK);
         self.status = format!("Reset {}", self.rom_name);
@@ -182,12 +192,26 @@ impl GbaApp {
             };
 
             if ui.button(pause_label).clicked() {
+                self.replay_deadline = None;
                 self.session.toggle_pause();
-                self.next_wake = 0.0;
+                self.host_origin = Instant::now();
                 ui.ctx().request_repaint();
             }
             if ui.button("Reset").clicked() {
                 self.reset_demo();
+                ui.ctx().request_repaint();
+            }
+            if ui.button("Replay square demo").clicked() {
+                self.load_rom_bytes("buttons.gba", BUTTONS_ROM);
+                for &(cycle, button, pressed) in DEMO_INPUT {
+                    if let Err(error) = self.session.set_button_at(cycle, button, pressed) {
+                        self.status = format!("Replay input failed: {error}");
+                        self.session.toggle_pause();
+                        return;
+                    }
+                }
+                self.replay_deadline = Some(Cycle(9 * CYCLES_PER_FRAME));
+                self.status = "Replaying square demo input".to_owned();
                 ui.ctx().request_repaint();
             }
 
@@ -205,6 +229,10 @@ impl GbaApp {
 
         ui.label(&self.status);
         ui.label("Drop a .gba ROM here to load it.");
+        ui.label("Demo: arrow keys move the square once per GBA frame.");
+        if self.session.slowed() {
+            ui.label("Slow emulation: host delay exceeded the work budget.");
+        }
         ui.collapsing("Performance", |ui| {
             ui.label(self.core_times.label("Core execution"));
             ui.label(self.conversion_times.label("Pixel conversion"));
@@ -313,40 +341,74 @@ impl eframe::App for GbaApp {
                 }
             }
         }
-        if ctx.input(|input| input.focused) {
+        let focused = ctx.input(|input| input.focused);
+        // Browser visibility is distinct from keyboard focus. A hidden tab must
+        // suspend emulation even when the host throttles animation callbacks.
+        #[cfg(target_arch = "wasm32")]
+        let visible = web_sys::window()
+            .and_then(|window| window.document())
+            .is_some_and(|document| !document.hidden());
+        #[cfg(not(target_arch = "wasm32"))]
+        let visible = !ctx.input(|input| input.viewport().minimized.unwrap_or(false));
+        self.session.set_active(focused && visible);
+        if self.replay_deadline.is_some() && !(focused && visible) {
+            self.replay_deadline = None;
+            self.status =
+                "Replay cancelled on focus loss; run it again to compare positions".to_owned();
+        }
+        if focused && visible && self.replay_deadline.is_none() {
             self.poll_keyboard(ctx);
-        } else {
+        } else if !(focused && visible) {
             self.session.release_all_buttons();
         }
-        if !self.loaded || self.session.paused() {
-            return;
-        }
-        let now = ctx.input(|input| input.time);
-        if now >= self.next_wake {
-            let start = Instant::now();
-            match self.session.advance_frame() {
-                Ok(_) => {
-                    self.core_times.push(start.elapsed().as_secs_f64() * 1000.0);
-                    let generation = self.session.framebuffer_generation();
-                    if generation != self.last_guest_generation {
-                        let start = Instant::now();
-                        self.copy_framebuffer_to_image();
-                        self.conversion_times
-                            .push(start.elapsed().as_secs_f64() * 1000.0);
-                        self.last_guest_generation = generation;
-                        self.image_generation = self.image_generation.wrapping_add(1);
-                    }
-                }
-                Err(error) => {
-                    self.status = format!("Guest execution failed: {error}");
-                    self.session.toggle_pause();
-                    return;
+        let start = Instant::now();
+        let now = self.host_origin.elapsed();
+        let result = if let Some(deadline) = self.replay_deadline {
+            self.session.advance_host_time_until(now, deadline)
+        } else {
+            self.session.advance_host_time(now)
+        };
+        match result {
+            Ok(Some(_)) => {
+                self.core_times.push(start.elapsed().as_secs_f64() * 1000.0);
+                let generation = self.session.framebuffer_generation();
+                if generation != self.last_guest_generation {
+                    let start = Instant::now();
+                    self.copy_framebuffer_to_image();
+                    self.conversion_times
+                        .push(start.elapsed().as_secs_f64() * 1000.0);
+                    self.last_guest_generation = generation;
+                    self.image_generation = self.image_generation.wrapping_add(1);
                 }
             }
-            // Slice 1 preserves the running wake loop. Elapsed-time/input pacing is Slice 2.
-            self.next_wake = now + WAKE_SECONDS;
+            Ok(None) => {}
+            Err(error) => {
+                self.status = format!("Guest execution failed: {error}");
+                self.session.toggle_pause();
+                return;
+            }
         }
-        ctx.request_repaint_after(Duration::from_secs_f64((self.next_wake - now).max(0.001)));
+        if self
+            .replay_deadline
+            .is_some_and(|deadline| self.session.cycles() >= deadline)
+        {
+            self.replay_deadline = None;
+            self.session.toggle_pause();
+            self.status = match (
+                self.session.inspect16(0x03000002),
+                self.session.inspect16(0x03000004),
+            ) {
+                (Ok(x), Ok(y)) => {
+                    format!("Replay complete: square at ({x}, {y}); expected (114, 73)")
+                }
+                _ => "Replay complete; guest position unavailable".to_owned(),
+            };
+        }
+        if self.loaded && !self.session.paused() && focused && visible {
+            // This wake is a presentation request. Session elapsed-time pacing,
+            // rather than callback count, determines how many GBA cycles execute.
+            ctx.request_repaint_after(Duration::from_secs_f64(WAKE_SECONDS));
+        }
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
