@@ -1,8 +1,55 @@
 #![forbid(unsafe_code)]
 
+use std::collections::VecDeque;
 use std::error::Error;
 use std::fmt;
 use std::ops::Range;
+
+/// Logical GBA buttons in their KEYINPUT bit order, independent of host keys.
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Button {
+    A,
+    B,
+    Select,
+    Start,
+    Right,
+    Left,
+    Up,
+    Down,
+    R,
+    L,
+}
+
+/// Pressed-button bitset; conversion to active-low hardware bits stays in the core.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ButtonState(u16);
+impl ButtonState {
+    /// Updates one logical button without affecting the other nine buttons.
+    pub fn set(&mut self, button: Button, pressed: bool) {
+        let mask = 1 << button as u8;
+        if pressed {
+            self.0 |= mask;
+        } else {
+            self.0 &= !mask;
+        }
+    }
+    /// Reports whether the logical button is pressed.
+    pub fn pressed(self, button: Button) -> bool {
+        self.0 & (1 << button as u8) != 0
+    }
+    /// Releases all logical buttons.
+    pub fn release_all(&mut self) {
+        self.0 = 0;
+    }
+}
+
+/// Ordered external input delivered on the same cycle timeline as hardware accesses.
+struct InputEvent {
+    cycle: Cycle,
+    button: Button,
+    pressed: bool,
+}
 
 /// Nominal ARM7TDMI clock rate used by the emulated hardware timeline.
 pub const GBA_CLOCK_HZ: u64 = 16_777_216;
@@ -27,6 +74,9 @@ const IO_START: u32 = 0x0400_0000;
 const IO_BYTES: usize = 0x400;
 const VRAM_START: u32 = 0x0600_0000;
 const VRAM_BYTES: usize = 96 * 1024;
+// The scanline renderer samples at 960 cycles, but the DISPSTAT HBlank flag
+// follows the 1008-cycle mGBA timing model. IRQ edge timing is a later slice.
+const HBLANK_FLAG_CYCLE: u64 = 1_008;
 
 const CPSR_N: u32 = 1 << 31;
 const CPSR_Z: u32 = 1 << 30;
@@ -35,6 +85,7 @@ const CPSR_V: u32 = 1 << 28;
 
 const CPSR_I: u32 = 1 << 7;
 const CPSR_F: u32 = 1 << 6;
+#[cfg(test)]
 const CPSR_T: u32 = 1 << 5;
 
 const CPSR_SYSTEM_MODE: u32 = 0x1F;
@@ -51,6 +102,8 @@ pub struct Cycle(pub u64);
 /// A failure produced while loading or executing a guest program.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CoreError {
+    InvalidInputTimestamp { requested: Cycle, earliest: Cycle },
+    InputQueueFull,
     EmptyRom,
     RomTooLarge { size: usize, maximum: usize },
     InvalidAccessAlignment { address: u32, width: usize },
@@ -61,6 +114,15 @@ pub enum CoreError {
 impl fmt::Display for CoreError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::InvalidInputTimestamp {
+                requested,
+                earliest,
+            } => write!(
+                formatter,
+                "input cycle {} precedes earliest allowed cycle {}",
+                requested.0, earliest.0
+            ),
+            Self::InputQueueFull => formatter.write_str("timestamped input queue is full"),
             Self::EmptyRom => formatter.write_str("cannot load an empty ROM"),
             Self::RomTooLarge { size, maximum } => {
                 write!(
@@ -169,6 +231,7 @@ struct Access {
 }
 
 trait CpuBus {
+    fn read16(&mut self, address: u32, access: Access) -> Result<u16, CoreError>;
     fn read32(&mut self, address: u32, access: Access) -> Result<u32, CoreError>;
 
     fn write16(&mut self, address: u32, value: u16, access: Access) -> Result<(), CoreError>;
@@ -267,7 +330,7 @@ impl Cpu {
             )?;
             bus.idle(1);
             self.next_fetch_is_sequential = false;
-        } else if self.execute_store_halfword(address, instruction, bus)? {
+        } else if self.execute_halfword(address, instruction, bus)? {
             self.next_fetch_is_sequential = false;
         } else {
             return Err(CoreError::UnsupportedInstruction {
@@ -304,10 +367,24 @@ impl Cpu {
         }
     }
 
-    /// Implements only the MOV/ORR and SUBS immediate forms required by pixels.s.
+    /// Implements the immediate ALU and unshifted register MOV forms used by the demos.
+    /// Unsupported shifts and writes to the pipeline PC remain explicit errors.
     fn execute_data_processing(&mut self, address: u32, instruction: u32) -> bool {
-        let opcode = instruction & 0x0FF0_0000;
-        if !matches!(opcode, 0x03A0_0000 | 0x0380_0000 | 0x0250_0000) {
+        if instruction & 0x0FFF_0FF0 == 0x01A0_0000 && (instruction >> 12) & 15 != 15 {
+            let source = (instruction & 15) as usize;
+            self.registers[((instruction >> 12) & 15) as usize] = if source == 15 {
+                address.wrapping_add(8)
+            } else {
+                self.registers[source]
+            };
+            return true;
+        }
+        if instruction & 0x0E00_0000 != 0x0200_0000 {
+            return false;
+        }
+        let opcode = (instruction >> 21) & 15;
+        let set_flags = instruction & (1 << 20) != 0;
+        if !matches!(opcode, 2 | 4 | 8 | 10 | 12 | 13) || (matches!(opcode, 8 | 10) && !set_flags) {
             return false;
         }
         let destination = ((instruction >> 12) & 15) as usize;
@@ -321,44 +398,63 @@ impl Cpu {
             self.registers[source]
         };
         let operand = (instruction & 255).rotate_right(((instruction >> 8) & 15) * 2);
-        self.registers[destination] = match opcode {
-            0x03A0_0000 => operand,
-            0x0380_0000 => lhs | operand,
-            _ => {
-                let result = lhs.wrapping_sub(operand);
-
-                self.cpsr &= !(CPSR_N | CPSR_Z | CPSR_C | CPSR_V);
-
-                if result & 0x8000_0000 != 0 {
-                    self.cpsr |= CPSR_N;
-                }
-
-                if result == 0 {
-                    self.cpsr |= CPSR_Z;
-                }
-
-                if lhs >= operand {
+        let result = match opcode {
+            2 | 10 => lhs.wrapping_sub(operand),
+            4 => lhs.wrapping_add(operand),
+            8 => lhs & operand,
+            12 => lhs | operand,
+            _ => operand,
+        };
+        if set_flags {
+            self.cpsr &= !(CPSR_N | CPSR_Z);
+            if result & 0x8000_0000 != 0 {
+                self.cpsr |= CPSR_N;
+            }
+            if result == 0 {
+                self.cpsr |= CPSR_Z;
+            }
+            if matches!(opcode, 2 | 4 | 10) {
+                self.cpsr &= !(CPSR_C | CPSR_V);
+                let (carry, overflow) = if opcode == 4 {
+                    (
+                        lhs as u64 + operand as u64 > u32::MAX as u64,
+                        (!(lhs ^ operand) & (lhs ^ result)) & 0x8000_0000 != 0,
+                    )
+                } else {
+                    (
+                        lhs >= operand,
+                        ((lhs ^ operand) & (lhs ^ result)) & 0x8000_0000 != 0,
+                    )
+                };
+                if carry {
                     self.cpsr |= CPSR_C;
                 }
-
-                if ((lhs ^ operand) & (lhs ^ result) & 0x8000_0000) != 0 {
+                if overflow {
                     self.cpsr |= CPSR_V;
                 }
-
-                result
+            } else if (instruction >> 8) & 15 != 0 {
+                self.cpsr = (self.cpsr & !CPSR_C)
+                    | if operand & 0x8000_0000 != 0 {
+                        CPSR_C
+                    } else {
+                        0
+                    };
             }
-        };
+        }
+        if !matches!(opcode, 8 | 10) {
+            self.registers[destination] = result;
+        }
         true
     }
 
-    /// Routes immediate STRH pre/post-indexed stores through the shared timed bus.
-    fn execute_store_halfword<B: CpuBus>(
+    /// Routes immediate LDRH/STRH through the shared timed bus and load idle cycle.
+    fn execute_halfword<B: CpuBus>(
         &mut self,
         address: u32,
         instruction: u32,
         bus: &mut B,
     ) -> Result<bool, CoreError> {
-        if instruction & 0x0E50_00F0 != 0x0040_00B0 {
+        if instruction & 0x0E40_00F0 != 0x0040_00B0 {
             return Ok(false);
         }
         let pre = instruction & (1 << 24) != 0;
@@ -379,14 +475,20 @@ impl Cpu {
         } else {
             base.wrapping_sub(offset)
         };
-        bus.write16(
-            if pre { updated } else { base },
-            self.registers[source] as u16,
-            Access {
-                kind: AccessKind::Data,
-                sequential: false,
-            },
-        )?;
+        let access = Access {
+            kind: AccessKind::Data,
+            sequential: false,
+        };
+        let target = if pre { updated } else { base };
+        if instruction & (1 << 20) != 0 {
+            if (!pre || writeback) && base_register == source {
+                return Ok(false);
+            }
+            self.registers[source] = bus.read16(target, access)? as u32;
+            bus.idle(1);
+        } else {
+            bus.write16(target, self.registers[source] as u16, access)?;
+        }
         if !pre || writeback {
             self.registers[base_register] = updated;
         }
@@ -399,6 +501,8 @@ struct StepOutcome {
 }
 
 struct System {
+    buttons: ButtonState,
+    inputs: VecDeque<InputEvent>,
     rom: Vec<u8>,
     ewram: Vec<u8>,
     iwram: Vec<u8>,
@@ -410,7 +514,9 @@ struct System {
 
 impl System {
     fn new() -> Self {
-        Self {
+        let mut system = Self {
+            buttons: ButtonState::default(),
+            inputs: VecDeque::new(),
             rom: Vec::new(),
             ewram: vec![0; 256 * 1024],
             iwram: vec![0; 32 * 1024],
@@ -418,7 +524,31 @@ impl System {
             vram: vec![0; VRAM_BYTES],
             display: Display::new(),
             cycles: 0,
+        };
+        system.refresh_status();
+        system
+    }
+
+    /// Refreshes read-only register bits from hardware time, even during blank lines.
+    /// Scanline rendering remains separate; IRQ delivery is a later slice.
+    fn refresh_status(&mut self) {
+        let line = (self.cycles / CYCLES_PER_SCANLINE % SCANLINES_PER_FRAME) as u16;
+        let control = u16::from_le_bytes([self.io[4], self.io[5]]) & 0xff38;
+        let flags = u16::from((160..227).contains(&line))
+            | (u16::from(self.cycles % CYCLES_PER_SCANLINE >= HBLANK_FLAG_CYCLE) << 1)
+            | (u16::from(line == control >> 8) << 2);
+        self.io[4..6].copy_from_slice(&(control | flags).to_le_bytes());
+        self.io[6..8].copy_from_slice(&line.to_le_bytes());
+        self.io[0x130..0x132].copy_from_slice(&(!self.buttons.0 & 0x03ff).to_le_bytes());
+    }
+
+    fn read16_impl(&mut self, address: u32, access: Access) -> Result<u16, CoreError> {
+        if address & 1 != 0 {
+            return Err(CoreError::InvalidAccessAlignment { address, width: 2 });
         }
+        self.charge(address, 2, access);
+        let bytes = self.read_bytes(address, 2)?;
+        Ok(u16::from_le_bytes([bytes[0], bytes[1]]))
     }
 
     fn read32_impl(&mut self, address: u32, access: Access) -> Result<u32, CoreError> {
@@ -451,8 +581,13 @@ impl System {
 
         if let Some(range) = range_for(address, IO_START, self.io.len(), 2) {
             let offset = range.start;
-
+            if matches!(offset, 6 | 0x130) {
+                return Ok(());
+            }
             self.io[range].copy_from_slice(&bytes);
+            if offset == 4 {
+                self.refresh_status();
+            }
 
             if offset == 0 {
                 self.display.control = value;
@@ -513,12 +648,24 @@ impl System {
     /// Advances display events before any access changes the state observed by scanout.
     fn advance_time(&mut self, cycles: u64) {
         let target = self.cycles.saturating_add(cycles);
+        while self
+            .inputs
+            .front()
+            .is_some_and(|event| event.cycle.0 <= target)
+        {
+            let event = self.inputs.pop_front().expect("front was present");
+            self.buttons.set(event.button, event.pressed);
+        }
         self.display.synchronize_to(target, &self.vram);
         self.cycles = target;
+        self.refresh_status();
     }
 }
 
 impl CpuBus for System {
+    fn read16(&mut self, address: u32, access: Access) -> Result<u16, CoreError> {
+        self.read16_impl(address, access)
+    }
     fn read32(&mut self, address: u32, access: Access) -> Result<u32, CoreError> {
         self.read32_impl(address, access)
     }
@@ -602,6 +749,54 @@ pub struct Machine {
 }
 
 impl Machine {
+    /// Applies a live host transition at the current instruction boundary.
+    pub fn set_button(&mut self, button: Button, pressed: bool) {
+        self.system.buttons.set(button, pressed);
+        self.system.refresh_status();
+    }
+
+    /// Reports the logical state actually visible to the guest keypad.
+    pub fn button_pressed(&self, button: Button) -> bool {
+        self.system.buttons.pressed(button)
+    }
+    /// Schedules a button transition on an absolute cycle. Events must be ordered;
+    /// equal timestamps retain submission order, and the queue has a fixed bound.
+    pub fn set_button_at(
+        &mut self,
+        cycle: Cycle,
+        button: Button,
+        pressed: bool,
+    ) -> Result<(), CoreError> {
+        let earliest = self
+            .system
+            .inputs
+            .back()
+            .map_or(self.cycles(), |event| event.cycle);
+        if cycle < earliest {
+            return Err(CoreError::InvalidInputTimestamp {
+                requested: cycle,
+                earliest,
+            });
+        }
+        if self.system.inputs.len() >= 1024 {
+            return Err(CoreError::InputQueueFull);
+        }
+        self.system.inputs.push_back(InputEvent {
+            cycle,
+            button,
+            pressed,
+        });
+        self.system.advance_time(0);
+        Ok(())
+    }
+
+    /// Cancels queued transitions and releases hardware keys at the current cycle.
+    /// Used by pause/focus/reset boundaries so an old press cannot reappear later.
+    pub fn release_all_buttons(&mut self) {
+        self.system.inputs.clear();
+        self.system.buttons.release_all();
+        self.system.refresh_status();
+    }
     /// Creates an unloaded machine at the GBA cartridge entry address.
     pub fn new() -> Self {
         Self::default()
@@ -747,6 +942,59 @@ fn range_for(address: u32, start: u32, length: usize, width: usize) -> Option<Ra
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Catches a guest seeing pressed keys at reset or writable hardware status.
+    // Existing tests exercise VRAM and CPU startup, not hardware input reads.
+    #[test]
+    fn keypad_is_active_low_and_hardware_status_is_read_only() {
+        let mut machine = Machine::new();
+        assert_eq!(machine.inspect16(IO_START + 0x130).unwrap(), 0x03ff);
+        let access = Access {
+            kind: AccessKind::Data,
+            sequential: false,
+        };
+        machine
+            .system
+            .write16_impl(IO_START + 0x130, 0, access)
+            .unwrap();
+        machine
+            .system
+            .write16_impl(IO_START + 6, 99, access)
+            .unwrap();
+        assert_eq!(machine.inspect16(IO_START + 0x130).unwrap(), 0x03ff);
+        assert_eq!(machine.inspect16(IO_START + 6).unwrap(), 0);
+    }
+
+    // Catches VBlank polling loops hanging, HBlank flags staying high, and
+    // VCOUNT comparisons using frontend redraws instead of the hardware clock.
+    #[test]
+    fn display_status_tracks_line_blank_and_compare_boundaries() {
+        let mut machine = Machine::new();
+        let access = Access {
+            kind: AccessKind::Data,
+            sequential: false,
+        };
+        machine
+            .system
+            .write16_impl(IO_START + 4, (160 << 8) | 0x38, access)
+            .unwrap();
+        for (cycle, line, flags) in [
+            (960, 0, 0),
+            (1007, 0, 0),
+            (1008, 0, 2),
+            (1232, 1, 0),
+            (160 * 1232, 160, 5),
+            (227 * 1232, 227, 0),
+            (CYCLES_PER_FRAME, 0, 0),
+        ] {
+            machine.system.advance_time(cycle - machine.cycles().0);
+            assert_eq!(machine.inspect16(IO_START + 6).unwrap(), line);
+            assert_eq!(
+                machine.inspect16(IO_START + 4).unwrap(),
+                (160 << 8) | 0x38 | flags
+            );
+        }
+    }
 
     #[test]
     fn guest_stores_are_published_only_after_display_scanout() {

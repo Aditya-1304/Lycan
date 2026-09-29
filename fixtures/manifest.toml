@@ -1,4 +1,4 @@
-version = 1
+version = 2
 
 [[fixture]]
 name = "pixels"
@@ -9,13 +9,53 @@ sha256 = "4fb24cb1f126ac04638a3c5819ecee7f3c4fd0bc2b948e186daa79bbdc9c1a12"
 origin = "Original MIT guest assembly in roms/pixels/pixels.s"
 startup = "cartridge-direct-arm"
 bios_required = false
-terminal_pc = 0x08000200
 mailbox_address = 0x03000000
 completion_id = 0x005a
-result = 1
 max_instructions = 150000
 max_cycles = 3000000
+[fixture.verification]
+kind = "pixels"
+terminal_pc = 0x08000200
+result = 1
 band_height = 20
 colors = [0x001f, 0x03e0, 0x7c00, 0x03ff, 0x7c1f, 0x7fe0, 0x7fff, 0x0000]
 input_events = []
 time_events = []
+
+[[fixture]]
+name = "buttons"
+rom = "../roms/buttons.gba"
+source = "../roms/buttons/buttons.s"
+linker = "../roms/pixels/linker.ld"
+sha256 = "eae58be9de7214f5bfe808970778d3f8ccca5437f97d37ce11986f2f2fe56b6d"
+origin = "Original MIT guest assembly in roms/buttons/buttons.s"
+startup = "cartridge-direct-arm"
+bios_required = false
+mailbox_address = 0x03000000
+completion_id = 0x005b
+max_instructions = 150000
+max_cycles = 2600000
+[fixture.verification]
+kind = "buttons"
+square_size = 16
+color = 0x001f
+# Transitions occur at frame boundaries on the master-clock timeline. Equal-time
+# releases and presses retain their listed order. All events precede the samples.
+input_events = [
+    { cycle = 0, button = "Right", pressed = true },
+    { cycle = 842688, button = "Right", pressed = false },
+    { cycle = 842688, button = "Down", pressed = true },
+    { cycle = 1404480, button = "Down", pressed = false },
+    { cycle = 1685376, button = "Left", pressed = true },
+    { cycle = 1966272, button = "Left", pressed = false },
+    { cycle = 1966272, button = "Up", pressed = true },
+    { cycle = 2247168, button = "Up", pressed = false },
+]
+# VBlank publishes scanout before the guest updates VRAM for the next frame.
+checkpoints = [
+    { frame = 1, x = 113, y = 72, image_x = 112, image_y = 72 },
+    { frame = 3, x = 115, y = 72, image_x = 114, image_y = 72 },
+    { frame = 5, x = 115, y = 74, image_x = 115, image_y = 73 },
+    { frame = 8, x = 114, y = 73, image_x = 114, image_y = 74 },
+    { frame = 9, x = 114, y = 73, image_x = 114, image_y = 73 },
+]

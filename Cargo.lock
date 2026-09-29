@@ -789,6 +789,7 @@ name = "gba-tools"
 version = "0.1.0"
 dependencies = [
  "gba-core",
+ "gba-session",
  "serde",
  "sha2",
  "toml",

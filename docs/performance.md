@@ -75,3 +75,14 @@ Texture submission: mean 0.021 ms | p95 0.100 ms | samples 120
 Core execution: mean 1.085 ms | p95 1.300 ms | samples 120
 Pixel conversion: mean 0.211 ms | p95 0.300 ms | samples 120
 Texture submission: mean 0.032 ms | p95 0.100 ms | samples 120
+
+## Slice 2 verification status
+
+Integer master-clock pacing, deterministic 60/144 Hz host-schedule checks, and
+bounded pause/focus recovery passed. The moving-square headless fixture verified
+all five declared positions and complete framebuffers. Native and WASM compilation
+passed. See [Slice 2 evidence and manual acceptance](slice-2.md).
+
+Live Linux, Chrome, and Brave movement/timing measurements remain pending manual
+verification. Slice 1 measurements above are historical and do not measure the new
+elapsed-time pacing path.

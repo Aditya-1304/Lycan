@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 use gba_core::{CYCLES_PER_FRAME, Cycle, Machine, SCREEN_HEIGHT, SCREEN_WIDTH};
+use gba_session::{Button, Session};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::{
@@ -12,6 +13,12 @@ use std::{
 };
 
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
+
+/// App replay input is checked against the independent frozen manifest below.
+const DEMO_INPUT: &[(Cycle, Button, bool)] = &include!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../roms/buttons/input.rs"
+));
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -32,16 +39,60 @@ struct Fixture {
     origin: String,
     startup: String,
     bios_required: bool,
-    terminal_pc: u32,
     mailbox_address: u32,
     completion_id: u16,
-    result: u16,
     max_instructions: usize,
     max_cycles: u64,
+    verification: Verification,
+}
+
+/// Each fixture declares its own observable completion rather than relying on
+/// an arbitrary guest loop. Moving scenes require bounded checkpoints.
+#[derive(Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+enum Verification {
+    Pixels(Pixels),
+    Buttons(Movement),
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Pixels {
+    terminal_pc: u32,
+    result: u16,
     band_height: usize,
     colors: Vec<u16>,
     input_events: Vec<String>,
     time_events: Vec<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Movement {
+    square_size: usize,
+    color: u16,
+    input_events: Vec<InputEvent>,
+    checkpoints: Vec<Checkpoint>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct InputEvent {
+    cycle: u64,
+    button: String,
+    pressed: bool,
+}
+
+/// RAM reports current guest state; scanout contains the preceding frame's
+/// drawing because the guest changes VRAM after publication at VBlank.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Checkpoint {
+    frame: u16,
+    x: u16,
+    y: u16,
+    image_x: usize,
+    image_y: usize,
 }
 
 fn main() {
@@ -68,24 +119,67 @@ fn hash(bytes: &[u8]) -> String {
 
 fn manifest(path: &Path) -> Result<Manifest> {
     let manifest: Manifest = toml::from_str(&fs::read_to_string(path)?)?;
-    if manifest.version != 1 || manifest.fixture.is_empty() {
+    if manifest.version != 2 || manifest.fixture.is_empty() {
         return Err(fail("unsupported or empty fixture manifest"));
     }
     for fixture in &manifest.fixture {
         if fixture.startup != "cartridge-direct-arm"
             || fixture.bios_required
-            || !fixture.input_events.is_empty()
-            || !fixture.time_events.is_empty()
-            || fixture.band_height == 0
-            || fixture.band_height * fixture.colors.len() != SCREEN_HEIGHT
             || fixture.max_instructions == 0
             || fixture.max_cycles == 0
             || fixture.origin.is_empty()
         {
             return Err(fail(format!(
-                "invalid Slice 1 fixture configuration: {}",
+                "invalid fixture configuration: {}",
                 fixture.name
             )));
+        }
+        match &fixture.verification {
+            Verification::Pixels(expected) => {
+                if !expected.input_events.is_empty()
+                    || !expected.time_events.is_empty()
+                    || expected.band_height == 0
+                    || expected.band_height.checked_mul(expected.colors.len())
+                        != Some(SCREEN_HEIGHT)
+                {
+                    return Err(fail("invalid pixels expectation"));
+                }
+            }
+            Verification::Buttons(expected) => {
+                if expected.square_size == 0
+                    || expected.square_size > SCREEN_HEIGHT
+                    || expected.color == 0
+                    || expected.color > 0x7fff
+                    || expected.checkpoints.is_empty()
+                    || expected
+                        .checkpoints
+                        .windows(2)
+                        .any(|pair| pair[0].frame >= pair[1].frame)
+                    || expected
+                        .input_events
+                        .windows(2)
+                        .any(|pair| pair[0].cycle > pair[1].cycle)
+                {
+                    return Err(fail("invalid movement script"));
+                }
+                for checkpoint in &expected.checkpoints {
+                    if checkpoint.frame == 0
+                        || u64::from(checkpoint.frame) * CYCLES_PER_FRAME > fixture.max_cycles
+                        || checkpoint.image_x + expected.square_size > SCREEN_WIDTH
+                        || checkpoint.image_y + expected.square_size > SCREEN_HEIGHT
+                        || usize::from(checkpoint.x) + expected.square_size > SCREEN_WIDTH
+                        || usize::from(checkpoint.y) + expected.square_size > SCREEN_HEIGHT
+                    {
+                        return Err(fail("movement checkpoint outside fixture bounds"));
+                    }
+                }
+                for event in &expected.input_events {
+                    button(&event.button)?;
+                    if event.cycle > fixture.max_cycles {
+                        return Err(fail("input event exceeds fixture cycle limit"));
+                    }
+                }
+            }
         }
     }
     Ok(manifest)
@@ -170,17 +264,25 @@ fn load(fixture: &Fixture, directory: &Path) -> Result<Vec<u8>> {
 }
 
 /// Requires the exact executed terminal PC and both diagnostic RAM values.
+fn pixels(fixture: &Fixture) -> Result<&Pixels> {
+    match &fixture.verification {
+        Verification::Pixels(expected) => Ok(expected),
+        Verification::Buttons(_) => Err(fail("expected a terminal pixels fixture")),
+    }
+}
+
 fn execute(fixture: &Fixture, bytes: &[u8]) -> Result<Machine> {
+    let expected = pixels(fixture)?;
     let mut machine = Machine::new();
     machine.load_rom(bytes)?;
     machine.run_until_pc(
-        fixture.terminal_pc,
+        expected.terminal_pc,
         fixture.max_instructions,
         Cycle(fixture.max_cycles),
     )?;
     let id = machine.inspect16(fixture.mailbox_address)?;
     let result = machine.inspect16(fixture.mailbox_address + 2)?;
-    if id != fixture.completion_id || result != fixture.result {
+    if id != fixture.completion_id || result != expected.result {
         return Err(fail(format!(
             "{} completion mailbox mismatch: id={id:#06x}, result={result:#06x}",
             fixture.name
@@ -196,11 +298,12 @@ fn execute(fixture: &Fixture, bytes: &[u8]) -> Result<Machine> {
 }
 
 fn check_image(fixture: &Fixture, machine: &Machine) -> Result<()> {
+    let expected = pixels(fixture)?;
     if machine.framebuffer_generation() == 0 {
         return Err(fail("guest produced no completed frame"));
     }
     for (index, &pixel) in machine.framebuffer().iter().enumerate() {
-        let expected = fixture.colors[(index / SCREEN_WIDTH) / fixture.band_height];
+        let expected = expected.colors[(index / SCREEN_WIDTH) / expected.band_height];
         if pixel != expected {
             return Err(fail(format!(
                 "{} pixel ({}, {}) expected {expected:#06x}, got {pixel:#06x}",
@@ -239,15 +342,113 @@ fn prove_store_effect(fixture: &Fixture, bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 
-fn capture(path: &Path, machine: &Machine) -> Result<()> {
+fn capture(path: &Path, framebuffer: &[u16]) -> Result<()> {
     let mut output = format!("P6\n{SCREEN_WIDTH} {SCREEN_HEIGHT}\n255\n").into_bytes();
-    for &pixel in machine.framebuffer() {
+    for &pixel in framebuffer {
         for shift in [0, 5, 10] {
             let value = ((pixel >> shift) & 31) as u8;
             output.push((value << 3) | (value >> 2));
         }
     }
     fs::write(path, output)?;
+    Ok(())
+}
+
+/// Resolves fixture input names to the same logical buttons used by the app.
+fn button(name: &str) -> Result<Button> {
+    match name {
+        "A" => Ok(Button::A),
+        "B" => Ok(Button::B),
+        "Select" => Ok(Button::Select),
+        "Start" => Ok(Button::Start),
+        "Right" => Ok(Button::Right),
+        "Left" => Ok(Button::Left),
+        "Up" => Ok(Button::Up),
+        "Down" => Ok(Button::Down),
+        "R" => Ok(Button::R),
+        "L" => Ok(Button::L),
+        _ => Err(fail(format!("unknown logical button: {name}"))),
+    }
+}
+
+/// Executes the original square guest through the shared session. Every checkpoint
+/// verifies a declared mailbox and all pixels, including erased square positions.
+fn run_movement(
+    fixture: &Fixture,
+    expected: &Movement,
+    bytes: &[u8],
+    capture_path: Option<&str>,
+) -> Result<()> {
+    let script: Vec<_> = expected
+        .input_events
+        .iter()
+        .map(|event| Ok((Cycle(event.cycle), button(&event.button)?, event.pressed)))
+        .collect::<Result<_>>()?;
+    if script.as_slice() != DEMO_INPUT {
+        return Err(fail(
+            "app replay input differs from the frozen fixture script",
+        ));
+    }
+    let mut session = Session::new();
+    session.load_rom(bytes)?;
+    for event in &expected.input_events {
+        session.set_button_at(Cycle(event.cycle), button(&event.button)?, event.pressed)?;
+    }
+    let mut frame = 0;
+    for checkpoint in &expected.checkpoints {
+        while frame < checkpoint.frame {
+            session.advance_frame_with_budget(fixture.max_instructions)?;
+            frame += 1;
+            if session.cycles().0 > fixture.max_cycles {
+                return Err(fail("movement fixture exceeded its cycle limit"));
+            }
+        }
+        let actual = [
+            session.inspect16(fixture.mailbox_address)?,
+            session.inspect16(fixture.mailbox_address + 2)?,
+            session.inspect16(fixture.mailbox_address + 4)?,
+            session.inspect16(fixture.mailbox_address + 6)?,
+        ];
+        let wanted = [
+            fixture.completion_id,
+            checkpoint.x,
+            checkpoint.y,
+            checkpoint.frame,
+        ];
+        if actual != wanted || session.framebuffer_generation() != u64::from(checkpoint.frame) {
+            return Err(fail(format!(
+                "{} frame {} mailbox {actual:?}, expected {wanted:?}",
+                fixture.name, checkpoint.frame
+            )));
+        }
+        for (index, &pixel) in session.framebuffer().iter().enumerate() {
+            let x = index % SCREEN_WIDTH;
+            let y = index / SCREEN_WIDTH;
+            let inside = (checkpoint.image_x..checkpoint.image_x + expected.square_size)
+                .contains(&x)
+                && (checkpoint.image_y..checkpoint.image_y + expected.square_size).contains(&y);
+            let wanted = if inside { expected.color } else { 0 };
+            if pixel != wanted {
+                return Err(fail(format!(
+                    "{} frame {} pixel ({x},{y}) expected {wanted:#06x}, got {pixel:#06x}",
+                    fixture.name, checkpoint.frame
+                )));
+            }
+        }
+        println!(
+            "PASS {} frame={} guest=({},{}) scanout=({},{}) pixels={}",
+            fixture.name,
+            checkpoint.frame,
+            checkpoint.x,
+            checkpoint.y,
+            checkpoint.image_x,
+            checkpoint.image_y,
+            SCREEN_WIDTH * SCREEN_HEIGHT
+        );
+    }
+    if let Some(path) = capture_path {
+        capture(Path::new(path), session.framebuffer())?;
+    }
     Ok(())
 }
 
@@ -286,6 +487,19 @@ fn run() -> Result<()> {
     let manifest = manifest(&path)?;
     for fixture in &manifest.fixture {
         let bytes = load(fixture, path.parent().unwrap())?;
+        if let Verification::Buttons(expected) = &fixture.verification {
+            if bench {
+                continue;
+            }
+            run_movement(
+                fixture,
+                expected,
+                &bytes,
+                option(&args, "--capture")?.as_deref(),
+            )?;
+            continue;
+        }
+        let expected = pixels(fixture)?;
         let start = Instant::now();
         let mut machine = execute(fixture, &bytes)?;
         let boot_ms = start.elapsed().as_secs_f64() * 1000.0;
@@ -294,12 +508,12 @@ fn run() -> Result<()> {
             "PASS {} pixels={} terminal={:#010x} cycles={} generation={} execution_ms={boot_ms:.3}",
             fixture.name,
             SCREEN_WIDTH * SCREEN_HEIGHT,
-            fixture.terminal_pc,
+            expected.terminal_pc,
             machine.cycles().0,
             machine.framebuffer_generation()
         );
         if let Some(path) = option(&args, "--capture")? {
-            capture(Path::new(&path), &machine)?;
+            capture(Path::new(&path), machine.framebuffer())?;
         }
         if bench {
             let frames: usize = option(&args, "--frames")?
