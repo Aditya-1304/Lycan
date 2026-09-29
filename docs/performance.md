@@ -81,8 +81,55 @@ Texture submission: mean 0.032 ms | p95 0.100 ms | samples 120
 Integer master-clock pacing, deterministic 60/144 Hz host-schedule checks, and
 bounded pause/focus recovery passed. The moving-square headless fixture verified
 all five declared positions and complete framebuffers. Native and WASM compilation
-passed. See [Slice 2 evidence and manual acceptance](slice-2.md).
+passed. See [button movement evidence and manual acceptance](button_movement.md).
 
 Live Linux, Chrome, and Brave movement/timing measurements remain pending manual
 verification. Slice 1 measurements above are historical and do not measure the new
 elapsed-time pacing path.
+
+### Headless
+
+- Fixture: `buttons.gba`
+- SHA-256: `eae58be9de7214f5bfe808970778d3f8ccca5437f97d37ce11986f2f2fe56b6d`
+- Active-low KEYINPUT test: passed
+- VCOUNT/DISPSTAT phase tests: passed
+- Moving-square checkpoints: passed
+- Full framebuffer comparisons: passed
+- 60 Hz / 144 Hz deterministic host-schedule test: passed
+- Pause/focus re-anchor test: passed
+- Replay deadline test: passed
+- Final replay position: `(114, 73)`
+
+### Native Linux
+
+- Square movement visually verified: yes
+- Boundary clamping verified: yes
+- Pause/resume without catch-up: yes
+- Focus-loss input release: yes
+- Reset: yes
+- Replay final position `(114, 73)`: yes
+Core execution: mean 1.828 ms | p95 2.369 ms | samples 120
+Pixel conversion: mean 0.128 ms | p95 0.168 ms | samples 120
+Texture submission: mean 0.026 ms | p95 0.036 ms | samples 120
+
+### Google Chrome
+
+- Square movement visually verified: yes
+- Pause/resume without catch-up: yes
+- Focus/tab-loss input release: yes
+- Hidden-tab restore without catch-up: yes
+- Replay final position `(114, 73)`: yes
+Core execution: mean 2.359 ms | p95 2.900 ms | samples 120
+Pixel conversion: mean 0.230 ms | p95 0.300 ms | samples 120
+Texture submission: mean 0.031 ms | p95 0.100 ms | samples 120
+
+### Brave
+
+- Square movement visually verified: yes
+- Pause/resume without catch-up: yes
+- Focus/tab-loss input release: yes
+- Hidden-tab restore without catch-up: yes
+- Replay final position `(114, 73)`: yes
+Core execution: mean 2.463 ms | p95 3.100 ms | samples 120
+Pixel conversion: mean 0.243 ms | p95 0.300 ms | samples 120
+Texture submission: mean 0.031 ms | p95 0.100 ms | samples 120
