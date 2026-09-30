@@ -363,8 +363,10 @@ impl Cpu {
         }
     }
 
-    /// Executes the ALU forms required by the bitmap guests and hello text
-    /// routines. Register-controlled shifts and PC writes remain unsupported.
+    /// Executes immediate and immediate-shifted ARM ALU operations. Arithmetic
+    /// uses one wide addition rule for carry and signed overflow; logical
+    /// operations preserve V and take C from the barrel shifter. Register-
+    /// controlled shifts and PC writes remain outside the current guest scope.
     fn execute_data_processing(&mut self, address: u32, instruction: u32) -> bool {
         if instruction & 0x0C00_0000 != 0
             || (instruction & (1 << 25) == 0 && instruction & (1 << 4) != 0)
@@ -373,9 +375,7 @@ impl Cpu {
         }
         let opcode = (instruction >> 21) & 15;
         let set_flags = instruction & (1 << 20) != 0;
-        if !matches!(opcode, 0 | 2 | 4 | 8 | 10 | 12 | 13)
-            || (matches!(opcode, 8 | 10) && !set_flags)
-        {
+        if matches!(opcode, 8..=11) && !set_flags {
             return false;
         }
         let destination = ((instruction >> 12) & 15) as usize;
@@ -408,12 +408,37 @@ impl Cpu {
             };
             self.shift_immediate(value, (instruction >> 5) & 3, (instruction >> 7) & 31)
         };
-        let result = match opcode {
-            2 | 10 => lhs.wrapping_sub(operand),
-            4 => lhs.wrapping_add(operand),
-            0 | 8 => lhs & operand,
-            12 => lhs | operand,
-            _ => operand,
+        let carry_in = u32::from(self.cpsr & CPSR_C != 0);
+        let arithmetic = match opcode {
+            2 | 10 => Some((lhs, !operand, 1)),
+            3 => Some((operand, !lhs, 1)),
+            4 | 11 => Some((lhs, operand, 0)),
+            5 => Some((lhs, operand, carry_in)),
+            6 => Some((lhs, !operand, carry_in)),
+            7 => Some((operand, !lhs, carry_in)),
+            _ => None,
+        };
+        let (result, carry, overflow) = if let Some((a, b, carry)) = arithmetic {
+            // Complementing the subtrahend makes carry mean "no borrow" for
+            // subtraction, including SBC/RSC's inverted carry-in borrow.
+            let wide = u64::from(a) + u64::from(b) + u64::from(carry);
+            let result = wide as u32;
+            (
+                result,
+                wide > u64::from(u32::MAX),
+                (!(a ^ b) & (a ^ result)) & 0x8000_0000 != 0,
+            )
+        } else {
+            let result = match opcode {
+                0 | 8 => lhs & operand,
+                1 | 9 => lhs ^ operand,
+                12 => lhs | operand,
+                13 => operand,
+                14 => lhs & !operand,
+                15 => !operand,
+                _ => unreachable!("all arithmetic opcodes handled above"),
+            };
+            (result, shifter_carry, false)
         };
         if set_flags {
             self.cpsr &= !(CPSR_N | CPSR_Z);
@@ -423,19 +448,8 @@ impl Cpu {
             if result == 0 {
                 self.cpsr |= CPSR_Z;
             }
-            if matches!(opcode, 2 | 4 | 10) {
+            if arithmetic.is_some() {
                 self.cpsr &= !(CPSR_C | CPSR_V);
-                let (carry, overflow) = if opcode == 4 {
-                    (
-                        lhs as u64 + operand as u64 > u32::MAX as u64,
-                        (!(lhs ^ operand) & (lhs ^ result)) & 0x8000_0000 != 0,
-                    )
-                } else {
-                    (
-                        lhs >= operand,
-                        ((lhs ^ operand) & (lhs ^ result)) & 0x8000_0000 != 0,
-                    )
-                };
                 if carry {
                     self.cpsr |= CPSR_C;
                 }
@@ -446,7 +460,7 @@ impl Cpu {
                 self.cpsr = (self.cpsr & !CPSR_C) | if shifter_carry { CPSR_C } else { 0 };
             }
         }
-        if !matches!(opcode, 8 | 10) {
+        if !matches!(opcode, 8..=11) {
             self.registers[destination] = result;
         }
         true

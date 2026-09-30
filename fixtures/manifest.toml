@@ -106,3 +106,25 @@ max_cycles = 1000000
 kind = "hello"
 terminal_pc = 0x08000160
 framebuffer_sha256 = "56cd131fb3915fe7e410be228a8c09e99132064799f148583636ca75745bedf7"
+
+[[fixture]]
+name = "calculations"
+rom = "../roms/calculations.gba"
+source = "../roms/calculations/calculations.s"
+linker = "../roms/pixels/linker.ld"
+sha256 = "8ef128a96363775c3a6b0b3aad2997edfa48e43ba95a920121e9b7a04b4604f5"
+origin = "Original MIT guest assembly in roms/calculations/calculations.s"
+startup = "cartridge-direct-arm"
+bios_required = false
+mailbox_address = 0x03000000
+completion_id = 0x005d
+max_instructions = 200000
+max_cycles = 3000000
+[fixture.verification]
+kind = "calculations"
+terminal_pc = 0x08001000
+result = 1
+band_height = 10
+colors = [0x03e0, 0x03e0, 0x03e0, 0x03e0, 0x03e0, 0x03e0, 0x03e0, 0x03e0, 0x03e0, 0x03e0, 0x03e0, 0x03e0, 0x03e0, 0x03e0, 0x03e0, 0x03e0]
+input_events = []
+time_events = []

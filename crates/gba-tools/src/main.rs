@@ -52,6 +52,7 @@ struct Fixture {
 #[serde(tag = "kind", rename_all = "kebab-case")]
 enum Verification {
     Pixels(Pixels),
+    Calculations(Pixels),
     Buttons(Movement),
     Palette(Palette),
     Hello(Hello),
@@ -190,7 +191,7 @@ fn manifest(path: &Path) -> Result<Manifest> {
                     return Err(fail("invalid palette checkpoint"));
                 }
             }
-            Verification::Pixels(expected) => {
+            Verification::Pixels(expected) | Verification::Calculations(expected) => {
                 if !expected.input_events.is_empty()
                     || !expected.time_events.is_empty()
                     || expected.band_height == 0
@@ -331,7 +332,7 @@ fn load(fixture: &Fixture, directory: &Path) -> Result<Vec<u8>> {
 /// Requires the exact executed terminal PC and both diagnostic RAM values.
 fn pixels(fixture: &Fixture) -> Result<&Pixels> {
     match &fixture.verification {
-        Verification::Pixels(expected) => Ok(expected),
+        Verification::Pixels(expected) | Verification::Calculations(expected) => Ok(expected),
         Verification::Buttons(_) | Verification::Palette(_) | Verification::Hello(_) => {
             Err(fail("expected a terminal pixels fixture"))
         }
@@ -349,11 +350,25 @@ fn execute(fixture: &Fixture, bytes: &[u8]) -> Result<Machine> {
     )?;
     let id = machine.inspect16(fixture.mailbox_address)?;
     let result = machine.inspect16(fixture.mailbox_address + 2)?;
+    // Diagnostic guests retain the earliest failing case independently of the
+    // overall completion result, so a failure identifies the calculation.
+    if matches!(fixture.verification, Verification::Calculations(_)) {
+        let first_failure = machine.inspect16(fixture.mailbox_address + 4)?;
+        if first_failure != 0 {
+            return Err(fail(format!(
+                "{} first failing case={first_failure}",
+                fixture.name
+            )));
+        }
+    }
     if id != fixture.completion_id || result != expected.result {
         return Err(fail(format!(
             "{} completion mailbox mismatch: id={id:#06x}, result={result:#06x}",
             fixture.name
         )));
+    }
+    if matches!(fixture.verification, Verification::Calculations(_)) {
+        println!("PASS calculations mailbox id={id:#06x} result={result} first_failing_case=0");
     }
     // Two frame periods guarantee a complete scanout after the last guest store.
     let target = Cycle(machine.cycles().0 + 2 * CYCLES_PER_FRAME);
@@ -722,7 +737,7 @@ fn run() -> Result<()> {
                 "BENCH {} frames={frames} core_mean_ms={mean:.3} core_p95_ms={p95:.3} upload=not-applicable-headless",
                 fixture.name
             );
-        } else {
+        } else if matches!(fixture.verification, Verification::Pixels(_)) {
             prove_store_effect(fixture, &bytes)?;
         }
     }
