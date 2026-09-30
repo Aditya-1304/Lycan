@@ -8,7 +8,7 @@ use std::time::Duration;
 
 pub use gba_core::{CYCLES_PER_FRAME, Cycle, GBA_CLOCK_HZ, PCM_RATE, SCREEN_HEIGHT, SCREEN_WIDTH};
 
-pub use gba_core::{Button, ButtonState};
+pub use gba_core::{BackupSelection, BackupType, Button, ButtonState};
 
 pub const BUTTONS: [Button; 10] = [
     Button::A,
@@ -76,13 +76,27 @@ impl Session {
 
     /// Loads guest bytes into the owned machine and resets its execution state.
     pub fn load_rom(&mut self, rom: &[u8]) -> Result<(), CoreError> {
-        self.machine.load_rom(rom)?;
+        self.load_rom_with_backup(rom, None)
+    }
+
+    /// Shares the core selection path with frontends using an explicit hardware override.
+    pub fn load_rom_with_backup(
+        &mut self,
+        rom: &[u8],
+        manual_override: Option<BackupType>,
+    ) -> Result<(), CoreError> {
+        self.machine.load_rom_with_backup(rom, manual_override)?;
         self.machine.release_all_buttons();
         self.paused = false;
         self.loaded = true;
         self.frame_target = Cycle(0);
         self.reanchor();
         Ok(())
+    }
+
+    /// Exposes cartridge identification independently of emulation and persistence.
+    pub fn backup_selection(&self) -> &BackupSelection {
+        self.machine.backup_selection()
     }
 
     /// Enables controlled diagnostic services after loading a test ROM. Reset

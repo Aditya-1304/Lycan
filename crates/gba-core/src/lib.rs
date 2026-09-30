@@ -1,5 +1,8 @@
 #![forbid(unsafe_code)]
 
+mod backup;
+pub use backup::{BackupDetection, BackupSelection, BackupType, detect_backup};
+
 mod audio;
 pub use audio::PCM_RATE;
 
@@ -2285,6 +2288,7 @@ impl Display {
 
 /// Owns the CPU, memory, display, and cycle state for one emulated machine.
 pub struct Machine {
+    backup: BackupSelection,
     cpu: Cpu,
     system: System,
     executed_instructions: usize,
@@ -2347,6 +2351,15 @@ impl Machine {
 
     /// Loads a byte-based cartridge image and resets execution to its entry point.
     pub fn load_rom(&mut self, rom: &[u8]) -> Result<(), CoreError> {
+        self.load_rom_with_backup(rom, None)
+    }
+
+    /// Loads a cartridge with a typed, validated override; failed loads retain state.
+    pub fn load_rom_with_backup(
+        &mut self,
+        rom: &[u8],
+        manual_override: Option<BackupType>,
+    ) -> Result<(), CoreError> {
         if rom.is_empty() {
             return Err(CoreError::EmptyRom);
         }
@@ -2358,8 +2371,17 @@ impl Machine {
         }
 
         *self = Self::new();
+        self.backup = BackupSelection {
+            detection: detect_backup(rom),
+            manual_override,
+        };
         self.system.rom.extend_from_slice(rom);
         Ok(())
+    }
+
+    /// Reports cartridge evidence and the effective save-hardware selection.
+    pub fn backup_selection(&self) -> &BackupSelection {
+        &self.backup
     }
 
     /// Enables the original SWI-division and IRQ-vector firmware for a controlled diagnostic
@@ -2551,8 +2573,10 @@ impl Machine {
     pub fn reset(&mut self) {
         let rom = std::mem::take(&mut self.system.rom);
         let firmware = self.system.test_firmware;
+        let backup = self.backup.clone();
         *self = Self::new();
         self.system.rom = rom;
+        self.backup = backup;
         if firmware {
             self.enable_test_firmware();
         }
@@ -2562,6 +2586,7 @@ impl Machine {
 impl Default for Machine {
     fn default() -> Self {
         Self {
+            backup: BackupSelection::default(),
             cpu: Cpu::new(),
             system: System::new(),
             executed_instructions: 0,
