@@ -992,9 +992,11 @@ All six plan items are implemented: centralized load selection; four hardware
 families and aliases; separation from protocols; validated overrides; recognized,
 unknown, conflicting and forced fixtures with diagnostics; no title patches.
 Native/WASM deterministic load behavior is verified by executable contracts.
-Native and Chrome/Brave UI checks remain **not verified**. ROM-load wall-clock
-milliseconds, sample counts and browser timings are **not measured**; no existing
-user timing entries were changed. Full manual acceptance remains pending.
+User-provided native, Chrome and Brave readouts now verify the individual
+load/detection cases recorded below and provide 120-sample runtime timings.
+ROM-load latency remains **not measured**; these execution/conversion/submission
+timings do not measure loading. Full manual acceptance remains pending for the
+unrecorded fixture and override/lifecycle checks.
 
 Reproduce automated evidence:
 
@@ -1011,7 +1013,7 @@ env -u NO_COLOR trunk --config web/Trunk.toml build --release
 
 ### Manual native / Chrome / Brave checks
 
-Native command (UI check pending):
+Native command (remaining UI checks pending):
 
 ```bash
 cd /home/aditya/Projects/GBA/gba-rs
@@ -1036,3 +1038,68 @@ env -u NO_COLOR trunk --config web/Trunk.toml serve --release
 4. Select **Auto detect**, reload `override.gba`, and confirm Eeprom with no
    override. Force **None** and reload to confirm explicit no-save hardware.
 5. Record native/Chrome/Brave results and any manually measured load timings.
+
+### ROM picker follow-up (2026-09-30)
+
+The shared app now has a **Load ROM** button at the start of the toolbar. It uses
+pinned rfd 0.17.2 asynchronous dialogs, as specified by the plan's file-selection
+stack. Native uses rfd's default XDG Portal/Zenity route and a worker thread;
+WASM uses its local asynchronous executor. File bytes enter the existing loader,
+including backup detection, the chosen override and controlled diagnostic firmware
+selection. Drag-and-drop remains available. Cancelling does not replace the
+cartridge, read errors are reported, and request generations discard stale results
+when another scene or file is loaded. Opening the picker disables its button until
+completion or a superseding load.
+
+Workspace tests: all 22 passed. Native/WASM app checks and strict all-target
+workspace Clippy passed. Native and browser release builds passed. Formatting and
+diff whitespace checks passed. No new tests were added for the dialog UI;
+Individual successful loads are recorded below. The readouts do not identify
+whether picker or drag/drop was used. Supported Linux portal and Zenity fallback
+behavior, picker cancellation, drag/drop and replacement during outstanding reads
+remain manual checks. Picker latency is not measured; existing user timings are
+preserved.
+
+Use the native/browser commands above. Click **Load ROM**, choose
+`roms/backup/sram.gba` (confirm the browser dialog if prompted), and expect
+`Loaded sram.gba` with `Some(Sram)` / `Identified(Sram)` diagnostics. Repeat the
+backup table and override/reset checks using the button. Also cancel a picker and
+confirm the old cartridge remains loaded and the button becomes available again.
+Confirm `pixels.gba` displays its bands through both picker and drag/drop.
+
+
+### User-recorded native / Chrome / Brave results (2026-09-30)
+
+The user reports correct ROM identification and black output for the backup
+fixtures. Black output is expected: these cartridges loop without drawing a scene.
+The following pasted readouts establish these specific automatic-load cases;
+manual coverage of every other fixture and override/reset behavior is not recorded.
+
+| Target | Loaded cartridge | Selected hardware | Detection | Override | Result |
+| --- | --- | --- | --- | --- | --- |
+| Native | eeprom.gba | Some(Eeprom) | Identified(Eeprom) | None | Expected identification |
+| Chrome | sram.gba | Some(Sram) | Identified(Sram) | None | Expected identification |
+| Brave | malformed.gba | None | Unknown | None | Expected unresolved result; explicit message displayed |
+
+| Runtime metric | Native: eeprom.gba | Chrome: sram.gba | Brave: malformed.gba |
+| --- | --- | --- | --- |
+| Core execution mean / p95 | 3.689 / 5.246 ms | 5.635 / 6.900 ms | 5.503 / 6.700 ms |
+| Pixel conversion mean / p95 | 0.093 / 0.131 ms | 0.183 / 0.300 ms | 0.162 / 0.300 ms |
+| Texture submission mean / p95 | 0.023 / 0.034 ms | 0.030 / 0.100 ms | 0.033 / 0.100 ms |
+| Samples per timing metric | 120 | 120 | 120 |
+| Output rate / browser state | 48,000 Hz | 48,000 Hz / running | 48,000 Hz / running |
+| Audio queue current / maximum / capacity | 65.9 / 80.0 / 80 ms | 68.8 / 80.0 / 80 ms | 48.0 / 66.3 / 80 ms |
+| Device underrun frames | 0 | 0 | 0 |
+| Device overflow frames | 250 | 306 | 0 |
+| Device output frames | 1,909,760 | 332,800 | 813,568 |
+| Device errors | 0 | not recorded | not recorded |
+| Core PCM rate | 32,768 Hz | 32,768 Hz | 32,768 Hz |
+| Core PCM produced | 926,395 | 437,760 | 616,749 |
+| Core staging drops / empty FIFO | 0 / 0 | 0 / 0 | 0 / 0 |
+
+These are runtime snapshots from different cartridges, not ROM-load benchmarks
+or controlled cross-platform comparisons. Capture duration, browser versions,
+host/device details and counter reset history were not recorded. Native and Chrome
+show nonzero host overflow; its cause and recurrence cannot be determined from
+these readouts. This does not change the observed backup-selection results.
+The fixtures do not exercise save protocols, persistence or audible PCM behavior.
