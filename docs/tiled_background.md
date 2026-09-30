@@ -1,6 +1,7 @@
 # Mode-0 tiled background
 
-The shared native/WASM application starts with `tiled.gba`. Arrow keys change
+Select **Load tiled demo** in the shared native/WASM application (which now
+starts with the sprite scene). Arrow keys change
 BG0 scroll by two pixels once per VBlank. Both coordinates wrap modulo 512.
 The original MIT guest initializes two asymmetric 4bpp tiles, four palette
 banks, and four 32×32 screen blocks. Alternating map entries flip horizontally
@@ -11,14 +12,14 @@ updates guest scroll registers or generates the displayed scene.
 
 | Slice 8 requirement | Implementation and evidence |
 | --- | --- |
-| Replace bitmap scene with button-controlled mode 0 | Default tiled scene; Load tiled demo and Replay tiled input on Linux/WASM |
+| Replace bitmap scene with button-controlled mode 0 | Load tiled demo and Replay tiled input on Linux/WASM; current app default is the sprite scene |
 | Tile/palette/map interpretation, dimensions, scrolling, wrapping | Scanline register snapshots; text tile lookup, palette banks, flips, transparency, screen-block addressing and modulo dimensions; 512×512 scene verified completely |
 | Guest updates scroll once per frame | VBlank-edge loop; frozen mailbox update counts and BG0HOFS/BG0VOFS checked at six checkpoints |
 | Scripted scroll/wrap captures | Each checkpoint compares all 38,400 pixels with an independent world-coordinate oracle; captures emitted as PPM |
 | Try gba-tests stripes.gba | Pinned upstream identity, source-defined idle instruction at 0x08000140, all 38,400 alternating-stripe pixels pass |
 | Earlier bitmap programs still work | Full existing fixture suite passes, including bitmap modes 3/4 and hello |
 | Profile scanline drawing before caches | Callgrind source profile of optimized code obtained; no tile caches introduced |
-| Native/Chrome/Brave runtime acceptance | User-performed visual checks and reference-device measurements pending |
+| Native/Chrome/Brave runtime acceptance | User-performed visual checks pending; recorded app timings are in performance.md |
 
 The renderer also interprets the standard text-background sizes and 8bpp
 palette addressing, and composites enabled text backgrounds by priority.
@@ -84,7 +85,7 @@ made. Instrumented benchmark timing must not be entered as real performance.
 Run from the worktree:
 
 ```sh
-cd /home/aditya/Projects/GBA/gba-rs
+# Run from the repository root.
 mkdir -p /tmp/gba-tiled-results
 cargo run --locked -p gba-tools -- build-fixtures
 cargo test --locked -p gba-core -p gba-session
@@ -122,7 +123,7 @@ cargo run --locked -p gba-app --release
 ```
 
 For an automatic native viewport capture plus a companion text file containing
-120 Performance samples, run this separately and leave the default tiled scene
+120 Performance samples, run this separately, select **Load tiled demo**, and leave that scene
 playing and focused until the app closes:
 
 ```sh

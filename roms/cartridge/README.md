@@ -59,12 +59,29 @@ Run from the repository root:
 cargo run --locked -p gba-tools -- build-fixtures
 cargo run --locked -p gba-tools --release -- fixtures run
 python3 roms/cartridge/verify_wasm.py
+python3 roms/cartridge/verify_wasm.py --diagnostics
 ```
 
-The WASM verifier requires Node, Rust, and the `wasm32-unknown-unknown` target.
+The WASM verifier requires Python 3.11+, Node 26.10.0, the pinned Rust toolchain,
+and the `wasm32-unknown-unknown` target.
 It executes the same core library used by the browser app and uses the manifest
 as its expected-result source. It checks all intervals, total execution bounds,
 the terminal PC, and every mailbox result. It does not exercise browser UI.
-Earlier ARM calculations/copy and the ARM/Thumb counter remain in the normal
-fixture run. Upstream `arm.gba` and `thumb.gba` are absent in this checkout and
-belong to the later full-diagnostics work.
+`verify_wasm.py` builds the production `gba-core` rlib for WASM, links the small
+`wasm_harness.rs` bridge, and runs `verify_wasm.mjs` in Node. The bridge owns one
+machine across all 24 intervals; every marker call uses the remaining total
+instruction budget and absolute cycle limit. Rust failures trap WASM and Node
+assertion failures return a nonzero status. Expectations are parsed directly
+from `fixtures/manifest.toml`; none are duplicated in the bridge.
+
+The optional `--diagnostics` check additionally executes the pinned ARM, Thumb,
+services and memory guests in WASM. It verifies terminal opcode, firmware/ROM
+hashes, CPU status and result registers, shared execution limits, and the frozen
+success-screen digest after complete scanout where the manifest declares one.
+CI runs this extended command. It strengthens cross-target guest verification;
+Node execution does not establish Chrome/Brave rendering or interaction acceptance.
+
+Earlier calculations/copy, the ARM/Thumb counter, complete upstream ARM/Thumb
+diagnostics, tiled/stripes scenes, sprites and memory diagnostics remain in the
+normal fixture run. See [the closeout record](../../docs/verification/slices_0_9.md)
+for runtime results and the remaining user-performed platform checks.

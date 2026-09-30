@@ -122,7 +122,7 @@ Profiled timings must not be used as reference-device elapsed-time measurements.
 ## Commands for verification and manual measurements
 
 ```sh
-cd /home/aditya/Projects/GBA/gba-rs
+# Run from the repository root.
 mkdir -p /tmp/gba-sprite-results
 cargo run --locked -p gba-tools -- build-fixtures
 cargo test --locked -p gba-core -p gba-session

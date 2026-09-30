@@ -75,7 +75,8 @@ verify the value stops, then Reset and verify the bar clears. Repeat short
 holds separated by releases, and verify pause/resume and focus loss do not
 leave A held. Perform the browser checks in both Chrome and Brave.
 
-This implements the counter bridge only. Full diagnostic instruction-family
-completion belongs to the next plan item. The existing bus still uses
-default cartridge waits; the separate WAITCNT/prefetch prerequisite has not
-been implemented or accepted by this change.
+This document records the counter bridge. Full diagnostic instruction-family
+completion is recorded in [cpu_diagnostics.md](cpu_diagnostics.md). The shared
+bus now implements programmable WAITCNT and the retained prefetch sequences;
+all 24 frozen intervals pass native and compiled-WASM execution. See the
+[cartridge timing diagnostic](../roms/cartridge/README.md) for its bounded scope.

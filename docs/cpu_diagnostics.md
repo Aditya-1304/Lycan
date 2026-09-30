@@ -95,7 +95,7 @@ Run from the worktree. These commands rebuild and verify the original firmware
 and guests, retain headless output, and generate the two success-screen captures.
 
 ```bash
-cd /home/aditya/Projects/GBA/gba-rs
+# Run from the repository root.
 mkdir -p /tmp/gba-diagnostic-results
 cargo run --locked -p gba-tools -- build-fixtures
 cargo run --locked -p gba-tools --release -- fixtures run --capture /tmp/gba-diagnostic-results/frame | tee /tmp/gba-diagnostic-results/headless.txt
@@ -115,7 +115,7 @@ the terminal instruction; excludes subsequent scanout and presentation).
 Native Linux:
 
 ```bash
-cd /home/aditya/Projects/GBA/gba-rs
+# Run from the repository root.
 cargo run --locked -p gba-app --release
 ```
 
@@ -128,7 +128,7 @@ check the existing copy, calculation, palette, counter and moving-square control
 For browser measurements, keep this running in another terminal:
 
 ```bash
-cd /home/aditya/Projects/GBA/gba-rs
+# Run from the repository root.
 env -u NO_COLOR trunk --config web/Trunk.toml serve --release --address 127.0.0.1 --port 8080
 ```
 

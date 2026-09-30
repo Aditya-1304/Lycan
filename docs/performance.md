@@ -1,966 +1,298 @@
-# Performance and reference device
+# Performance benchmarking record
 
-This document records the reference environment for repeatable native and browser measurements. Slice 0 verifies presentation and scheduling behavior; it does not yet measure emulation throughput.
+## Reference hardware and benchmark configuration
 
-## Reference device
-
-- Recorded: 2026-09-29
-- Operating system: Arch Linux (rolling)
-- Desktop session: Hyprland on Wayland
-- CPU: Intel Core i7-13620H, 10 cores / 16 threads
-- Display: Chimei Innolux 1920×1080 at 60.001 Hz, scale 1
-- Audio output: Built-in Audio Analog Stereo via PipeWire 1.6.8
-- Power conditions: AC connected, performance profile
-
-## Toolchain and build settings
-
-- `rustc`: 1.98.1 (48a229cea, 2026-09-01)
-- `cargo`: 1.98.1 (797e8a9bc, 2026-08-05)
-- `trunk`: 0.21.14
-- Native measurement profile: release, `opt-level = 3`, thin LTO
-- Browser build: Trunk release build targeting `wasm32-unknown-unknown`
-- Browser extensions affecting measurements: none reported
-- Tracing: not present in Slice 0
-
-## Browser versions
-
-- Google Chrome: 153.0.8010.47
-- Brave: 153.1.95.102
-
-## Slice 0 verification status
-
-- Native release build: passed; the app stayed running during a five-second launch smoke check. UI interaction was not manually observed.
-- Browser release build and local Trunk page: passed; Chrome/Brave interaction was not verified because no browser UI was available in the check environment.
-- Performance measurements: deferred until runnable emulation and audio exist
-- Comparative native/WASM benchmark runs: not performed
-- Brave browser build: passed.
-- 240×160 animated test image verified on all targets.
-- Resize and 3:2 aspect preservation verified.
-- Keyboard-to-logical-button mapping verified.
-- Focus loss releases held buttons.
-- Pause stops animation and does not busy-spin.
-- Reset restores initial Slice 0 state.
-
-## Display pixel written by ROM status
-
-### Headless
-
-- Fixture: `pixels.gba`
-- SHA-256: `4fb24cb1f126ac04638a3c5819ecee7f3c4fd0bc2b948e186daa79bbdc9c1a12`
-- Terminal PC: `0x08000200`
-- Completion mailbox: passed
-- Exact 240×160 framebuffer verification: passed
-- Guest-store mutation test: passed
-
-### Native Linux
-
-- Mode 3 image visually verified:
-- Core execution mean: 0.946 ms
-- Core execution p95: 1.531 ms
-- BGR555 conversion mean: 0.119 ms
-- BGR555 conversion p95: 0.168 ms
-- Texture submission mean: 0.026 ms
-- Texture submission p95: 0.041 ms
-
-### Google Chrome
-
-- Mode 3 image visually verified:
-Core execution: mean 1.004 ms | p95 1.400 ms | samples 120
-Pixel conversion: mean 0.202 ms | p95 0.300 ms | samples 120
-Texture submission: mean 0.021 ms | p95 0.100 ms | samples 120
-
-### Brave
-
-- Mode 3 image visually verified:
-Core execution: mean 1.085 ms | p95 1.300 ms | samples 120
-Pixel conversion: mean 0.211 ms | p95 0.300 ms | samples 120
-Texture submission: mean 0.032 ms | p95 0.100 ms | samples 120
-
-## moving square with button status
-
-Integer master-clock pacing, deterministic 60/144 Hz host-schedule checks, and
-bounded pause/focus recovery passed. The moving-square headless fixture verified
-all five declared positions and complete framebuffers. Native and WASM compilation
-passed. See [button movement evidence and manual acceptance](button_movement.md).
-
-### Headless
-
-- Fixture: `buttons.gba`
-- SHA-256: `eae58be9de7214f5bfe808970778d3f8ccca5437f97d37ce11986f2f2fe56b6d`
-- Active-low KEYINPUT test: passed
-- VCOUNT/DISPSTAT phase tests: passed
-- Moving-square checkpoints: passed
-- Full framebuffer comparisons: passed
-- 60 Hz / 144 Hz deterministic host-schedule test: passed
-- Pause/focus re-anchor test: passed
-- Replay deadline test: passed
-- Final replay position: `(114, 73)`
-
-### Native Linux
-
-- Square movement visually verified: yes
-- Boundary clamping verified: yes
-- Pause/resume without catch-up: yes
-- Focus-loss input release: yes
-- Reset: yes
-- Replay final position `(114, 73)`: yes
-Core execution: mean 1.828 ms | p95 2.369 ms | samples 120
-Pixel conversion: mean 0.128 ms | p95 0.168 ms | samples 120
-Texture submission: mean 0.026 ms | p95 0.036 ms | samples 120
-
-### Google Chrome
-
-- Square movement visually verified: yes
-- Pause/resume without catch-up: yes
-- Focus/tab-loss input release: yes
-- Hidden-tab restore without catch-up: yes
-- Replay final position `(114, 73)`: yes
-Core execution: mean 2.359 ms | p95 2.900 ms | samples 120
-Pixel conversion: mean 0.230 ms | p95 0.300 ms | samples 120
-Texture submission: mean 0.031 ms | p95 0.100 ms | samples 120
-
-### Brave
-
-- Square movement visually verified: yes
-- Pause/resume without catch-up: yes
-- Focus/tab-loss input release: yes
-- Hidden-tab restore without catch-up: yes
-- Replay final position `(114, 73)`: yes
-Core execution: mean 2.463 ms | p95 3.100 ms | samples 120
-Pixel conversion: mean 0.243 ms | p95 0.300 ms | samples 120
-Texture submission: mean 0.031 ms | p95 0.100 ms | samples 120
-
-
-## switch palette colors and bitmap pages status
-
-Mode 4 palette lookup, bitmap page selection, palette-only updates, and the
-pinned gba-tests `hello.gba` fixture passed headlessly. The original palette
-fixture verifies complete 240×160 framebuffers for both bitmap pages and a
-palette-only change without rewriting VRAM.
-
-### Headless
-
-- Fixture: `palette.gba`
-- SHA-256: `88806d5738b0d298918b3b59ce67bb08504584f948312614ba8a2977927efc3b`
-- Palette RAM access: passed
-- Mode 4 indexed lookup: passed
-- Page 0 framebuffer: passed
-- Page 1 framebuffer: passed
-- Palette-only framebuffer change: passed
-- Full 38,400-pixel comparisons: passed
-- Frame 4: page 0, red/green columns
-- Frame 6: page 1, blue/white columns
-- Frame 8: page 1 with palette change, blue/red columns
-
-### gba-tests hello
-
-- Fixture: `hello.gba`
-- SHA-256: `38aed48b67bc0f701e8aa222b0c3334bd306bd29888707bb7224d81f5576c264`
-- Source revision: `a7113b67e63f83a9b321696ddd7042ccfad6c881`
-- Terminal PC: `0x08000160`
-- Expected framebuffer SHA-256: `56cd131fb3915fe7e410be228a8c09e99132064799f148583636ca75745bedf7`
-- Headless framebuffer verification: passed
-- `Hello world!` output: passed
-
-### Native Linux
-
-- Palette page 0 visually verified: yes
-- Palette page 1 visually verified: yes
-- Palette-only update visually verified: yes
-- `hello.gba` visually verified: yes
-- Pause/reset/focus behavior verified: yes
-- Earlier Slice 1/2 scenes regression checked: yes
-Core execution: mean 2.142 ms | p95 3.190 ms | samples 120
-Pixel conversion: mean 0.122 ms | p95 0.176 ms | samples 120
-Texture submission: mean 0.027 ms | p95 0.039 ms | samples 120
-
-### Google Chrome
-
-- Palette page 0 visually verified: yes
-- Palette page 1 visually verified: yes
-- Palette-only update visu- Core execution mean: TODO ms
-- Core execution p95: TODO ms
-- Pixel conversion mean: TODO ms
-- Pixel conversion p95: TODO ms
-- Texture submission mean: TODO ms
-- Texture submission p95: TODO msally verified: yes
-- `hello.gba` visually verified: yes
-- Pause/reset/focus behavior verified: yes
-- Earlier Slice 1/2 scenes regression checked: yes
-Core execution: mean 2.938 ms | p95 3.800 ms | samples 120
-Pixel conversion: mean 0.234 ms | p95 0.300 ms | samples 120
-Texture submission: mean 0.032 ms | p95 0.100 ms | samples 120
-
-### Brave
-
-- Palette page 0 visually verified: yes
-- Palette page 1 visually verified: yes
-- Palette-only update visually verified: yes
-- `hello.gba` visually verified: yes
-- Pause/reset/focus behavior verified: yes
-- Earlier Slice 1/2 scenes regression checked: yes
-Core execution: mean 2.262 ms | p95 3.400 ms | samples 120
-Pixel conversion: mean 0.188 ms | p95 0.300 ms | samples 120
-Texture submission: mean 0.028 ms | p95 0.100 ms | samples 120
-
-## cpu calculation status
-
-The original CPU calculation fixture executes selected ARM arithmetic, logical,
-comparison, barrel-shifter, carry, and multiplication cases entirely as guest
-code. Each case compares against a fixed expected result and draws its status
-through the existing Mode 3 display route.
-
-### Headless
-
-- Fixture: `calculations.gba`
-- SHA-256: `8ef128a96363775c3a6b0b3aad2997edfa48e43ba95a920121e9b7a04b4604f5`
-- Terminal PC: `0x08001000`
-- Completion mailbox ID: `0x005d`
-- Completion result: `1`
-- First failing case: `0`
-- Selected calculation cases passed: `16 / 16`
-- Full 240×160 framebuffer verification: passed
-- Diagnostic completion host time: TODO ms
-
-### Native Linux
-
-- Diagnostic visually verified: yes
-- All calculation bands passed: yes
-- Completion mailbox `0x005d`: yes
-- Completion result `1`: yes
-- First failing case `0`: yes
-- Earlier Slice 1–3 scenes regression checked: yes
-Core execution: mean 1.863 ms | p95 2.962 ms | samples 120
-Pixel conversion: mean 0.110 ms | p95 0.157 ms | samples 120
-Texture submission: mean 0.026 ms | p95 0.041 ms | samples 120
-
-### Google Chrome
-
-- Diagnostic visually verified: yes
-- All calculation bands passed: yes
-- Completion mailbox `0x005d`: yes
-- Completion result `1`: yes
-- First failing case `0`: yes
-- Earlier Slice 1–3 scenes regression checked: yes
-Core execution: mean 2.044 ms | p95 6.700 ms | samples 120
-Pixel conversion: mean 0.156 ms | p95 0.300 ms | samples 120
-Texture submission: mean 0.029 ms | p95 0.100 ms | samples 120
-
-### Brave
-
-- Diagnostic visually verified: yes
-- All calculation bands passed: yes
-- Completion mailbox `0x005d`: yes
-- Completion result `1`: yes
-- First failing case `0`: yes
-- Earlier Slice 1–3 scenes regression checked: yes
-Core execution: mean 2.125 ms | p95 2.800 ms | samples 120
-Pixel conversion: mean 0.227 ms | p95 0.300 ms | samples 120
-Texture submission: mean 0.028 ms | p95 0.100 ms | samples 120
-
-## copy and redraw an image status
-
-The original bitmap-copy fixture copies a 38,400-byte indexed image through an
-EWRAM mirror and redraws it from canonical EWRAM through a called ARM routine.
-The routine saves registers and LR on a mirrored IWRAM stack and returns by
-loading PC through LDM. The guest verifies stack restoration before publishing
-completion.
-
-### Headless
-
-- Fixture: `copy.gba`
-- SHA-256: `70ae32d6d49cfbbe8d05f66da4fa22a1076838b0753cab0a9827f304cb695306`
-- Terminal PC: `0x0800a000`
-- Completion mailbox ID: `0x005e`
-- Completion result: `1`
-- Full 38,400-byte copied-image verification: passed
-- Full 240×160 framebuffer verification: passed
-- EWRAM mirror verification: passed
-- IWRAM/stack mirror verification: passed
-- BL/routine return verification: passed
-- SP restoration verification: passed
-- Unaligned STR align-down verification: passed
-- Unaligned LDR rotation verification: passed
-- Palette byte-write duplication: passed
-- BG VRAM byte-write duplication: passed
-- OBJ VRAM byte-write ignore behavior: passed
-- Guest execution cycles: `1687892`
-- Copy/redraw completion host time: TODO ms
-
-### Native Linux
-
-- Copied image visually verified: yes
-- Earlier Slice 1–4 scenes regression checked: yes
-Core execution: mean 2.202 ms | p95 3.093 ms | samples 120
-Pixel conversion: mean 0.125 ms | p95 0.157 ms | samples 120
-Texture submission: mean 0.027 ms | p95 0.045 ms | samples 120
-
-### Google Chrome
-
-- Copied image visually verified: yes
-- Earlier Slice 1–4 scenes regression checked: yes
-Core execution: mean 1.809 ms | p95 2.700 ms | samples 120
-Pixel conversion: mean 0.196 ms | p95 0.300 ms | samples 120
-Texture submission: mean 0.025 ms | p95 0.100 ms | samples 120
-
-### Brave
-
-- Copied image visually verified: yes
-- Earlier Slice 1–4 scenes regression checked: yes
-Core execution: mean 2.132 ms | p95 2.800 ms | samples 120
-Pixel conversion: mean 0.239 ms | p95 0.300 ms | samples 120
-Texture submission: mean 0.037 ms | p95 0.100 ms | samples 120
-
-
-## Cartridge WAITCNT and Prefetch Timing
-
-### Fixture identity
-
-- Fixture: `cartridge.gba`
-- SHA-256: `5b4fc59af58129cad68743df97fde3fa37fd48e206c415455b16486728f9cf2c`
-- Source: `roms/cartridge/cartridge.s`
-- Total timing checkpoints: 24
-- Terminal PC: `0x08002018`
-- Completion mailbox ID: `0x0060`
-- Expected completion result: `1`
-- Maximum instructions: 2,000
-- Maximum cycles: 20,000
-
-### Expected emulated timing
-
-Values represent exact expected emulated cycles per checkpoint.
-
-| WAITCNT | Prefetch | Window | ARM (32-bit) | Thumb (16-bit) |
-|---|---|---|---:|---:|
-| 0x0000 | Disabled | WS0 | 121 | 88 |
-| 0x0000 | Disabled | WS1 | 155 | 100 |
-| 0x0000 | Disabled | WS2 | 223 | 124 |
-| 0x06DA | Disabled | WS0 | 88 | 66 |
-| 0x06DA | Disabled | WS1 | 88 | 66 |
-| 0x06DA | Disabled | WS2 | 88 | 66 |
-| 0x4000 | Enabled | WS0 | 85 | 64 |
-| 0x4000 | Enabled | WS1 | 127 | 72 |
-| 0x4000 | Enabled | WS2 | 211 | 112 |
-| 0x46DA | Enabled | WS0 | 60 | 54 |
-| 0x46DA | Enabled | WS1 | 60 | 54 |
-| 0x46DA | Enabled | WS2 | 60 | 54 |
-
-Expected values are independently derived from the documented access sequences. Physical GBA measurements have not been performed.
-
-### Verification results
-
-Complete after executing the tests:
-
-PASS counter frame=1 count=1 image_count=0 return=ARM pixels=38400
-PASS counter frame=3 count=3 image_count=2 return=ARM pixels=38400
-PASS counter frame=5 count=3 image_count=3 return=ARM pixels=38400
-PASS counter frame=7 count=5 image_count=4 return=ARM pixels=38400
-PASS counter frame=8 count=5 image_count=5 return=ARM pixels=38400
-PASS counter frame=24 count=16 image_count=16 return=ARM pixels=38400
-PASS counter cycles=6741508 instructions=668215
-PASS pixels pixels=38400 terminal=0x08000200 cycles=1905956 generation=7 execution_ms=5.335
-PASS pixels guest-store mutation changed the first band
-PASS buttons frame=1 guest=(113,72) scanout=(112,72) pixels=38400
-PASS buttons frame=3 guest=(115,72) scanout=(114,72) pixels=38400
-PASS buttons frame=5 guest=(115,74) scanout=(115,73) pixels=38400
-PASS buttons frame=8 guest=(114,73) scanout=(114,74) pixels=38400
-PASS buttons frame=9 guest=(114,73) scanout=(114,73) pixels=38400
-PASS palette frame=4 page=0 palette_changed=0 pixels=38400
-PASS palette frame=6 page=1 palette_changed=0 pixels=38400
-PASS palette frame=8 page=1 palette_changed=1 pixels=38400
-PASS hello terminal=0x08000160 cycles=561807 framebuffer_sha256=56cd131fb3915fe7e410be228a8c09e99132064799f148583636ca75745bedf7
-PASS calculations mailbox id=0x005d result=1 first_failing_case=0
-PASS calculations pixels=38400 terminal=0x08001000 cycles=1907495 generation=7 execution_ms=5.267
-PASS copy pixels=38400 terminal=0x0800a000 cycles=1687892 generation=6 execution_ms=4.626
-PASS timing WS0 width=32 WAITCNT=0x0000 cycles=121
-PASS timing WS0 width=16 WAITCNT=0x0000 cycles=88
-PASS timing WS1 width=32 WAITCNT=0x0000 cycles=155
-PASS timing WS1 width=16 WAITCNT=0x0000 cycles=100
-PASS timing WS2 width=32 WAITCNT=0x0000 cycles=223
-PASS timing WS2 width=16 WAITCNT=0x0000 cycles=124
-PASS timing WS0 width=32 WAITCNT=0x06da cycles=88
-PASS timing WS0 width=16 WAITCNT=0x06da cycles=66
-PASS timing WS1 width=32 WAITCNT=0x06da cycles=88
-PASS timing WS1 width=16 WAITCNT=0x06da cycles=66
-PASS timing WS2 width=32 WAITCNT=0x06da cycles=88
-PASS timing WS2 width=16 WAITCNT=0x06da cycles=66
-PASS timing WS0 width=32 WAITCNT=0x4000 cycles=85
-PASS timing WS0 width=16 WAITCNT=0x4000 cycles=64
-PASS timing WS1 width=32 WAITCNT=0x4000 cycles=127
-PASS timing WS1 width=16 WAITCNT=0x4000 cycles=72
-PASS timing WS2 width=32 WAITCNT=0x4000 cycles=211
-PASS timing WS2 width=16 WAITCNT=0x4000 cycles=112
-PASS timing WS0 width=32 WAITCNT=0x46da cycles=60
-PASS timing WS0 width=16 WAITCNT=0x46da cycles=54
-PASS timing WS1 width=32 WAITCNT=0x46da cycles=60
-PASS timing WS1 width=16 WAITCNT=0x46da cycles=54
-PASS timing WS2 width=32 WAITCNT=0x46da cycles=60
-PASS timing WS2 width=16 WAITCNT=0x46da cycles=54
-
-### Regression coverage
-
-Verify that the earlier pixels, calculations, bitmap-copy, and ARM/Thumb counter fixtures retain their declared functional results.
-
-### Known limitations
-
-The timing implementation is validated against the declared access sequences. This fixture does not establish correctness for every undocumented prefetch interaction or video-bus contention rule.
-
-### Reproduction
-
-```sh
-cargo run --locked -p gba-tools -- build-fixtures
-
-cargo run --locked -p gba-tools --release -- \
-    fixtures run --manifest fixtures/manifest.toml
-```
-
-
-## update a counter through ARM and Thumb status
-
-The original bitmap-copy fixture copies a 38,400-byte indexed image through an
-EWRAM mirror and redraws it from canonical EWRAM through a called ARM routine.
-The routine saves registers and LR on a mirrored IWRAM stack and returns by
-loading PC through LDM. The guest verifies stack restoration before publishing
-completion.
-
-### Headless
-
-- Fixture: `copy.gba`
-- SHA-256: `70ae32d6d49cfbbe8d05f66da4fa22a1076838b0753cab0a9827f304cb695306`
-- Terminal PC: `0x0800a000`
-- Completion mailbox ID: `0x005e`
-- Completion result: `1`
-- Full 38,400-byte copied-image verification: passed
-- Full 240×160 framebuffer verification: passed
-- EWRAM mirror verification: passed
-- IWRAM/stack mirror verification: passed
-- BL/routine return verification: passed
-- SP restoration verification: passed
-- Unaligned STR align-down verification: passed
-- Unaligned LDR rotation verification: passed
-- Palette byte-write duplication: passed
-- BG VRAM byte-write duplication: passed
-- OBJ VRAM byte-write ignore behavior: passed
-- Guest execution cycles: `1687892`
-- Copy/redraw completion host time: TODO ms
-
-### Native Linux
-
-- Copied image visually verified: yes
-- Earlier Slice 1–4 scenes regression checked: yes
-Core execution: mean 2.099 ms | p95 3.338 ms | samples 120
-Pixel conversion: mean 0.099 ms | p95 0.155 ms | samples 119
-Texture submission: mean 0.023 ms | p95 0.036 ms | samples 120
-
-### Google Chrome
-
-- Copied image visually verified: yes
-- Earlier Slice 1–4 scenes regression checked: yes
-Core execution: mean 3.390 ms | p95 4.200 ms | samples 120
-Pixel conversion: mean 0.248 ms | p95 0.400 ms | samples 120
-Texture submission: mean 0.036 ms | p95 0.100 ms | samples 120
-
-### Brave
-
-- Copied image visually verified: yes
-- Earlier Slice 1–4 scenes regression checked: yes
-Core execution: mean 3.421 ms | p95 4.000 ms | samples 120
-Pixel conversion: mean 0.258 ms | p95 0.400 ms | samples 120
-Texture submission: mean 0.027 ms | p95 0.100 ms | samples 120
-
-## ARM and Thumb diagnostic programs
-
-Slice 7 verification results and user-entered measurements. The assistant fills
-all non-timing fields; only millisecond timings are reserved for manual entry.
-Existing timing values supplied by the user are preserved. Reproduction commands
-and the plan acceptance checklist are in [cpu_diagnostics.md](cpu_diagnostics.md).
-
-### Measurement conditions
-
-- Verification record updated: 2026-09-30 (Asia/Kolkata); measurement timestamps were not recorded.
-- Reference device: the Intel Core i7-13620H / Arch Linux / Hyprland environment documented above. AC/performance profile was previously recorded; it was not independently rechecked for these measurements.
-- Git baseline: `ec4de485b28b2d1357adf954469e162ba793700e`, with uncommitted Slice 7 implementation and documentation changes.
-- Native release fixture runner: passed.
-- Native application compilation: passed.
-- WASM application compilation and Trunk release browser build: passed.
-- Installed Chrome version: `153.0.8010.47` (checked 2026-09-30).
-- Installed Brave version: `153.1.95.102` (checked 2026-09-30).
-- Reference display: 1920×1080 at 60.001 Hz, scale 1, as previously recorded. Measurement-session refresh rate and browser zoom were not recorded.
-
-### Headless bounded completion
-
-All original guests and the test firmware rebuilt with their frozen hashes;
-pinned upstream binaries passed identity verification. The full release runner
-passed all earlier fixtures and all three diagnostic contracts. Each diagnostic
-is bounded by 400,000 instructions and 3,000,000 emulated cycles.
-
-| Observation | ARM | Thumb | Original services guest |
-|---|---|---|---|
-| Frozen ROM/firmware hashes verified | Passed | Passed | Passed |
-| Declared terminal address reached | `0x08001ec4` | `0x08000aac` | `0x08000400` |
-| Terminal instruction | `0xeafffffe` | `0xeafffffe` | `0xeafffffe` |
-| Failure result register | `r12 = 0` | `r7 = 0` | `r12 = 0` |
-| Full CPSR | `0x6000001f` | `0x600000df` | `0x600000df` |
-| Completion cycles | 244803 | 244771 | 1513 |
-| Instructions | 22887 | 22944 | 529 |
-| Completion host time (ms), entered by user | 1.814 | 1.742 | 0.259 |
-| Exact success framebuffer | Passed, all 38,400 pixels | Passed, all 38,400 pixels | Not applicable; service results checked in registers |
-| Full earlier-fixture regression run | Passed | Passed | Passed |
-
-`completion_ms` measures loading plus execution through the declared terminal;
-subsequent scanout, framebuffer conversion, and host upload are excluded.
-Both upstream success framebuffers have SHA-256
-`59ce42abae9825c2d2579c5cd838e47d88be917e37ea36ff162d46fc5d0991e3`.
-Full ROM and firmware hashes are recorded in `fixtures/manifest.toml` and
-[cpu_diagnostics.md](cpu_diagnostics.md#fixture-identity-and-bounded-completion).
-
-Additional verification: all 14 existing core/session tests passed; workspace
-Clippy passed with warnings denied. Injected ARM and Thumb case-1 failures were
-rejected and their exact `Failed test 001` framebuffers verified. The original
-services guest passed signed ARM division, Thumb division, and exception return.
-
-<details>
-<summary>User-supplied full release fixture output</summary>
-
-```text
-PASS counter frame=1 count=1 image_count=0 return=ARM pixels=38400
-PASS counter frame=3 count=3 image_count=2 return=ARM pixels=38400
-PASS counter frame=5 count=3 image_count=3 return=ARM pixels=38400
-PASS counter frame=7 count=5 image_count=4 return=ARM pixels=38400
-PASS counter frame=8 count=5 image_count=5 return=ARM pixels=38400
-PASS counter frame=24 count=16 image_count=16 return=ARM pixels=38400
-PASS counter cycles=6741508 instructions=668215
-PASS pixels pixels=38400 terminal=0x08000200 cycles=1905956 generation=7 execution_ms=9.748
-PASS pixels guest-store mutation changed the first band
-PASS buttons frame=1 guest=(113,72) scanout=(112,72) pixels=38400
-PASS buttons frame=3 guest=(115,72) scanout=(114,72) pixels=38400
-PASS buttons frame=5 guest=(115,74) scanout=(115,73) pixels=38400
-PASS buttons frame=8 guest=(114,73) scanout=(114,74) pixels=38400
-PASS buttons frame=9 guest=(114,73) scanout=(114,73) pixels=38400
-PASS palette frame=4 page=0 palette_changed=0 pixels=38400
-PASS palette frame=6 page=1 palette_changed=0 pixels=38400
-PASS palette frame=8 page=1 palette_changed=1 pixels=38400
-PASS hello terminal=0x08000160 cycles=561807 framebuffer_sha256=56cd131fb3915fe7e410be228a8c09e99132064799f148583636ca75745bedf7
-PASS calculations mailbox id=0x005d result=1 first_failing_case=0
-PASS calculations pixels=38400 terminal=0x08001000 cycles=1907495 generation=7 execution_ms=9.916
-PASS copy pixels=38400 terminal=0x0800a000 cycles=1687892 generation=6 execution_ms=8.779
-PASS timing WS0 width=32 WAITCNT=0x0000 cycles=121
-PASS timing WS0 width=16 WAITCNT=0x0000 cycles=88
-PASS timing WS1 width=32 WAITCNT=0x0000 cycles=155
-PASS timing WS1 width=16 WAITCNT=0x0000 cycles=100
-PASS timing WS2 width=32 WAITCNT=0x0000 cycles=223
-PASS timing WS2 width=16 WAITCNT=0x0000 cycles=124
-PASS timing WS0 width=32 WAITCNT=0x06da cycles=88
-PASS timing WS0 width=16 WAITCNT=0x06da cycles=66
-PASS timing WS1 width=32 WAITCNT=0x06da cycles=88
-PASS timing WS1 width=16 WAITCNT=0x06da cycles=66
-PASS timing WS2 width=32 WAITCNT=0x06da cycles=88
-PASS timing WS2 width=16 WAITCNT=0x06da cycles=66
-PASS timing WS0 width=32 WAITCNT=0x4000 cycles=85
-PASS timing WS0 width=16 WAITCNT=0x4000 cycles=64
-PASS timing WS1 width=32 WAITCNT=0x4000 cycles=127
-PASS timing WS1 width=16 WAITCNT=0x4000 cycles=72
-PASS timing WS2 width=32 WAITCNT=0x4000 cycles=211
-PASS timing WS2 width=16 WAITCNT=0x4000 cycles=112
-PASS timing WS0 width=32 WAITCNT=0x46da cycles=60
-PASS timing WS0 width=16 WAITCNT=0x46da cycles=54
-PASS timing WS1 width=32 WAITCNT=0x46da cycles=60
-PASS timing WS1 width=16 WAITCNT=0x46da cycles=54
-PASS timing WS2 width=32 WAITCNT=0x46da cycles=60
-PASS timing WS2 width=16 WAITCNT=0x46da cycles=54
-PASS arm terminal=0x08001ec4 r12=0 cpsr=0x6000001f cycles=244803 instructions=22887 completion_ms=1.814
-PASS thumb terminal=0x08000aac r7=0 cpsr=0x600000df cycles=244771 instructions=22944 completion_ms=1.742
-PASS services terminal=0x08000400 r12=0 cpsr=0x600000df cycles=1513 instructions=529 completion_ms=0.259
-```
-
-</details>
-
-### Native Linux
-
-| Observation | ARM | Thumb |
-|---|---|---|
-| `All tests passed` visually verified | Pending; no observation supplied | Pending; no observation supplied |
-| Reset reruns successfully | Pending; no observation supplied | Pending; no observation supplied |
-| Pause/resume and resize verified | Pending; no observation supplied | Pending; no observation supplied |
-| Earlier scenes regression checked in this application | Pending; no observation supplied | Pending; no observation supplied |
-
-User-entered timing record (the diagnostic was not identified in the supplied
-record; these values are not assigned to both ROMs):
-
-```text
-Core execution: mean 2.811 ms | p95 3.575 ms | samples 120
-Pixel conversion: mean 0.149 ms | p95 0.204 ms | samples 120
-Texture submission: mean 0.032 ms | p95 0.047 ms | samples 120
-```
-
-- Recorded sample counts (core / conversion / upload): `120 / 120 / 120`.
-
-### Google Chrome
-
-| Observation | ARM | Thumb |
-|---|---|---|
-| `All tests passed` visually verified | Pending; no observation supplied | Pending; no observation supplied |
-| Reset reruns successfully | Pending; no observation supplied | Pending; no observation supplied |
-| Pause/resume and resize verified | Pending; no observation supplied | Pending; no observation supplied |
-| Focus loss / hidden-tab restore verified | Pending; no observation supplied | Pending; no observation supplied |
-| Earlier scenes regression checked in this application | Pending; no observation supplied | Pending; no observation supplied |
-
-User-entered timing record (the diagnostic was not identified in the supplied
-record; these values are not assigned to both ROMs):
-
-```text
-Core execution: mean 4.252 ms | p95 5.100 ms | samples 120
-Pixel conversion: mean 0.273 ms | p95 0.400 ms | samples 120
-Texture submission: mean 0.043 ms | p95 0.100 ms | samples 120
-```
-
-- Recorded sample counts (core / conversion / upload): `120 / 120 / 120`.
-
-### Brave
-
-| Observation | ARM | Thumb |
-|---|---|---|
-| `All tests passed` visually verified | Pending; no observation supplied | Pending; no observation supplied |
-| Reset reruns successfully | Pending; no observation supplied | Pending; no observation supplied |
-| Pause/resume and resize verified | Pending; no observation supplied | Pending; no observation supplied |
-| Focus loss / hidden-tab restore verified | Pending; no observation supplied | Pending; no observation supplied |
-| Earlier scenes regression checked in this application | Pending; no observation supplied | Pending; no observation supplied |
-
-User-entered timing record (the diagnostic was not identified in the supplied
-record; these values are not assigned to both ROMs):
-
-```text
-Core execution: mean 4.207 ms | p95 4.700 ms | samples 120
-Pixel conversion: mean 0.253 ms | p95 0.300 ms | samples 120
-Texture submission: mean 0.045 ms | p95 0.100 ms | samples 120
-```
-
-- Recorded sample counts (core / conversion / upload): `120 / 120 / 120`.
-
-### Evidence limits and captures
-
-- Automated Slice 7 completion and earlier-fixture regressions: passed.
-- Linux, Chrome, and Brave visual acceptance: pending. Timing records do not independently confirm successful diagnostic screens, Reset, focus handling, or earlier-scene checks.
-- Known limits: original firmware supports only test SWI 0x06; unsupported services and divide-by-zero trap. No retail BIOS compatibility or physical-hardware timing equivalence is claimed.
-- Native/browser screenshots: none supplied.
-- Headless success captures: `/tmp/gba-diagnostic-results/frame.arm.ppm` and `/tmp/gba-diagnostic-results/frame.thumb.ppm` (files present when this record was updated).
-- Full runner transcript: `/tmp/gba-diagnostic-results/headless.txt`.
-- These `/tmp` artifacts are temporary; the fixture commands reproduce them.
-
-Collect each Performance panel after selecting that diagnostic and reaching 120
-samples. These are steady result-screen callback costs; the guest is already
-looping at its terminal. Keep them distinct from headless completion cost.
-Future entries should identify ARM or Thumb alongside each timing record.
-
-
-## Scroll a tiled background status
-
-Slice 8 automated validation passes. The timing values below were supplied by
-the user and are preserved. The assistant maintains all other evidence, derived
-values, and verification statuses; only millisecond timing values are entered
-manually. A platform check without recorded evidence is marked **not verified**.
-See [the plan audit and all measurement commands](tiled_background.md).
-
-### Measurement conditions
-
-- Evidence date: 2026-09-30
-- Checkout: `e9ca2d6`, with Slice 8 working-tree changes
-- Reference environment: Intel Core i7-13620H, Arch Linux / Hyprland / Wayland,
-  AC power and performance profile, as recorded above on 2026-09-29; no new
-  environment/version confirmation accompanies these measurements
-- Recorded toolchain: rustc/cargo 1.98.1, Trunk 0.21.14
-- Recorded browsers: Chrome 153.0.8010.47; Brave 153.1.95.102
-- Build: release, opt-level 3, thin LTO; tracing disabled; no tile caches
-- Workload: tiled.gba, BG0 4bpp, 512×512, four palette banks
-- Headless timing window: 600 full emulated frames after setup and scripted replay
-- App timing windows: 120 samples for each reported metric on each platform
-- Native capture: 120 completed guest frames reported in `native.txt`
-- Input during app timing windows: not recorded; moving/idle classification unknown
-- Evidence directory: `/tmp/gba-tiled-results` (temporary files)
-
-### Headless correctness and performance
-
-| Check / metric | Recorded result |
+| Field | Recorded configuration |
 | --- | --- |
-| Scripted frames 10, 11, 13, 15, 18, 19 | Passed: all 38,400 pixels per checkpoint |
-| Guest update counts | Passed: 9, 10, 12, 14, 17, 18 |
-| Final guest scroll / published image scroll | Passed: (2,0) / (2,0) |
-| Scroll register and frame-generation checks | Passed |
-| Mailbox completion ID | 0x0061 |
-| Setup ready PC / setup cycles | 0x08000124 / 416,681 |
-| Replay cycles / instructions | 5,337,027 / 467,886 |
-| Replay cycle / instruction bounds | 6,000,000 / 1,500,000; respected |
-| stripes.gba reference | Passed: terminal 0x08000140, 561,808 cycles, exact 8-pixel vertical stripes |
-| Earlier bitmap and CPU/timing fixtures | Passed |
-| Core mean per emulated frame | 1.092 ms |
-| Core p95 per emulated frame | 1.111 ms |
-| Unthrottled speed from rounded mean | Approximately 15.33× real time (16.742706 / 1.092) |
-| Core p95 below 12 ms target | Yes |
-| Headless UI/texture cost | Not applicable |
+| Reference record date | 2026-09-29 |
+| CPU | Intel Core i7-13620H, 10 cores / 16 threads |
+| OS / desktop | Arch Linux (rolling), Hyprland / Wayland |
+| Display | Chimei Innolux 1920×1080, 60.001 Hz, scale 1 |
+| Audio device | Built-in Audio Analog Stereo, PipeWire 1.6.8 |
+| Power | AC connected, performance profile |
+| Rust | rustc 1.98.1 (48a229cea, 2026-09-01); cargo 1.98.1 (797e8a9bc, 2026-08-05) |
+| Trunk | 0.21.14 |
+| Chrome / Brave | 153.0.8010.47 / 153.1.95.102; checked 2026-09-30 for Slice 7 |
+| Build | Release, opt-level 3, thin LTO; WASM target wasm32-unknown-unknown |
+| Tracing / extensions | Tracing disabled for benchmarks (absent in Slice 0); no browser extensions reported |
 
-### Scanline profile
+Reference metadata was not independently refreshed for the later measurement
+sessions. Measurement-session refresh rate and browser zoom were not recorded.
 
-- Command: `valgrind --tool=callgrind --callgrind-out-file=/tmp/gba-tiled-results/scanline.callgrind target/release/gba-tools bench --scenario tiled --frames 60`
-- Build: optimized release with `CARGO_PROFILE_RELEASE_DEBUG=1` for source attribution
-- Window: 60 timed frames plus initialization and the 19-frame scripted replay
-- Profile: `/tmp/gba-tiled-results/scanline.callgrind`
-- Source report: `/tmp/gba-tiled-results/scanline-profile.txt`
-- Total host instruction references: 1,877,851,931
+## Performance targets
 
-| Source operation | Host instruction references | Share of profile |
-| --- | --- | --- |
-| Map offset calculation | 23,750,400 | 1.26% |
-| Map-entry read | 23,750,400 | 1.26% |
-| Packed 4bpp nibble extraction | 11,875,200 | 0.63% |
-| Palette color read | 31,172,760 | 1.66% |
-
-Scanline work is inlined into `System::advance_time`. These are source-attributed
-host instruction counts, not GBA cycles or elapsed time. The profile identifies
-map and palette lookup work before any cache optimization; no cache was added.
-Use the unprofiled 600-frame run for elapsed-time results.
-
-### Native Linux / Google Chrome / Brave
-
-Core/conversion/upload values are app callback samples. Texture submission
-measures CPU work; GPU completion and total presentation latency were not timed.
-
-| Metric | Native Linux | Google Chrome | Brave |
-| --- | --- | --- | --- |
-| Core execution mean | 4.179 ms | 5.557 ms | 5.539 ms |
-| Core execution p95 | 5.523 ms | 6.700 ms | 6.800 ms |
-| Pixel conversion mean | 0.120 ms | 0.185 ms | 0.177 ms |
-| Pixel conversion p95 | 0.152 ms | 0.300 ms | 0.300 ms |
-| Texture submission mean | 0.028 ms | 0.037 ms | 0.033 ms |
-| Texture submission p95 | 0.036 ms | 0.100 ms | 0.100 ms |
-| Samples per reported metric | 120 | 120 | 120 |
-| Core p95 below 12 ms target | Yes | Yes | Yes |
-| Timing evidence | native.txt and user-entered values | User-entered values | User-entered values |
-| Capture artifact | native.ppm | Not recorded | Not recorded |
-| Moving / idle classification | Not recorded | Not recorded | Not recorded |
-| Sustained speed from cycles / wall time | Not measured | Not measured | Not measured |
-
-App callbacks can advance fractions of a frame or multiple frames. Their
-mean/p95 values do not establish sustained clock speed or complete frame cost.
-The recorded p95 core samples meet the 12 ms target on all three platforms;
-end-to-end responsiveness within the 16.7427 ms frame budget is not verified.
-
-### Platform behavior and acceptance
-
-| Check | Native Linux | Google Chrome | Brave |
-| --- | --- | --- | --- |
-| Arrow-controlled scrolling and horizontal/vertical wrap | Not verified visually | Not verified visually | Not verified visually |
-| Scripted replay final (2,0) and frame-19 image | Headless passed; UI not verified | Headless passed; UI not verified | Headless passed; UI not verified |
-| stripes.gba reference image | Headless passed; UI not verified | Headless passed; UI not verified | Headless passed; UI not verified |
-| Earlier bitmap scenes | Headless passed; UI not verified | Headless passed; UI not verified | Headless passed; UI not verified |
-| Pause/resume and Reset | Slice 8 interaction not verified | Slice 8 interaction not verified | Slice 8 interaction not verified |
-| Focus loss releases held input | Existing automated session checks pass; UI not verified | UI not verified | UI not verified |
-| Hidden-tab restore without catch-up | Not applicable | Not verified | Not verified |
-| Long-session memory growth / input delay | Not measured | Not measured | Not measured |
-
-Timing records establish measured app execution on each platform, but do not
-record the outcomes of these interaction checks. No visual acceptance pass is
-inferred from the timing values.
-
-### Evidence artifacts and closeout
-
-- Fixture output: `/tmp/gba-tiled-results/fixtures.txt`
-- Headless benchmark: `/tmp/gba-tiled-results/headless-benchmark.txt`
-- Scroll/wrap captures: `/tmp/gba-tiled-results/frame.tiled-frame-{10,11,13,15,18,19}.ppm`
-- Upstream capture: `/tmp/gba-tiled-results/frame.stripes.ppm`
-- Native viewport / measurements: `/tmp/gba-tiled-results/native.ppm` and `native.txt`
-- Existing validation: 14 core/session tests, workspace Clippy, native/WASM
-  compilation, reproducible fixture builds, and Trunk release build passed
-- Scanline profiling before caches: completed
-- Automated Slice 8 requirements: passed; see the linked plan acceptance audit
-- Remaining acceptance: visual scroll/wrap review and platform interaction
-  checks have no recorded results; sustained speed and long-session behavior
-  were not measured
-- Loader follow-up: pinned stripes loading adds two unexecuted look-ahead words;
-  general absent-ROM bus behavior remains unimplemented
-
-<details>
-<summary>Preserved user-provided CLI output</summary>
-
-```text
-PASS counter frame=1 count=1 image_count=0 return=ARM pixels=38400
-PASS counter frame=3 count=3 image_count=2 return=ARM pixels=38400
-PASS counter frame=5 count=3 image_count=3 return=ARM pixels=38400
-PASS counter frame=7 count=5 image_count=4 return=ARM pixels=38400
-PASS counter frame=8 count=5 image_count=5 return=ARM pixels=38400
-PASS counter frame=24 count=16 image_count=16 return=ARM pixels=38400
-PASS counter cycles=6741508 instructions=668215
-PASS pixels pixels=38400 terminal=0x08000200 cycles=1905956 generation=7 execution_ms=5.615
-PASS pixels guest-store mutation changed the first band
-PASS buttons frame=1 guest=(113,72) scanout=(112,72) pixels=38400
-PASS buttons frame=3 guest=(115,72) scanout=(114,72) pixels=38400
-PASS buttons frame=5 guest=(115,74) scanout=(115,73) pixels=38400
-PASS buttons frame=8 guest=(114,73) scanout=(114,74) pixels=38400
-PASS buttons frame=9 guest=(114,73) scanout=(114,73) pixels=38400
-PASS palette frame=4 page=0 palette_changed=0 pixels=38400
-PASS palette frame=6 page=1 palette_changed=0 pixels=38400
-PASS palette frame=8 page=1 palette_changed=1 pixels=38400
-PASS hello terminal=0x08000160 cycles=561807 framebuffer_sha256=56cd131fb3915fe7e410be228a8c09e99132064799f148583636ca75745bedf7
-PASS calculations mailbox id=0x005d result=1 first_failing_case=0
-PASS calculations pixels=38400 terminal=0x08001000 cycles=1907495 generation=7 execution_ms=5.653
-PASS copy pixels=38400 terminal=0x0800a000 cycles=1687892 generation=6 execution_ms=4.979
-PASS timing WS0 width=32 WAITCNT=0x0000 cycles=121
-PASS timing WS0 width=16 WAITCNT=0x0000 cycles=88
-PASS timing WS1 width=32 WAITCNT=0x0000 cycles=155
-PASS timing WS1 width=16 WAITCNT=0x0000 cycles=100
-PASS timing WS2 width=32 WAITCNT=0x0000 cycles=223
-PASS timing WS2 width=16 WAITCNT=0x0000 cycles=124
-PASS timing WS0 width=32 WAITCNT=0x06da cycles=88
-PASS timing WS0 width=16 WAITCNT=0x06da cycles=66
-PASS timing WS1 width=32 WAITCNT=0x06da cycles=88
-PASS timing WS1 width=16 WAITCNT=0x06da cycles=66
-PASS timing WS2 width=32 WAITCNT=0x06da cycles=88
-PASS timing WS2 width=16 WAITCNT=0x06da cycles=66
-PASS timing WS0 width=32 WAITCNT=0x4000 cycles=85
-PASS timing WS0 width=16 WAITCNT=0x4000 cycles=64
-PASS timing WS1 width=32 WAITCNT=0x4000 cycles=127
-PASS timing WS1 width=16 WAITCNT=0x4000 cycles=72
-PASS timing WS2 width=32 WAITCNT=0x4000 cycles=211
-PASS timing WS2 width=16 WAITCNT=0x4000 cycles=112
-PASS timing WS0 width=32 WAITCNT=0x46da cycles=60
-PASS timing WS0 width=16 WAITCNT=0x46da cycles=54
-PASS timing WS1 width=32 WAITCNT=0x46da cycles=60
-PASS timing WS1 width=16 WAITCNT=0x46da cycles=54
-PASS timing WS2 width=32 WAITCNT=0x46da cycles=60
-PASS timing WS2 width=16 WAITCNT=0x46da cycles=54
-PASS arm terminal=0x08001ec4 r12=0 cpsr=0x6000001f cycles=244803 instructions=22887 completion_ms=0.940
-PASS thumb terminal=0x08000aac r7=0 cpsr=0x600000df cycles=244771 instructions=22944 completion_ms=0.955
-PASS services terminal=0x08000400 r12=0 cpsr=0x600000df cycles=1513 instructions=529 completion_ms=0.130
-tiled initialization cycles=416681
-PASS tiled frame=10 scroll=(510,510) image=(510,510) pixels=38400
-PASS tiled frame=11 scroll=(0,510) image=(510,510) pixels=38400
-PASS tiled frame=13 scroll=(4,510) image=(2,510) pixels=38400
-PASS tiled frame=15 scroll=(4,2) image=(4,0) pixels=38400
-PASS tiled frame=18 scroll=(2,0) image=(2,2) pixels=38400
-PASS tiled frame=19 scroll=(2,0) image=(2,0) pixels=38400
-PASS tiled cycles=5337027 instructions=467886
-PASS stripes terminal=0x08000140 cycles=561808 pixels=38400
-    Finished `release` profile [optimized] target(s) in 0.05s
-     Running `target/release/gba-tools bench --scenario tiled --frames 600`
-tiled initialization cycles=416681
-PASS tiled frame=10 scroll=(510,510) image=(510,510) pixels=38400
-PASS tiled frame=11 scroll=(0,510) image=(510,510) pixels=38400
-PASS tiled frame=13 scroll=(4,510) image=(2,510) pixels=38400
-PASS tiled frame=15 scroll=(4,2) image=(4,0) pixels=38400
-PASS tiled frame=18 scroll=(2,0) image=(2,2) pixels=38400
-PASS tiled frame=19 scroll=(2,0) image=(2,0) pixels=38400
-PASS tiled cycles=5337027 instructions=467886
-BENCH tiled frames=600 core_mean_ms=1.092 core_p95_ms=1.111 upload=not-applicable-headless
-```
-
-</details>
-
-
-## Move a sprite over the background status
-
-Slice 9's selected sprite layout, scripted overlaps and full pinned memory
-diagnostic pass headlessly. The assistant fills evidence/status fields; only
-millisecond timings below await manual entry. Platform visual checks remain
-not verified. See [the plan audit, limits and all commands](sprite_scene.md).
-
-### Conditions and sample boundaries
-
-- Evidence date: 2026-09-30
-- Checkout: `e3b7d19` plus Slice 9 working-tree changes
-- Reference environment: the CPU, AC/performance power profile, toolchain and
-  Chrome/Brave versions recorded above; not independently refreshed for this slice
-- Build: release, opt-level 3, thin LTO; tracing disabled; no sprite/tile cache
-- Scene: mode-0 512×512 BG0 plus two normal 16×16 4bpp objects, OBJ bank 3
-- Controls: arrows move player/scroll; A selects BG priority 1; B selects 2D mapping
-- Headless benchmark: 600 complete emulated frame advances after the settled replay;
-  post-benchmark image verification passes
-- App timing window: configured for 120 samples per metric; native/browser
-  measurements have not been collected for this slice
-- Moving/idle app timing classification: not recorded; automatic capture uses idle input
-- Evidence directory: `/tmp/gba-sprite-results` (temporary artifacts)
-
-### Verified correctness
-
-| Check | Evidence / status |
+| Section 6 target | Threshold |
 | --- | --- |
-| Sprite checkpoints | Frames 10,13,15,18,20; all 38,400 pixels per checkpoint pass |
-| Player positions / OAM / mailbox | Passed; final player (116,74) |
-| BG scroll and frame generations | Passed; final guest and image scroll (2,0) |
-| OBJ palette, transparent border, OAM order, BG priority | Passed through independent overlap captures |
-| 1D/2D object addressing | Passed; 2D bottom colors intentionally differ |
-| Scene setup | PC 0x08000220 at 425,827 cycles |
-| Completion mailbox / update counts | 0x0062 / 9,12,14,17,19 |
-| Replay cycles / instructions | 5,617,935 / 491,556 |
-| Replay budgets | 6,000,000 cycles / 1,500,000 instructions; respected |
-| Full memory.gba diagnostic | Passed all 13 cases, including OAM mirror and ignored STRB |
-| Memory terminal result | PC 0x080004c8; R12=0; CPSR=0x600000df |
-| Memory terminal cycles / instructions | 244,787 / 22,539 |
-| Memory success text | Independent full-frame digest passed |
-| Earlier bitmap/background/CPU/timing fixtures | All passed |
-| Existing core/session tests | 14 passed; no new unit tests |
-| Clippy / native / WASM / Trunk release build | Passed |
-| Routine renderer allocations | No new heap allocation per instruction, access or scanline |
+| Sustained emulation | About 100% of 16,777,216 cycles/s |
+| Unthrottled execution | At least 1.25× real time; aim for 1.5× |
+| Core p95 | Below 12 ms |
+| Complete frame budget | 16.7427 ms for 280,896 emulated cycles |
+| Audio buffering | 40–80 ms; applicable when audio is implemented |
+| Long session | 30 minutes without growing queues, memory use or audio delay |
+| Allocation policy | No routine allocation per instruction, memory access, scanline or sample |
 
-### Millisecond timing entries
+## Slice 0–9 performance measurements
 
-| Metric | Headless (600 frames) | Native Linux (120 app samples) | Google Chrome (120 app samples) | Brave (120 app samples) |
+Each row reports **mean / p95 in ms**, with sample counts in core / conversion /
+submission order. App core samples are bounded callback execution, which can
+advance fractions of a frame or multiple frames. Conversion and texture
+submission are distinct CPU operations. Submission does not measure GPU
+completion. No complete application-frame or GPU/presentation timing was
+recorded for any slice. Sustained cycles/wall-time speed and 30-minute resource
+trends were not measured on any app platform. Callback timings alone do not
+establish these targets.
+
+All historical millisecond entries below retain their recorded precision.
+Missing measurements are labeled Not measured; existing values are not replaced
+by this remediation's new CLI runs. Functional acceptance evidence is maintained
+in [the verification record](verification/slices_0_9.md).
+
+### Slice 0: Platform setup
+
+| Platform | Core mean / p95 (ms) | Conversion mean / p95 (ms) | Texture submission mean / p95 (ms) | Samples |
 | --- | --- | --- | --- | --- |
-| Core execution mean (ms) | TODO | 4.569 ms |  6.213 ms | 3.961 ms |
-| Core execution p95 (ms) | TODO | 6.183 ms | 7.400 ms | 7.700 ms |
-| Pixel conversion mean (ms) | Not applicable | 0.113 ms |  0.183 m | 0.170 ms |
-| Pixel conversion p95 (ms) | Not applicable | 0.150 ms | 0.300 ms | 0.300 ms |
-| Texture submission mean (ms) | Not applicable | 0.028 ms |  0.028 ms |  0.023 ms |
-| Texture submission p95 (ms) | Not applicable | 0.036 ms |  0.100 ms | 0.100 ms |
+| Native Linux | Not measured | Not measured | Not measured | — / — / — |
+| Google Chrome | Not measured | Not measured | Not measured | — / — / — |
+| Brave | Not measured | Not measured | Not measured | — / — / — |
 
-- Memory diagnostic completion time: TODO ms (from the memory fixture output)
-- Unthrottled speed: awaiting the manually entered headless mean;
-  assistant derives `16.742706 / core_mean_ms` times real time
-- Comparison against core p95 <12 ms: awaiting the timing entries
-- App core samples measure bounded callbacks, not necessarily complete frames
-- Texture submission is CPU work; GPU completion and end-to-end frame latency
-  are not measured
-- Sustained real-time speed / long-session memory or input-delay observations:
-  not measured; cannot be derived from callback milliseconds alone
+No host benchmark was recorded for this slice.
 
-### Scanline / OBJ profile
+### Slice 1: ROM pixels
 
-- Status: completed on an optimized build with source debug information
-- Window: 60 benchmark frames plus initialization and the 20-frame replay
-- Host instruction references: 2,047,673,889
-- OBJ tile-number calculation: 163,010 host instruction references
-- OBJ palette reads: 279,220 host instruction references
-- OAM winner storage: 111,688 host instruction references
-- OBJ/BG priority comparison: 55,844 host instruction references
-- Profile / source report: `scanline.callgrind` / `scanline-profile.txt` in the evidence directory
-- Interpretation: host instruction counts identify selected object work, not GBA
-  cycles or milliseconds; instrumented timings are excluded from manual timing entries
-- Cache optimization: none introduced
+| Platform | Core mean / p95 (ms) | Conversion mean / p95 (ms) | Texture submission mean / p95 (ms) | Samples |
+| --- | --- | --- | --- | --- |
+| Native Linux | 0.946 / 1.531 | 0.119 / 0.168 | 0.026 / 0.041 | Not recorded / Not recorded / Not recorded |
+| Google Chrome | 1.004 / 1.400 | 0.202 / 0.300 | 0.021 / 0.100 | 120 / 120 / 120 |
+| Brave | 1.085 / 1.300 | 0.211 / 0.300 | 0.032 / 0.100 | 120 / 120 / 120 |
 
-### Platform acceptance
+Provenance: existing user-entered app record; measurement timestamp and
+moving/idle conditions were not recorded.
 
-| Check | Native Linux | Google Chrome | Brave |
+### Slice 2: Moving square
+
+| Platform | Core mean / p95 (ms) | Conversion mean / p95 (ms) | Texture submission mean / p95 (ms) | Samples |
+| --- | --- | --- | --- | --- |
+| Native Linux | 1.828 / 2.369 | 0.128 / 0.168 | 0.026 / 0.036 | 120 / 120 / 120 |
+| Google Chrome | 2.359 / 2.900 | 0.230 / 0.300 | 0.031 / 0.100 | 120 / 120 / 120 |
+| Brave | 2.463 / 3.100 | 0.243 / 0.300 | 0.031 / 0.100 | 120 / 120 / 120 |
+
+Provenance: existing user-entered app record; measurement timestamp and
+moving/idle conditions were not recorded.
+
+### Slice 3: Palette and bitmap pages
+
+| Platform | Core mean / p95 (ms) | Conversion mean / p95 (ms) | Texture submission mean / p95 (ms) | Samples |
+| --- | --- | --- | --- | --- |
+| Native Linux | 2.142 / 3.190 | 0.122 / 0.176 | 0.027 / 0.039 | 120 / 120 / 120 |
+| Google Chrome | 2.938 / 3.800 | 0.234 / 0.300 | 0.032 / 0.100 | 120 / 120 / 120 |
+| Brave | 2.262 / 3.400 | 0.188 / 0.300 | 0.028 / 0.100 | 120 / 120 / 120 |
+
+Provenance: existing user-entered app record; measurement timestamp and
+moving/idle conditions were not recorded.
+
+### Slice 4: CPU calculations
+
+| Platform | Core mean / p95 (ms) | Conversion mean / p95 (ms) | Texture submission mean / p95 (ms) | Samples |
+| --- | --- | --- | --- | --- |
+| Native Linux | 1.863 / 2.962 | 0.110 / 0.157 | 0.026 / 0.041 | 120 / 120 / 120 |
+| Google Chrome | 2.044 / 6.700 | 0.156 / 0.300 | 0.029 / 0.100 | 120 / 120 / 120 |
+| Brave | 2.125 / 2.800 | 0.227 / 0.300 | 0.028 / 0.100 | 120 / 120 / 120 |
+
+Provenance: existing user-entered app record; measurement timestamp and
+moving/idle conditions were not recorded.
+
+### Slice 5: Bitmap copy
+
+| Platform | Core mean / p95 (ms) | Conversion mean / p95 (ms) | Texture submission mean / p95 (ms) | Samples |
+| --- | --- | --- | --- | --- |
+| Native Linux | 2.202 / 3.093 | 0.125 / 0.157 | 0.027 / 0.045 | 120 / 120 / 120 |
+| Google Chrome | 1.809 / 2.700 | 0.196 / 0.300 | 0.025 / 0.100 | 120 / 120 / 120 |
+| Brave | 2.132 / 2.800 | 0.239 / 0.300 | 0.037 / 0.100 | 120 / 120 / 120 |
+
+Provenance: existing user-entered app record; measurement timestamp and
+moving/idle conditions were not recorded.
+
+### Slice 5A: WAITCNT / prefetch
+
+| Platform | Core mean / p95 (ms) | Conversion mean / p95 (ms) | Texture submission mean / p95 (ms) | Samples |
+| --- | --- | --- | --- | --- |
+| Native Linux | Not measured | Not measured | Not measured | — / — / — |
+| Google Chrome | Not measured | Not measured | Not measured | — / — / — |
+| Brave | Not measured | Not measured | Not measured | — / — / — |
+
+No host benchmark was recorded for this slice.
+
+### Slice 6: ARM / Thumb counter
+
+| Platform | Core mean / p95 (ms) | Conversion mean / p95 (ms) | Texture submission mean / p95 (ms) | Samples |
+| --- | --- | --- | --- | --- |
+| Native Linux | 2.099 / 3.338 | 0.099 / 0.155 | 0.023 / 0.036 | 120 / 119 / 120 |
+| Google Chrome | 3.390 / 4.200 | 0.248 / 0.400 | 0.036 / 0.100 | 120 / 120 / 120 |
+| Brave | 3.421 / 4.000 | 0.258 / 0.400 | 0.027 / 0.100 | 120 / 120 / 120 |
+
+Attribution unresolved: these values were recorded under the counter heading,
+which incorrectly repeated the copy-fixture description. They are preserved as
+that heading’s timing record; the measured ROM was not independently identified.
+Native conversion has 119 samples, while core/submission have 120.
+
+### Slice 7: CPU diagnostics
+
+| Platform | Core mean / p95 (ms) | Conversion mean / p95 (ms) | Texture submission mean / p95 (ms) | Samples |
+| --- | --- | --- | --- | --- |
+| Native Linux | 2.811 / 3.575 | 0.149 / 0.204 | 0.032 / 0.047 | 120 / 120 / 120 |
+| Google Chrome | 4.252 / 5.100 | 0.273 / 0.400 | 0.043 / 0.100 | 120 / 120 / 120 |
+| Brave | 4.207 / 4.700 | 0.253 / 0.300 | 0.045 / 0.100 | 120 / 120 / 120 |
+
+The measured diagnostic ROM was not identified; these app values are not
+assigned to both ARM and Thumb. They describe steady result-screen callbacks.
+Measurement timestamps were not recorded. Baseline: `ec4de485b28b2d1357adf954469e162ba793700e`
+plus Slice 7 changes; record updated 2026-09-30.
+
+### Slice 8: Tiled background
+
+| Platform | Core mean / p95 (ms) | Conversion mean / p95 (ms) | Texture submission mean / p95 (ms) | Samples |
+| --- | --- | --- | --- | --- |
+| Native Linux | 4.179 / 5.523 | 0.120 / 0.152 | 0.028 / 0.036 | 120 / 120 / 120 |
+| Google Chrome | 5.557 / 6.700 | 0.185 / 0.300 | 0.037 / 0.100 | 120 / 120 / 120 |
+| Brave | 5.539 / 6.800 | 0.177 / 0.300 | 0.033 / 0.100 | 120 / 120 / 120 |
+
+Record date: 2026-09-30; baseline `e9ca2d6` plus Slice 8 changes.
+Native provenance: `native.txt` and user entries; browser provenance: user entries.
+Moving/idle input conditions were not recorded.
+
+### Slice 9: Sprite scene
+
+| Platform | Core mean / p95 (ms) | Conversion mean / p95 (ms) | Texture submission mean / p95 (ms) | Samples |
+| --- | --- | --- | --- | --- |
+| Native Linux | 4.569 / 6.183 | 0.113 / 0.150 | 0.028 / 0.036 | 120 / 120 / 120 |
+| Google Chrome | 6.213 / 7.400 | 0.183 / 0.300 | 0.028 / 0.100 | 120 / 120 / 120 |
+| Brave | 3.961 / 7.700 | 0.170 / 0.300 | 0.023 / 0.100 | 120 / 120 / 120 |
+
+Record date: 2026-09-30; baseline `e3b7d19` plus Slice 9 changes.
+App values are recorded user entries; moving/idle classification was not recorded.
+The Chrome conversion mean was written `0.183 m`; its unit is corrected to ms,
+with the numeric value unchanged. Native capture provenance was not supplied.
+
+## Headless benchmarks
+
+| Record | Samples / conditions | Core mean (ms) | Core p95 (ms) | Unthrottled speed |
+| --- | --- | --- | --- | --- |
+| Historical Slice 8 | 600 complete emulated frame advances after setup and 19-frame replay; released input | 1.092 | 1.111 | Approximately 15.33×, previously recorded from rounded mean |
+| Historical Slice 9 | 600-frame benchmark reported completed; elapsed timings absent | Not measured | Not measured | Not measured: elapsed timing absent |
+| Historical Slices 0–7 | No complete-frame benchmark recorded | Not measured | Not measured | Not measured: no complete-frame record |
+
+These are core-only complete emulated-frame timings; conversion, UI, texture,
+and GPU costs are excluded. Each target advances by 280,896 cycles. Headless
+conversion and texture submission are not applicable. Fresh closeout results
+are appended separately with their own environment provenance.
+
+## Guest diagnostic completion times
+
+| Historical record | ARM (ms) | Thumb (ms) | Services (ms) | Samples / provenance |
+| --- | --- | --- | --- | --- |
+| Slice 7 user-entered run | 1.814 | 1.742 | 0.259 | One completion each, user-supplied fixture transcript |
+| Slice 8 retained transcript | 0.940 | 0.955 | 0.130 | One completion each, retained CLI output |
+
+`completion_ms` includes ROM loading and execution to the terminal instruction;
+subsequent scanout and presentation are excluded. Historical memory diagnostic
+completion time: Not measured (no millisecond entry retained).
+
+### Earlier guest execution records
+
+| Transcript provenance | Pixels execution (ms) | Calculations execution (ms) | Copy execution (ms) | Samples |
+| --- | --- | --- | --- | --- |
+| WAITCNT section transcript | 5.335 | 5.267 | 4.626 | One run each |
+| Slice 7 user-supplied transcript | 9.748 | 9.916 | 8.779 | One run each |
+| Slice 8 retained transcript | 5.615 | 5.653 | 4.979 | One run each |
+
+These `execution_ms` records include machine loading, terminal execution,
+memory/mailbox inspection and two additional emulated frame periods for scanout;
+image comparison and presentation are excluded. They are not pure terminal
+completion timings or single-frame benchmarks. No historical counter or
+WAITCNT guest completion milliseconds were recorded.
+
+## Profiling results
+
+Optimized release builds with `CARGO_PROFILE_RELEASE_DEBUG=1`; Callgrind windows
+include initialization and scripted replay plus 60 benchmark frames. Instrumented
+wall times are excluded. Counts are host instruction references, not guest
+cycles or milliseconds. No tile or sprite caches were added.
+
+| Historical profile | Host instruction references | Provenance |
+| --- | --- | --- |
+| Slice 8 total | 1,877,851,931 | performance.md record; `/tmp/gba-tiled-results/scanline.callgrind` |
+| Slice 8 total, separate retained record | 1,877,851,986 | tiled_background.md record; discrepancy unresolved, neither value replaced |
+| Slice 9 total | 2,047,673,889 | `/tmp/gba-sprite-results/scanline.callgrind` |
+
+| Source operation | Slice | Host instruction references | Recorded profile share |
 | --- | --- | --- | --- |
-| Arrow movement and screen clamps | Not verified visually | Not verified visually | Not verified visually |
-| Transparent edges and overlapping marker | Headless passed; UI not verified | Headless passed; UI not verified | Headless passed; UI not verified |
-| Behind-BG priority and 1D/2D color change | Headless passed; UI not verified | Headless passed; UI not verified | Headless passed; UI not verified |
-| Replay final player (116,74), scroll (2,0) | Headless passed; UI not verified | Headless passed; UI not verified | Headless passed; UI not verified |
-| memory.gba “All tests passed” image | Headless passed; UI not verified | Headless passed; UI not verified | Headless passed; UI not verified |
-| Reset / pause / focus-loss interaction | Existing session checks pass; UI not verified | UI not verified | UI not verified |
-| Hidden-tab restore without catch-up | Not applicable | Not verified | Not verified |
-| Earlier demo UI regressions | Not verified visually | Not verified visually | Not verified visually |
-| End-to-end responsiveness within frame budget | Not measured | Not measured | Not measured |
+| Map offset calculation | 8 | 23,750,400 | 1.26% |
+| Map-entry read | 8 | 23,750,400 | 1.26% |
+| Packed 4bpp nibble extraction | 8 | 11,875,200 | 0.63% |
+| Palette color read | 8 | 31,172,760 | 1.66% |
+| OBJ tile-number calculation | 9 | 163,010 | Not recorded |
+| OBJ palette reads | 9 | 279,220 | Not recorded |
+| OAM winner storage | 9 | 111,688 | Not recorded |
+| OBJ/BG priority comparison | 9 | 55,844 | Not recorded |
 
-### Artifacts and remaining limits
+Slice 8 scanline work is inlined into `System::advance_time`. Source reports
+were recorded as `scanline-profile.txt` in the corresponding temporary evidence
+directories; those paths are historical provenance, not durable artifacts.
 
-- Recorded fixtures: `/tmp/gba-sprite-results/fixtures.txt`
-- Recorded benchmark: `/tmp/gba-sprite-results/headless-benchmark.txt`
-- Captures: `frame.sprites-frame-{10,13,15,18,20}.ppm` and `frame.memory.ppm`
-  in the evidence directory
-- Native manual capture command writes `native.ppm` / `native.txt`; not yet generated
-- Chrome/Brave screenshots and timing records: not yet provided
-- Automated Slice 9 acceptance: passed for the selected normal 16×16 4bpp layout
-- Visual runtime acceptance: not verified on Linux/Chrome/Brave
-- Fixture-tied follow-ups: extend sprites.gba for other normal sizes/shapes/flips
-  and 8bpp captures; affine/double-size and semi-transparent/window modes are
-  currently skipped and belong to later display slices
-- Hardware timing follow-up: memory.gba proves functional access rules, not OBJ
-  fetch budgets or OAM contention timing; see the detailed audit
+## Performance target comparison
+
+| Target | Recorded comparison |
+| --- | --- |
+| Core p95 <12 ms | All recorded app callback p95 values are below 12 ms; callbacks are not full frames |
+| Complete-frame core p95 <12 ms | Historical Slice 8 headless p95 1.111 ms meets this core-only target |
+| Unthrottled ≥1.25×, aim 1.5× | Historical Slice 8 headless record approximately 15.33× meets the target |
+| Total frame work within 16.7427 ms | Not measured: no end-to-end app/GPU frame timing |
+| Sustained 100% clock on Linux / Chrome / Brave | Not measured: no cycles/wall-time interval recorded |
+| 30-minute resource stability | Not measured: no duration/resource series recorded |
+| Audio queue / underruns | Not applicable to Slices 0–9; audio is outside this scope |
+| Routine allocation profile | Not measured: no allocation-count profile recorded |
+
+## Closeout CLI measurements — 2026-09-30
+
+Environment checked for this run: Intel Core i7-13620H (10 cores / 16 threads),
+Arch Linux rolling, rustc 1.98.1, release opt-level 3 / thin LTO, tracing disabled.
+AC adapter online; platform power profile **balanced**. These sequential local
+CLI runs do not replace the historical AC/performance-profile measurements.
+No concurrent validation build was scheduled during these final benchmark runs;
+other host load and thermal state were not recorded. Node v26.10.0 and Python
+3.14.7 were used for runtime verification; no new browser timing was collected.
+
+| Scenario | Complete emulated frames | Core mean (ms) | Core p95 (ms) | Core p95 <12 ms |
+| --- | --- | --- | --- | --- |
+| pixels | 600 | 0.760 | 0.809 | Yes |
+| tiled | 600 | 1.145 | 1.200 | Yes |
+| sprites | 600 | 1.174 | 1.207 | Yes |
+
+Sample boundaries: 280,896-cycle absolute advances, after initialization and
+settled replay where applicable; conversion/submission/GPU work excluded.
+Each benchmark rechecks the guest image. Raw logs: `final-bench-{scenario}.txt`
+in `/tmp/gba-closeout` (temporary provenance). Reproduce with
+`cargo run --locked -p gba-tools --release -- bench --scenario SCENARIO --frames 600`.
+
+| Guest | Terminal completion (ms) | Samples |
+| --- | --- | --- |
+| arm | 0.977 | 1 |
+| thumb | 0.987 | 1 |
+| services | 0.126 | 1 |
+| memory | 0.957 | 1 |
+
+Completion boundaries match the historical diagnostic table: ROM loading through
+terminal execution, excluding subsequent scanout and presentation. Source:
+`/tmp/gba-closeout/fixtures.txt`, final sequential fixture run.
+
+| Guest | Execution including additional scanout (ms) | Samples |
+| --- | --- | --- |
+| pixels | 5.806 | 1 |
+| calculations | 5.739 | 1 |
+| copy | 5.309 | 1 |
+
+These use the earlier `execution_ms` boundary, not pure terminal completion.
+No fresh sustained app-speed or GPU/presentation measurement was made. No new
+unthrottled-speed value was recorded; the historical 15.33× figure remains
+unchanged. The complete-frame core p95 results meet the 12 ms core-only target
+under these local conditions; total application-frame cost remains unmeasured.
