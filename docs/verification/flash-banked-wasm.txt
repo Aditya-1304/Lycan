@@ -1,0 +1,3 @@
+    Blocking waiting for file lock on build directory
+    Finished `release` profile [optimized] target(s) in 5.42s
+WASM Flash128 contract PASS: pinned upstream r12=0, identification, score, restore, erase/reprogram and image validation

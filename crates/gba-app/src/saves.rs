@@ -1,11 +1,12 @@
 //! Platform storage boundary. The app dispatches at most one operation at a time;
 //! every completion carries ROM identity, session generation and snapshot revision.
 
-use gba_session::{FLASH64_BYTES, SRAM_BYTES};
+use gba_session::{FLASH64_BYTES, FLASH128_BYTES, SRAM_BYTES};
 use sha2::{Digest, Sha256};
 use std::sync::mpsc::{self, Receiver, Sender};
 
 const MAGIC: &[u8; 8] = b"GBASRAM1";
+const FLASH128_MAGIC: &[u8; 8] = b"GBAFL128";
 const FLASH_MAGIC: &[u8; 8] = b"GBAFLS64";
 
 /// SHA-256 of the original cartridge bytes, independent of filenames and titles.
@@ -27,7 +28,9 @@ pub fn encode(identity: &Identity, bytes: &[u8]) -> Vec<u8> {
     let mut output = Vec::with_capacity(40 + bytes.len());
     // Keep the existing SRAM envelope byte-for-byte compatible. Flash exports
     // declare their own capacity; the core validates it against the loaded chip.
-    output.extend_from_slice(if bytes.len() == FLASH64_BYTES {
+    output.extend_from_slice(if bytes.len() == FLASH128_BYTES {
+        FLASH128_MAGIC
+    } else if bytes.len() == FLASH64_BYTES {
         FLASH_MAGIC
     } else {
         MAGIC
@@ -40,9 +43,10 @@ pub fn encode(identity: &Identity, bytes: &[u8]) -> Vec<u8> {
 pub fn decode(identity: &Identity, bytes: &[u8]) -> Result<Vec<u8>, String> {
     let valid_sram = bytes.len() == 40 + SRAM_BYTES && &bytes[..8] == MAGIC;
     let valid_flash = bytes.len() == 40 + FLASH64_BYTES && &bytes[..8] == FLASH_MAGIC;
-    if !valid_sram && !valid_flash {
+    let valid_banked = bytes.len() == 40 + FLASH128_BYTES && &bytes[..8] == FLASH128_MAGIC;
+    if !valid_sram && !valid_flash && !valid_banked {
         return Err(
-            "Expected a GBASRAM1 (32768 bytes) or GBAFLS64 (65536 bytes) backup export".into(),
+            "Expected a GBASRAM1 (32768 bytes), GBAFLS64 (65536 bytes), or GBAFL128 (131072 bytes) backup export".into(),
         );
     }
     if bytes[8..40] != identity.0 {
@@ -368,15 +372,23 @@ pub fn probe(mode: &str) -> Result<(), String> {
     mod contract;
     #[path = "../../../roms/flash/contract.rs"]
     mod flash_contract;
+    #[path = "../../../roms/flash-banked/contract.rs"]
+    mod banked_contract;
     type GuestRun = fn(Option<&[u8]>, bool, u16) -> gba_session::SaveImage;
-    let (rom, run): (&[u8], GuestRun) = if mode.starts_with("flash-") {
+    let (rom, run): (&[u8], GuestRun) = if mode.starts_with("banked-") {
+        banked_contract::verify();
+        (banked_contract::ROM, banked_contract::run)
+    } else if mode.starts_with("flash-") {
         flash_contract::verify();
         (flash_contract::ROM, flash_contract::run)
     } else {
         contract::verify();
         (contract::ROM, contract::run)
     };
-    let mode = mode.strip_prefix("flash-").unwrap_or(mode);
+    let mode = mode
+        .strip_prefix("banked-")
+        .or_else(|| mode.strip_prefix("flash-"))
+        .unwrap_or(mode);
     let identity = Identity::of(rom);
     let saved = pollster::block_on(read(&identity))?;
     let image = match mode {
@@ -392,7 +404,7 @@ pub fn probe(mode: &str) -> Result<(), String> {
             let bytes = saved.ok_or("Probe expected an existing saved score")?;
             run(Some(&bytes), false, 1)
         }
-        _ => return Err("Use --save-probe [flash-]write or [flash-]read".into()),
+        _ => return Err("Use --save-probe [flash-|banked-]write or [flash-|banked-]read".into()),
     };
     let portable = encode(&identity, &image.bytes);
     assert_eq!(decode(&identity, &portable)?, image.bytes);

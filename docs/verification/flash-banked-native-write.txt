@@ -1,0 +1,9 @@
+    Blocking waiting for file lock on build directory
+   Compiling gba-app v0.1.0 (/home/aditya/Projects/GBA/gba-rs/crates/gba-app)
+    Finished `release` profile [optimized] target(s) in 33.60s
+     Running `target/release/gba-app --save-probe banked-write`
+Flash guest PASS: score=1 PC=0x0800023c cycles=842691 instructions=86089 revision=10 dirty=true
+Flash guest PASS: score=1 PC=0x08000240 cycles=842693 instructions=86091 revision=1 dirty=false
+Flash guest PASS: score=2 PC=0x08000238 cycles=842691 instructions=86091 revision=7 dirty=true
+Flash guest PASS: score=1 PC=0x0800023c cycles=842691 instructions=86089 revision=10 dirty=true
+Native backup write PASS: ROM=19a9657c138ed726e7ba055f1d73c27aeee432054505bbd9a23a4b210c3e602b, save=/tmp/gba-flash-banked-20261001/19a9657c138ed726e7ba055f1d73c27aeee432054505bbd9a23a4b210c3e602b.gbasav, export/import validated, failed replacement rejected

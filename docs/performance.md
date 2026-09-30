@@ -1482,4 +1482,147 @@ cargo run --locked -p gba-app --release
 
 Implementation, automated checks and user-confirmed manual platform acceptance
 are complete for Slice 14. Unreported timing/environment fields remain marked
-unavailable. Slice 15 banked Flash128 behavior is not implemented.
+unavailable. Slice 15 banked Flash128 evidence is recorded below.
+
+
+## Slice 15 — Banked Flash128 score recovery (2026-10-01)
+
+The shared Flash decoder now selects a 64 or 128 KiB physical image from the
+centralized cartridge configuration. Flash128 exposes Sanyo identification
+`62 13` and the unlocked `B0` bank command with valid selectors zero/one.
+Reads and programs address the selected bank; sector erase changes only that
+bank, while chip erase covers both. Reset/load returns volatile selection to
+bank zero without discarding backup bytes or pending revisions.
+
+Both banks persist through the completed serialized host route. The portable
+`GBAFL128` envelope contains the original-ROM SHA-256 and exactly 131,072 backup
+bytes (131,112 total bytes). SRAM and Flash64 envelopes remain compatible.
+The core rejects a capacity mismatch before mutation; stale completion cannot
+acknowledge a newer imported image.
+
+The original [banked score cartridge](../roms/flash-banked/README.md) stores
+`a5 score` in bank zero and `5a (score + 16)` in bank one at identical offsets.
+Its green and blue bands separately render the two restored records. The
+contract verifies all 38,400 completed pixels and all 131,072 backup bytes.
+One focused regression was added: programming/sector erase in bank one must
+preserve bank zero, and a complete loaded image must restore both. RED failed
+with `UnmappedAddress` at the first Flash128 command; GREEN passes with banked
+hardware implemented. Existing Flash64 read-interruption coverage is retained.
+
+### Fixture and automated evidence
+
+| Field | Verified result |
+|---|---|
+| Score ROM SHA-256 / size | `19a9657c138ed726e7ba055f1d73c27aeee432054505bbd9a23a4b210c3e602b` / 868 bytes |
+| Startup / selection | Direct ARM, no BIOS; automatic Flash128 via `FLASH1M_V103` |
+| Mailboxes | `0x03000000 = 0x75`; bank-zero score at `0x03000002`; bank-one encoded score at `0x03000004` |
+| Bounds | Three frames; 200,000 instructions/frame; 843,000 cycles |
+| Boundary state | Source-defined polling `0x08000164..0x08000184` or drawing `0x080001c8..0x0800025c`; exact mailboxes, pixels and backup image required |
+| Fresh score | Score 1; PC `0x0800023c`; 842,691 cycles; 86,089 instructions; revision 10, dirty |
+| Reopened score | Score 1; PC `0x08000240`; 842,693 cycles; 86,091 instructions; revision 1, clean |
+| Next update | Score 2; PC `0x08000238`; 842,691 cycles; 86,091 instructions; revision 7, dirty; both bank sectors erased/reprogrammed |
+| Upstream identity | Unchanged `jsmolka/gba-tests` revision `a7113b67e63f83a9b321696ddd7042ccfad6c881`; MIT notice retained |
+| Upstream ROM SHA-256 / size | `9ac50e51d3ce4209dbdf85e472e70c067d5827e9af1bb3e707f6bd9059d5f0c6` / 4,096 bytes |
+| Upstream completion | PC `0x08000c4c`, instruction `0xeafffffe`, r12 = 0, CPSR `0x600000df`; 20,750,196 cycles / 1,760,348 instructions |
+| Upstream success framebuffer | `59ce42abae9825c2d2579c5cd838e47d88be917e37ea36ff162d46fc5d0991e3` |
+| Core/session tests | PASS: 15 core unit, one backup integration, nine session tests (25 total) |
+| Workspace Clippy | PASS, all targets with warnings denied |
+| Release fixtures / reproducible builds | PASS, including unchanged upstream Flash64/Flash128 and rebuilt original score |
+| Production WASM guest | PASS: upstream Flash128 plus banked score, restore/update and import validation |
+| Native persistence | PASS: production disk write and separate-process reopen; full image and identity-bearing export/import checked; failed replacement rejected |
+| App build checks | PASS: native release, WASM check, Trunk 0.21.14 release build |
+| Live Linux / Chrome / Brave acceptance | PASS: user confirmed all manual checks complete on 2026-10-01 |
+
+Evidence: [tests](verification/flash-banked-tests.txt),
+[Clippy](verification/flash-banked-clippy.txt),
+[fixture builds](verification/flash-banked-build-fixtures.txt),
+[score rebuild](verification/flash-banked-build.txt),
+[release fixtures](verification/flash-banked-fixtures.txt),
+[WASM](verification/flash-banked-wasm.txt),
+[native write](verification/flash-banked-native-write.txt), and
+[separate-process reopen](verification/flash-banked-native-reopen.txt).
+Native probe data: `/tmp/gba-flash-banked-20261001` (temporary, not durable evidence).
+
+### Timing and environment fields
+
+Chrome and Brave timings below were supplied by the user for
+`flash-banked-score.gba`, with 120 samples per metric. Existing timing entries
+for earlier slices are preserved. CLI completion samples in logs are bounded
+diagnostic runs; they are not sustained application timings.
+
+| Field | Linux | Chrome | Brave |
+|---|---|---|---|
+| Core frame mean / p95 (ms) | Not measured | 7.253 / 9.500 | 6.153 / 8.700 |
+| Pixel conversion mean / p95 (ms) | Not measured | 0.144 / 0.200 | 0.132 / 0.200 |
+| Texture upload mean / p95 (ms) | Not measured | 0.023 / 0.100 | 0.011 / 0.100 |
+| Samples core / conversion / upload | Not recorded | 120 / 120 / 120 | 120 / 120 / 120 |
+| Sustained unthrottled speed | Not measured | Not measured | Not measured |
+| Save/reopen and both colored bands | PASS, user confirmed | PASS, user confirmed | PASS, user confirmed |
+| Browser version / environment | Not applicable | Not recorded for this slice | Not recorded for this slice |
+
+### User-supplied runtime snapshots
+
+| Field | Chrome | Brave |
+|---|---|---|
+| Loaded cartridge | flash-banked-score.gba | flash-banked-score.gba |
+| Backup selection / detection / override | Some(Flash128) / Identified(Flash128) / None | Some(Flash128) / Identified(Flash128) / None |
+| Storage acknowledgment | Saved revision 148 | Saved revision 70 |
+| Instructions | 32,185,605 | 33,147,311 |
+| GBA cycles | 326,219,301 | 335,963,753 |
+| Execution state | Running | Running |
+| Core PCM rate | 32,768 Hz | 32,768 Hz |
+| Produced PCM samples | 637,147 | 656,179 |
+| Staging drops / empty FIFO | 0 / 0 | 0 / 0 |
+| Host audio | Off; Enable audio available | Off; Enable audio available |
+
+These snapshots record acknowledged storage revisions and automatic Flash128
+selection. Manual diagnostic, both-bank recovery, export/import, rejected-image,
+and failed-write/retry acceptance is based on the user's explicit confirmation
+that all manual checks were completed, rather than inferred from the counters.
+Browser versions, native timings and sustained unthrottled speed were not supplied.
+
+### Manual commands and acceptance
+
+PASS: the user confirmed all manual checks complete on 2026-10-01. The following
+commands and procedure are retained for reproducing acceptance.
+
+```bash
+cd /home/aditya/Projects/GBA/gba-rs
+cargo run --locked -p gba-app --release
+```
+
+Browser server (use the same origin for save and reopen):
+
+```bash
+cd /home/aditya/Projects/GBA/gba-rs
+env -u NO_COLOR trunk --config web/Trunk.toml serve --release --address 127.0.0.1 --port 8080
+```
+
+Open `http://127.0.0.1:8080` in Chrome and Brave. For each target:
+
+1. Choose **Auto detect**, click **Load Flash128 test**, and confirm the successful
+   guest test screen. The pinned diagnostic uses the validated Flash128 override.
+2. Click **Load banked Flash128 score**. Confirm automatic Flash128 selection.
+   Tap/release Z several times: green and blue bands must have the same cell count.
+3. Wait for acknowledged storage success, close the entire app/tab, reopen on
+   the same origin and load the same score ROM. Both bands must retain their count.
+4. Export the backup, increment again and wait for success, then import the old
+   export. Both bands must return to the exported count and survive another reopen.
+5. Reject truncated, Flash64 or different-ROM exports without changing either bank.
+   Reuse the Slice 14 transaction-abort procedure above: a failed write must remain
+   pending, and retry must acknowledge only a successful storage completion.
+6. Record the millisecond fields above and any live acceptance/environment evidence.
+
+### Plan acceptance checklist
+
+- [x] Flash128 bank selection and physical capacity implemented.
+- [x] Programming/sector erase in one bank preserves the other; full-image restore verified.
+- [x] Required unchanged upstream `flash128.gba` passes on native and production WASM.
+- [x] Distinct records in both banks survive separate-process native close/reopen.
+- [x] Existing save route reused; exact-capacity validation and revision behavior verified.
+- [x] Live Linux visual acceptance (user confirmed).
+- [x] Chrome and Brave close/reopen, export/import and failed-write acceptance (user confirmed).
+
+Slice 15 is complete against the plan: automated checks pass and the user
+confirmed all manual target checks. Unreported measurements/environment fields
+remain explicitly unavailable. EEPROM (Slice 16) was not started.
