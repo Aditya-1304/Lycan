@@ -549,3 +549,35 @@ checkpoints = [
     { frame = 9, tile = 0x1111, color = 0x03e0, vblank = 8, completions = 7 },
     { frame = 10, tile = 0x1111, color = 0x001f, vblank = 9, completions = 8 },
 ]
+
+
+[[fixture]]
+name = "pcm"
+rom = "../roms/pcm.gba"
+source = "../roms/pcm/sound.s"
+linker = "../roms/pixels/linker.ld"
+sha256 = "80dfae4f8694e6349c624969d1991677780be31eee22387c1b9cdb0538e2b5d7"
+origin = "Original MIT timer/FIFO/DMA1 synchronized square scene"
+startup = "cartridge-direct-arm"
+bios_required = true
+mailbox_address = 0x03000000
+completion_id = 0x0066
+max_instructions = 100000
+max_cycles = 4000000
+[fixture.verification]
+# Stable active windows: signed +/-32, eight core samples per level.
+# Frozen phase is (global sample index + 10) modulo 16; silence hashes are zero bytes.
+kind = "pcm"
+ready_pc = 0x080000dc
+firmware_sha256 = "044a1305b3e47fcd568e77fcd792f251cd2cb85b359949931654ebb399a37498"
+input_events = [
+    { cycle = 1123584, button = "A", pressed = true },
+    { cycle = 1966272, button = "A", pressed = false },
+]
+checkpoints = [
+    { frame = 4, color = 31, pressed = 0, transitions = 0, samples = 549, pcm_sha256 = "c936ab1da7ef4314182c8edabaeae90f8d51ed45bc48848d35670adf5b470d31" },
+    { frame = 6, color = 992, pressed = 1, transitions = 1, samples = 548, pcm_sha256 = "b02b7e2e8368750e561445dd001edf603bd7b9af8428390c9945a9476681b822" },
+    { frame = 7, color = 992, pressed = 1, transitions = 1, samples = 549, pcm_sha256 = "57bd1145de283c37af2cf66bf565e001fc17767463bb549d1733ef0f7f67b903" },
+    { frame = 9, color = 31, pressed = 0, transitions = 2, samples = 548, pcm_sha256 = "73f10e16a57e80fcd212b6629685e2e19a1d19bf13d34dda6c866b528b098684" },
+    { frame = 10, color = 31, pressed = 0, transitions = 2, samples = 549, pcm_sha256 = "c936ab1da7ef4314182c8edabaeae90f8d51ed45bc48848d35670adf5b470d31" },
+]

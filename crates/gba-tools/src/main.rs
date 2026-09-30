@@ -70,10 +70,34 @@ enum Verification {
     Vblank(Vblank),
     Keypad(Keypad),
     Dma(DmaScene),
+    Pcm(PcmScene),
     Stripes(Stripes),
     Timing(Timing),
     Diagnostic(Diagnostic),
 }
+
+/// Independently frozen guest startup, input and audiovisual checkpoints.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PcmScene {
+    ready_pc: u32,
+    firmware_sha256: String,
+    input_events: Vec<InputEvent>,
+    checkpoints: Vec<PcmCheckpoint>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PcmCheckpoint {
+    frame: u16,
+    color: u16,
+    pressed: u16,
+    transitions: u16,
+    samples: usize,
+    pcm_sha256: String,
+}
+
+const PCM_INPUT: &[(Cycle, Button, bool)] = &include!("../../../roms/pcm/input.rs");
 
 /// The DMA scene has an independently frozen startup PC and firmware identity.
 #[derive(Deserialize)]
@@ -343,6 +367,7 @@ fn manifest(path: &Path) -> Result<Manifest> {
                         | Verification::Vblank(_)
                         | Verification::Keypad(_)
                         | Verification::Dma(_)
+                        | Verification::Pcm(_)
                 ) || matches!(&fixture.verification, Verification::Sprites(expected) if expected.firmware_sha256.is_some())))
             || fixture.max_instructions == 0
             || fixture.max_cycles == 0
@@ -354,6 +379,29 @@ fn manifest(path: &Path) -> Result<Manifest> {
             )));
         }
         match &fixture.verification {
+            Verification::Pcm(expected) => {
+                let events = expected
+                    .input_events
+                    .iter()
+                    .map(|event| Ok((Cycle(event.cycle), button(&event.button)?, event.pressed)))
+                    .collect::<Result<Vec<_>>>()?;
+                if events != PCM_INPUT
+                    || expected.ready_pc & 3 != 0
+                    || expected.firmware_sha256 != hash(gba_core::TEST_FIRMWARE)
+                    || expected.checkpoints.is_empty()
+                    || expected
+                        .checkpoints
+                        .windows(2)
+                        .any(|p| p[0].frame >= p[1].frame)
+                    || expected.checkpoints.iter().any(|p| {
+                        p.frame == 0
+                            || u64::from(p.frame) * CYCLES_PER_FRAME > fixture.max_cycles
+                            || p.pcm_sha256.len() != 64
+                    })
+                {
+                    return Err(fail("invalid PCM identity, timeline or bounds"));
+                }
+            }
             Verification::Dma(expected) => {
                 if expected.ready_pc & 3 != 0
                     || expected.firmware_sha256.len() != 64
@@ -686,6 +734,7 @@ fn build_fixtures(path: &Path) -> Result<()> {
                 Verification::Vblank(expected) => Some(&expected.firmware_sha256),
                 Verification::Keypad(expected) => Some(&expected.firmware_sha256),
                 Verification::Dma(expected) => Some(&expected.firmware_sha256),
+                Verification::Pcm(expected) => Some(&expected.firmware_sha256),
                 Verification::Sprites(expected) => expected.firmware_sha256.as_ref(),
                 _ => None,
             };
@@ -794,7 +843,8 @@ fn pixels(fixture: &Fixture) -> Result<&Pixels> {
         | Verification::Diagnostic(_)
         | Verification::Keypad(_)
         | Verification::Vblank(_)
-        | Verification::Dma(_) => Err(fail("expected a terminal pixels fixture")),
+        | Verification::Dma(_)
+        | Verification::Pcm(_) => Err(fail("expected a terminal pixels fixture")),
     }
 }
 
@@ -1163,6 +1213,134 @@ fn check_sprite_image(machine: &Machine, point: &SpriteCheckpoint) -> Result<()>
 
 /// Verifies bus ownership during setup and the two-frame input/upload/scanout
 /// pipeline. Full-frame colors and all copied tile words are independent oracles.
+/// Executes the same guest used by the app. Every frame drains core PCM so the
+/// hash covers real FIFO output without depending on the staging capacity.
+fn run_pcm(
+    fixture: &Fixture,
+    expected: &PcmScene,
+    bytes: &[u8],
+    capture_path: Option<&str>,
+) -> Result<Machine> {
+    let mut machine = Machine::new();
+    machine.load_rom(bytes)?;
+    machine.enable_test_firmware();
+    machine.run_until_pc(
+        expected.ready_pc,
+        fixture.max_instructions,
+        Cycle(fixture.max_cycles),
+    )?;
+    let setup = machine.cycles().0;
+    if machine.inspect16(fixture.mailbox_address)? != fixture.completion_id {
+        return Err(fail("PCM setup mailbox mismatch"));
+    }
+    for &(cycle, button, pressed) in PCM_INPUT {
+        machine.set_button_at(cycle, button, pressed)?;
+    }
+    let mut pcm = Vec::with_capacity(1024);
+    let last = expected
+        .checkpoints
+        .last()
+        .ok_or_else(|| fail("missing PCM checkpoint"))?
+        .frame;
+    let mut total = 0;
+    for frame in 1..=last {
+        let remaining = fixture
+            .max_instructions
+            .checked_sub(machine.executed_instructions())
+            .ok_or_else(|| fail("PCM instruction budget exhausted"))?;
+        machine.advance_to(Cycle(u64::from(frame) * CYCLES_PER_FRAME), remaining)?;
+        pcm.clear();
+        machine.drain_pcm(&mut pcm);
+        total += pcm.len();
+        if let Some(point) = expected
+            .checkpoints
+            .iter()
+            .find(|point| point.frame == frame)
+        {
+            let encoded: Vec<u8> = pcm
+                .iter()
+                .map(|sample| (sample * 128.0) as i8 as u8)
+                .collect();
+            let identity = hash(&encoded);
+            if let Some(path) = capture_path {
+                fs::write(format!("{path}.pcm-frame-{frame}.s8"), &encoded)?;
+                capture(
+                    Path::new(&format!("{path}.pcm-frame-{frame}.ppm")),
+                    machine.framebuffer(),
+                )?;
+            }
+            if pcm.len() != point.samples || identity != point.pcm_sha256 {
+                return Err(fail(format!(
+                    "PCM frame={frame} samples={} sha256={identity}",
+                    pcm.len()
+                )));
+            }
+            // The fixture's independent waveform is silence or alternating
+            // +32/-32 bytes, each held for eight core samples. Interior runs
+            // must be exact; the frame's first and last runs may be partial.
+            if point.pressed == 0 {
+                if encoded.iter().any(|&sample| sample != 0) {
+                    return Err(fail("idle PCM is not silent"));
+                }
+            } else {
+                if encoded.iter().any(|&sample| !matches!(sample, 32 | 224)) {
+                    return Err(fail("active PCM has an unexpected level"));
+                }
+                let mut start = 0;
+                for end in 1..encoded.len() {
+                    if encoded[end] != encoded[end - 1] {
+                        if start != 0 && end - start != 8 {
+                            return Err(fail("PCM waveform period mismatch"));
+                        }
+                        start = end;
+                    }
+                }
+            }
+            for (index, &pixel) in machine.framebuffer().iter().enumerate() {
+                let (x, y) = (index % SCREEN_WIDTH, index / SCREEN_WIDTH);
+                let color = if (112..128).contains(&x) && (72..88).contains(&y) {
+                    point.color
+                } else {
+                    0
+                };
+                if pixel != color {
+                    return Err(fail(format!("PCM square frame={frame} pixel={index}")));
+                }
+            }
+            if machine.inspect16(fixture.mailbox_address + 2)? != frame
+                || machine.inspect16(fixture.mailbox_address + 4)? != point.pressed
+                || machine.inspect16(fixture.mailbox_address + 6)? != point.transitions
+                || machine.inspect16(0x04000202)? != 0
+                || !machine.halted()
+            {
+                return Err(fail(format!("PCM guest event mismatch frame={frame}")));
+            }
+            println!(
+                "PASS pcm frame={frame} samples={} sha256={identity} square={:#06x} transitions={} pixels=38400",
+                pcm.len(),
+                point.color,
+                point.transitions
+            );
+        }
+    }
+    let (produced, dropped, empty) = machine.pcm_counters();
+    if produced != machine.cycles().0 / 512
+        || produced != total as u64
+        || dropped != 0
+        || empty != 0
+    {
+        return Err(fail(format!(
+            "PCM production mismatch produced={produced} total={total} dropped={dropped} empty={empty}"
+        )));
+    }
+    println!(
+        "PASS pcm setup_cycles={setup} cycles={} instructions={} produced={produced} dropped={dropped} fifo_underruns={empty} rate=32768",
+        machine.cycles().0,
+        machine.executed_instructions()
+    );
+    Ok(machine)
+}
+
 fn run_dma(
     fixture: &Fixture,
     expected: &DmaScene,
@@ -1919,6 +2097,8 @@ fn benchmark_frames(fixture: &Fixture, machine: &mut Machine, frames: usize) -> 
     if frames == 0 || frames > 1_000_000 {
         return Err(fail("frame count must be 1..=1000000"));
     }
+    let mut pcm = Vec::with_capacity(1024);
+    machine.drain_pcm(&mut pcm);
     let mut samples = Vec::with_capacity(frames);
     let mut target = machine.cycles();
     for _ in 0..frames {
@@ -1926,6 +2106,8 @@ fn benchmark_frames(fixture: &Fixture, machine: &mut Machine, frames: usize) -> 
         let start = Instant::now();
         machine.advance_to(target, fixture.max_instructions)?;
         samples.push(start.elapsed().as_secs_f64() * 1000.0);
+        pcm.clear();
+        machine.drain_pcm(&mut pcm);
     }
     let mean = samples.iter().sum::<f64>() / frames as f64;
     samples.sort_by(f64::total_cmp);
@@ -1963,18 +2145,18 @@ fn run() -> Result<()> {
         && !(args[0] == "fixtures" && args.get(1).map(String::as_str) == Some("run"))
     {
         return Err(fail(
-            "usage: build-fixtures | fixtures run --manifest PATH [--fixture NAME] [--capture PATH] | bench --scenario pixels|tiled|sprites|vblank|irq-sprites|dma --frames N",
+            "usage: build-fixtures | fixtures run --manifest PATH [--fixture NAME] [--capture PATH] | bench --scenario pixels|tiled|sprites|vblank|irq-sprites|dma|pcm --frames N",
         ));
     }
     let scenario = option(&args, "--scenario")?.unwrap_or_else(|| "pixels".to_owned());
     if bench
         && !matches!(
             scenario.as_str(),
-            "pixels" | "tiled" | "sprites" | "vblank" | "irq-sprites" | "dma"
+            "pixels" | "tiled" | "sprites" | "vblank" | "irq-sprites" | "dma" | "pcm"
         )
     {
         return Err(fail(
-            "benchmark scenario must be pixels, tiled, sprites, vblank, irq-sprites or dma",
+            "benchmark scenario must be pixels, tiled, sprites, vblank, irq-sprites, dma or pcm",
         ));
     }
     let manifest = manifest(&path)?;
@@ -1996,6 +2178,21 @@ fn run() -> Result<()> {
             continue;
         }
         let bytes = load(fixture, path.parent().unwrap())?;
+        if let Verification::Pcm(expected) = &fixture.verification {
+            let mut machine = run_pcm(
+                fixture,
+                expected,
+                &bytes,
+                option(&args, "--capture")?.as_deref(),
+            )?;
+            if bench {
+                let frames = option(&args, "--frames")?
+                    .unwrap_or_else(|| "600".to_owned())
+                    .parse()?;
+                benchmark_frames(fixture, &mut machine, frames)?;
+            }
+            continue;
+        }
         if let Verification::Dma(expected) = &fixture.verification {
             let mut machine = run_dma(
                 fixture,

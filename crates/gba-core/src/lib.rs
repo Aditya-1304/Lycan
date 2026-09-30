@@ -1,5 +1,8 @@
 #![forbid(unsafe_code)]
 
+mod audio;
+pub use audio::PCM_RATE;
+
 use std::collections::VecDeque;
 use std::error::Error;
 use std::fmt;
@@ -1421,7 +1424,7 @@ impl GamePak {
     }
 }
 
-/// DMA3 owns the bus while active. Programmed registers remain distinct from
+/// DMA1 and DMA3 own the bus while active. Programmed registers remain distinct from
 /// latched addresses so repeat transfers retain their source progression.
 #[derive(Default)]
 struct DmaTransfer {
@@ -1436,7 +1439,8 @@ struct DmaTransfer {
 }
 
 struct System {
-    dma: DmaTransfer,
+    dma: [DmaTransfer; 4],
+    audio: audio::Audio,
     /// HALT stops instruction retirement while hardware time continues.
     halted: bool,
     buttons: ButtonState,
@@ -1462,7 +1466,8 @@ struct System {
 impl System {
     fn new() -> Self {
         let mut system = Self {
-            dma: DmaTransfer::default(),
+            dma: std::array::from_fn(|_| DmaTransfer::default()),
+            audio: audio::Audio::new(),
             halted: false,
             buttons: ButtonState::default(),
             inputs: VecDeque::new(),
@@ -1507,11 +1512,12 @@ impl System {
 
     /// HALT must stop at input transitions as well as display interrupt edges.
     fn next_wake_event(&self) -> u64 {
-        let display = if self.dma.control & 0xb000 == 0xa000 {
+        let display = if self.dma[3].control & 0xb000 == 0xa000 {
             self.next_vblank().min(self.next_hblank())
         } else {
             self.next_vblank()
         };
+        let display = display.min(self.audio.next_event(self.cycles));
         self.inputs
             .front()
             .map_or(display, |event| display.min(event.cycle.0))
@@ -1529,73 +1535,87 @@ impl System {
 
     /// Enable rising edges latch the complete descriptor. A zero DMA3 count
     /// means 65,536 transfers; immediate mode ignores the repeat bit.
-    fn configure_dma(&mut self, value: u16) {
-        let old = self.dma.control;
-        self.dma.control = value;
+    fn configure_dma(&mut self, channel: usize, value: u16) {
+        let base = 0xb0 + channel * 12;
+        let sound = channel == 1 && value & 0x3000 == 0x3000;
+        let old = self.dma[channel].control;
+        self.dma[channel].control = value;
         if value & 0x8000 == 0 {
-            self.dma.active = false;
+            self.dma[channel].active = false;
         } else if old & 0x8000 == 0 {
-            let width = if value & 0x400 != 0 { 4 } else { 2 };
-            self.dma.source = u32::from_le_bytes(self.io[0xd4..0xd8].try_into().unwrap())
-                & 0x0fff_ffff
-                & !(width - 1);
-            self.dma.destination = u32::from_le_bytes(self.io[0xd8..0xdc].try_into().unwrap())
-                & 0x0fff_ffff
-                & !(width - 1);
-            self.dma.initial_destination = self.dma.destination;
-            let count = u16::from_le_bytes([self.io[0xdc], self.io[0xdd]]);
-            self.dma.count = if count == 0 { 65536 } else { u32::from(count) };
-            self.dma.remaining = self.dma.count;
-            self.dma.active = value & 0x3000 == 0;
-            self.dma.sequential = false;
+            let width = if sound || value & 0x400 != 0 { 4 } else { 2 };
+            self.dma[channel].source =
+                u32::from_le_bytes(self.io[base..base + 4].try_into().unwrap())
+                    & 0x0fff_ffff
+                    & !(width - 1);
+            self.dma[channel].destination =
+                u32::from_le_bytes(self.io[base + 4..base + 8].try_into().unwrap())
+                    & 0x0fff_ffff
+                    & !(width - 1);
+            self.dma[channel].initial_destination = self.dma[channel].destination;
+            let count = u16::from_le_bytes([self.io[base + 8], self.io[base + 9]]);
+            self.dma[channel].count = if sound {
+                4
+            } else if count == 0 {
+                if channel == 3 { 65536 } else { 16384 }
+            } else {
+                u32::from(count)
+            };
+            self.dma[channel].remaining = self.dma[channel].count;
+            self.dma[channel].active = value & 0x3000 == 0;
+            self.dma[channel].sequential = false;
         }
     }
 
     /// Services one read/write beat, preserving state between host deadlines.
     /// CPU execution and IRQ entry wait for DMA to release bus ownership. Every
     /// memory access advances scanout and requests through the ordinary bus path.
-    fn dma_beat(&mut self) -> Result<(), CoreError> {
-        let control = self.dma.control;
-        let width = if control & 0x400 != 0 { 4 } else { 2 };
-        if !self.dma.sequential {
+    fn dma_beat(&mut self, channel: usize) -> Result<(), CoreError> {
+        let control = self.dma[channel].control;
+        let sound = channel == 1 && control & 0x3000 == 0x3000;
+        let width = if sound || control & 0x400 != 0 { 4 } else { 2 };
+        if !self.dma[channel].sequential {
             self.gamepak = GamePak::default();
             self.advance_time(2);
         }
         let access = Access {
             kind: AccessKind::Data,
-            sequential: self.dma.sequential,
+            sequential: self.dma[channel].sequential,
         };
         if width == 4 {
-            let value = self.read32_impl(self.dma.source, access)?;
-            self.write32_impl(self.dma.destination, value, access)?;
+            let value = self.read32_impl(self.dma[channel].source, access)?;
+            self.write32_impl(self.dma[channel].destination, value, access)?;
         } else {
-            let value = self.read16_impl(self.dma.source, access)?;
-            self.write16_impl(self.dma.destination, value, access)?;
+            let value = self.read16_impl(self.dma[channel].source, access)?;
+            self.write16_impl(self.dma[channel].destination, value, access)?;
         }
         let advance = |address: u32, mode: u16| match mode {
             1 => address.wrapping_sub(width),
             2 => address,
             _ => address.wrapping_add(width),
         };
-        self.dma.source = advance(self.dma.source, (control >> 7) & 3);
-        self.dma.destination = advance(self.dma.destination, (control >> 5) & 3);
-        self.dma.sequential = true;
-        self.dma.remaining -= 1;
-        if self.dma.remaining == 0 {
-            self.dma.active = false;
+        self.dma[channel].source = advance(self.dma[channel].source, (control >> 7) & 3);
+        if !sound {
+            self.dma[channel].destination =
+                advance(self.dma[channel].destination, (control >> 5) & 3);
+        }
+        self.dma[channel].sequential = true;
+        self.dma[channel].remaining -= 1;
+        if self.dma[channel].remaining == 0 {
+            self.dma[channel].active = false;
             self.gamepak = GamePak::default();
             if control & 0x4000 != 0 {
-                self.io[0x203] |= 8;
+                self.io[0x203] |= 1 << channel;
             }
             if control & 0x200 != 0 && control & 0x3000 != 0 {
-                self.dma.remaining = self.dma.count;
+                self.dma[channel].remaining = self.dma[channel].count;
                 if control & 0x60 == 0x60 {
-                    self.dma.destination = self.dma.initial_destination;
+                    self.dma[channel].destination = self.dma[channel].initial_destination;
                 }
-                self.dma.sequential = false;
+                self.dma[channel].sequential = false;
             } else {
-                self.dma.control &= !0x8000;
-                self.io[0xdf] &= !0x80;
+                self.dma[channel].control &= !0x8000;
+                self.io[0xb0 + channel * 12 + 11] &= !0x80;
             }
         }
         Ok(())
@@ -1622,6 +1642,7 @@ impl System {
             | (u16::from(line == control >> 8) << 2);
         self.io[4..6].copy_from_slice(&(control | flags).to_le_bytes());
         self.io[6..8].copy_from_slice(&line.to_le_bytes());
+        self.audio.refresh_timers(&mut self.io);
         self.io[0x130..0x132].copy_from_slice(&(!self.buttons.0 & 0x03ff).to_le_bytes());
     }
 
@@ -1682,9 +1703,18 @@ impl System {
 
         if let Some(range) = range_for(address, IO_START, self.io.len(), 2) {
             let offset = range.start;
-            if offset == 0xde {
+            if matches!(offset, 0xc6 | 0xde) {
                 self.io[range].copy_from_slice(&bytes);
-                self.configure_dma(value);
+                self.configure_dma(if offset == 0xc6 { 1 } else { 3 }, value);
+                return Ok(());
+            }
+            if (0x100..0x110).contains(&offset) {
+                self.audio.write_timer(offset, value);
+                self.audio.refresh_timers(&mut self.io);
+                return Ok(());
+            }
+            if matches!(offset, 0xa0 | 0xa2) {
+                self.audio.push(&bytes);
                 return Ok(());
             }
             if matches!(offset, 6 | 0x130) {
@@ -1817,20 +1847,30 @@ impl System {
 
     /// Advances display events before any access changes the state observed by scanout.
     fn advance_time(&mut self, cycles: u64) {
-        let target = self.cycles.saturating_add(cycles);
+        let deadline = self.cycles.saturating_add(cycles);
+        loop {
+            let target = deadline.min(self.audio.next_event(self.cycles));
+            self.advance_devices(target);
+            if self.cycles >= deadline {
+                break;
+            }
+        }
+    }
+
+    fn advance_devices(&mut self, target: u64) {
         // Latch VBlank at line 160 even when an access crosses the boundary.
         // Repeated reads in VBlank must not regenerate an acknowledged request.
         let next = self.next_vblank();
         let hblank = self.next_hblank();
-        let trigger = (self.dma.control >> 12) & 3;
-        if self.dma.control & 0x8000 != 0
-            && !self.dma.active
+        let trigger = (self.dma[3].control >> 12) & 3;
+        if self.dma[3].control & 0x8000 != 0
+            && !self.dma[3].active
             && ((trigger == 1 && next <= target)
                 || (trigger == 2
                     && hblank <= target
                     && hblank / CYCLES_PER_SCANLINE % SCANLINES_PER_FRAME < 160))
         {
-            self.dma.active = true;
+            self.dma[3].active = true;
         }
         if next <= target && self.io[4] & 8 != 0 {
             self.io[0x202] |= 1;
@@ -1846,6 +1886,16 @@ impl System {
         }
         self.display
             .synchronize_to(target, &self.vram, &self.palette, &self.io, &self.oam);
+        let (irq, refill) = self.audio.advance(target - self.cycles, target);
+        let flags = u16::from_le_bytes([self.io[0x202], self.io[0x203]]) | irq;
+        self.io[0x202..0x204].copy_from_slice(&flags.to_le_bytes());
+        if refill
+            && self.dma[1].control & 0xb000 == 0xb000
+            && self.dma[1].destination == IO_START + 0xa0
+            && !self.dma[1].active
+        {
+            self.dma[1].active = true;
+        }
         self.cycles = target;
         self.refresh_status();
     }
@@ -2307,11 +2357,30 @@ impl Machine {
         self.cpu.exception_banks[1][0] = 0x0300_7fe0;
     }
 
+    /// Drains completed mono PCM samples without advancing guest time.
+    pub fn drain_pcm(&mut self, output: &mut Vec<f32>) {
+        self.system.audio.drain(output);
+    }
+
+    /// Discards host-bound samples at pause/focus boundaries, retaining devices.
+    pub fn clear_pcm(&mut self) {
+        self.system.audio.clear_pcm();
+    }
+
+    /// Reports produced, discarded and empty-FIFO sample counts since reset.
+    pub fn pcm_counters(&self) -> (u64, u64, u64) {
+        (
+            self.system.audio.produced,
+            self.system.audio.dropped,
+            self.system.audio.fifo_underruns,
+        )
+    }
+
     /// Executes one instruction, one DMA read/write beat, or advances HALT to
     /// the next input/display event. DMA and sleep preserve instruction count.
     pub fn step(&mut self) -> Result<u32, CoreError> {
-        if self.system.dma.active {
-            self.system.dma_beat()?;
+        if let Some(channel) = self.system.dma.iter().position(|dma| dma.active) {
+            self.system.dma_beat(channel)?;
             return Ok(self.cpu.registers[15]);
         }
         let pending = self.system.pending_interrupts();
@@ -2361,7 +2430,7 @@ impl Machine {
             }
             if self.system.halted
                 && self.system.pending_interrupts() == 0
-                && !self.system.dma.active
+                && !self.system.dma.iter().any(|dma| dma.active)
             {
                 let next = self.system.next_wake_event();
                 let deadline = next.min(target.0);
@@ -2781,6 +2850,58 @@ mod tests {
             machine.advance_to(Cycle(2 * CYCLES_PER_FRAME), 1),
             Err(RunError::StepLimitExceeded { .. })
         ));
+    }
+
+    // Catches missing FIFO refill, DMA source rewind and sample production tied
+    // to host deadlines. Existing DMA3 image tests do not consume audio FIFOs.
+    #[test]
+    fn timer_fifo_dma_sound_is_identical_across_bounded_advances() {
+        let run = |chunk: u64| {
+            let mut machine = Machine::new();
+            machine.system.halted = true;
+            for (index, byte) in machine.system.ewram.iter_mut().take(128).enumerate() {
+                *byte = (index as u8).wrapping_mul(3);
+            }
+            let data = Access {
+                kind: AccessKind::Data,
+                sequential: false,
+            };
+            machine
+                .system
+                .write32_impl(IO_START + 0xbc, EWRAM_START, data)
+                .unwrap();
+            machine
+                .system
+                .write32_impl(IO_START + 0xc0, IO_START + 0xa0, data)
+                .unwrap();
+            // FIFO mode forces four words and a fixed destination regardless of count/width.
+            machine
+                .system
+                .write32_impl(IO_START + 0xc4, 0xb2000001, data)
+                .unwrap();
+            machine
+                .system
+                .write16_impl(IO_START + 0x100, 0xfe00, data)
+                .unwrap();
+            machine
+                .system
+                .write16_impl(IO_START + 0x102, 0xc0, data)
+                .unwrap();
+            let end = machine.cycles().0 + 48 * 512;
+            let mut pcm = Vec::new();
+            while machine.cycles().0 < end {
+                machine
+                    .advance_to(Cycle((machine.cycles().0 + chunk).min(end)), 1)
+                    .unwrap();
+                machine.drain_pcm(&mut pcm);
+            }
+            assert_eq!(machine.inspect16(IO_START + 0x202).unwrap() & 8, 8);
+            assert_eq!(pcm.len(), end as usize / 512);
+            assert!(pcm.iter().any(|&sample| sample > 0.5));
+            assert!(pcm.iter().any(|&sample| sample < -0.5));
+            pcm
+        };
+        assert_eq!(run(37), run(4096));
     }
 
     #[test]
