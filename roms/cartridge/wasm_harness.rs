@@ -137,3 +137,15 @@ pub extern "C" fn cycles() -> u64 {
 pub extern "C" fn generation() -> u64 {
     MACHINE.with_borrow(|machine| machine.framebuffer_generation())
 }
+
+/// Queues the DMA scene timeline shared with the native runner and application.
+#[unsafe(no_mangle)]
+pub extern "C" fn queue_dma_input() {
+    use gba_core::CYCLES_PER_FRAME;
+    const INPUT: &[(Cycle, Button, bool)] = &include!("../dma/input.rs");
+    MACHINE.with_borrow_mut(|machine| {
+        for &(cycle, button, pressed) in INPUT {
+            machine.set_button_at(cycle, button, pressed).unwrap();
+        }
+    });
+}

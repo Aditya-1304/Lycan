@@ -362,4 +362,154 @@ The headless p95 meets the core-only target. Total app-frame time, sustained
 Linux/Chrome/Brave cycles per wall second, allocation counts and 30-minute
 resource stability are not measured. Browser visual/runtime acceptance remains
 pending for the user; a WASM core run or build does not establish it. Audio is
-outside Slice 10. Slice 10A verification is recorded in [keypad_interrupt.md](keypad_interrupt.md). Slice 11 DMA remains unimplemented.
+outside Slice 10. Slice 10A verification is recorded in [keypad_interrupt.md](keypad_interrupt.md). Slice 11 DMA evidence is recorded below.
+
+
+## Slice 11: DMA3 scene uploads
+
+Record date: 2026-09-30. Baseline: `7e873b1457dee2c30993678af56a5436bb80f9ad`
+plus the current Slice 11 changes. DMA3 now copies one bounded read/write beat
+at a time through the existing memory timing and device synchronization paths.
+The CPU yields bus ownership during transfers; IRQ requests continue to latch,
+and exception delivery resumes after completion. Immediate, VBlank and visible
+HBlank triggers, halfword/word width, zero-count expansion, increment/decrement/
+fixed address control and destination reload are implemented. DMA0–2 and special
+sound/capture triggers are outside this slice.
+
+The original `dma.gba` guest uploads a nonzero 64 KiB pattern to VRAM, then clears
+the 8 KiB screen map. The runner checks every halfword against those two expected
+regions, preventing untouched zero-initialized RAM from passing as a successful
+upload. VBlank callbacks then arm DMA3 for the next VBlank: holding logical A
+(keyboard Z) selects green tile data; releasing it selects red. The next complete
+scanout displays the uploaded data. Firmware entry/return and IF acknowledgement
+use the same path as the existing IRQ scenes.
+
+### Plan acceptance checklist
+
+| Slice 11 requirement | Evidence / status |
+| --- | --- |
+| Button swaps tile/sprite data through DMA3 at the selected display event | Original tiled guest swaps tile 0 red/green at VBlank; app load/replay controls use the shared logical input timeline |
+| Transfer width, count, address control, triggers and bus timing needed by demo | Guest exercises halfword immediate uploads and fixed-source word VBlank uploads; existing bus costs charge both source and destination; focused HBlank repeat test verifies word width, source progression, destination reload and disable |
+| Devices advance during transfer; retain state between bounded beats | Large-upload regression yields with data partially copied and enable still set, retires no CPU instructions, resumes to completion and preserves the intervening VBlank IF request |
+| Copied bytes and resulting picture match | Full 64 KiB setup comparison plus all 16 tile halfwords at each checkpoint; five full 38,400-pixel comparisons pass on native and compiled WASM |
+| Event order | Frame 6/9 contains newly uploaded tile data while scanout still shows the previous color; frame 7/10 shows the new color; exact VBlank/completion counts and saved IF 0x0801 → 0 match |
+| IRQ behavior remains working | Earlier VBlank dispatch/masked wake/disabled stall/Thumb-return/unmapped-vector and keypad negative/wake checks pass; IRQ sprite scene retains its five exact captures |
+| App remains responsive during large transfers | Bounded core progress verified; Linux/Chrome/Brave visual responsiveness, pause/reset/focus-loss and live interaction remain pending user checks |
+
+Two focused Rust regressions were added to the existing core test module.
+Both failed on the pre-DMA core because destination data was not copied, then
+passed with DMA implemented. They catch deadline monopolization/lost device
+requests and repeat uploads incorrectly rewinding the source or failing to reload
+the destination. No new test module or per-function test suite was added.
+
+### Frozen guest execution evidence
+
+ROM: `roms/dma.gba`, 380 bytes; SHA-256:
+`f515710122c58b37e3487ae0ab51c93b89b94f56178270edb49a6969ac9ae6e7`.
+Startup is cartridge-direct ARM with explicitly mapped original test firmware.
+Firmware SHA-256 remains
+`044a1305b3e47fcd568e77fcd792f251cd2cb85b359949931654ebb399a37498`.
+Startup completion executes declared ready PC `0x080000A8` with mailbox ID
+`0x0065`, after 221,638 cycles. Total replay bounds: 100,000 instructions and
+4,000,000 cycles. Final replay: 2,808,960 cycles, 402 instructions, CPU halted.
+The initial uploads finish after the first VBlank edge, so the IRQ counters begin
+with the second frame; the frozen expectations account for that startup interval.
+
+| Frame | Tile halfword | Complete-frame color | VBlank callbacks | DMA completion callbacks |
+| --- | --- | --- | --- | --- |
+| 4 | 0x1111 | 0x001F (red) | 3 | 2 |
+| 6 | 0x2222 | 0x001F (red) | 5 | 4 |
+| 7 | 0x2222 | 0x03E0 (green) | 6 | 5 |
+| 9 | 0x1111 | 0x03E0 (green) | 8 | 7 |
+| 10 | 0x1111 | 0x001F (red) | 9 | 8 |
+
+At each checkpoint the shared callback saves IF `0x0801`, acknowledges it to
+zero and returns to HALT. Native and compiled-WASM runs match these counts,
+cycles, instructions, copied data and complete-frame colors. Input events and
+checkpoints are frozen in `fixtures/manifest.toml`; the native runner checks
+`roms/dma/input.rs` against the manifest before accepting the app replay timeline.
+
+### Application measurements
+
+Earlier user-entered millisecond values are preserved. These rows apply only to
+the new DMA scene; no app measurements are inferred from CLI benchmarks.
+
+| Platform | Core mean / p95 (ms) | Conversion mean / p95 (ms) | Texture submission mean / p95 (ms) | Samples | Visual acceptance |
+| --- | --- | --- | --- | --- | --- |
+| Native Linux | Not measured | Not measured | Not measured | Not recorded / Not recorded / Not recorded | Pending user check |
+| Google Chrome | Not measured | Not measured | Not measured | Not recorded / Not recorded / Not recorded | Pending user check |
+| Brave | Not measured | Not measured | Not measured | Not recorded / Not recorded / Not recorded | Pending user check |
+
+### Headless frame measurements
+
+Environment refreshed: Intel Core i7-13620H, 10 cores / 16 threads; rustc 1.98.1;
+platform power profile balanced. Release opt-level 3 / thin LTO; tracing disabled.
+OS/desktop, AC state, thermal state and other host load were not independently
+refreshed for this run. Benchmarks ran sequentially after validation builds
+completed, with logical keys released.
+
+| Scenario | Complete emulated frame samples | Core mean (ms) | Core p95 (ms) | Core p95 <12 ms |
+| --- | --- | --- | --- | --- |
+| DMA tile scene after 10-frame replay | 600 | 0.196 | 0.198 | Yes |
+| Earlier IRQ sprite scene after 20-frame replay | 600 | 0.229 | 0.239 | Yes |
+
+Each sample advances an absolute target by 280,896 cycles. Initialization,
+including the large upload, and scripted replay precede the measured window.
+Conversion, texture submission, GPU work and host pacing are excluded. The DMA
+scene still performs one eight-word tile upload each VBlank during measurement;
+its final image is rechecked after the run. These numbers establish the core-only
+p95 target for these scenarios. Large-upload application callback timing,
+end-to-end frame cost and sustained app speed remain not measured.
+Sources: `/tmp/gba-dma-results/bench-dma.txt` and `bench-irq-sprites.txt`.
+
+### Automated validation and reproduction
+
+- All 20 manifest fixtures rebuilt or upstream identities verified, and executed successfully.
+- Workspace tests: 17 passed (10 core, 7 session); app/tools and doc-test targets completed.
+- Clippy with warnings denied, formatting and diff whitespace checks passed.
+- Native app release build and Trunk 0.21.14 WASM release artifact build passed.
+- Compiled-WASM Node runner: 24 WAITCNT cases, ARM/Thumb/services/memory diagnostics,
+  VBlank variants, both keypad contracts and all five DMA checkpoints passed.
+
+Temporary raw evidence: `/tmp/gba-dma-results/build-fixtures.txt`, `fixtures.txt`,
+`wasm.txt`, `frame.dma-frame-{4,6,7,9,10}.ppm` and the benchmark logs. These paths
+are local temporary provenance, not durable release artifacts. Reproduce:
+
+```bash
+cd /home/aditya/Projects/GBA/gba-rs
+cargo run --locked -p gba-tools --release -- build-fixtures
+cargo run --locked -p gba-tools --release -- fixtures run
+python3 roms/cartridge/verify_wasm.py --diagnostics --vblank --keypad --dma
+cargo test --locked --workspace
+cargo clippy --locked --workspace --all-targets -- -D warnings
+cargo run --locked -p gba-tools --release -- bench --scenario dma --frames 600
+cargo run --locked -p gba-tools --release -- bench --scenario irq-sprites --frames 600
+```
+
+### Manual Linux / browser checks
+
+Linux:
+
+```bash
+cd /home/aditya/Projects/GBA/gba-rs
+cargo run --locked -p gba-app --release
+```
+
+Browser, in a separate terminal if Linux is also running:
+
+```bash
+cd /home/aditya/Projects/GBA/gba-rs
+env -u NO_COLOR trunk --config web/Trunk.toml serve --release
+```
+
+Open the printed local URL in Chrome and Brave. On each platform, click
+**Load DMA tile scene**, hold **Z** to turn the tiled screen green, then release
+it to return to red. Click **Replay DMA input**; it pauses at frame 10, with a red
+frame and status reporting 9 VBlanks, 8 uploads and acknowledged IF. Repeat load/
+reset during the large setup upload, and check pause/resume and focus loss remain
+responsive. Recheck **Replay IRQ sprite input** and both keypad replays. Record
+app timings with the existing benchmark controls and fill the platform rows above.
+
+Full Slice 11 visual acceptance remains pending these manual checks. Total app
+frame cost, sustained platform cycles/wall-time, allocation counts and 30-minute
+resource stability are not measured. Audio remains outside Slice 11.

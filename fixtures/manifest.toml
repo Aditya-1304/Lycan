@@ -519,3 +519,33 @@ max_cycles = 561792
 kind = "keypad"
 and_mode = true
 firmware_sha256 = "044a1305b3e47fcd568e77fcd792f251cd2cb85b359949931654ebb399a37498"
+
+[[fixture]]
+name = "dma"
+rom = "../roms/dma.gba"
+source = "../roms/dma/upload.s"
+linker = "../roms/pixels/linker.ld"
+sha256 = "f515710122c58b37e3487ae0ab51c93b89b94f56178270edb49a6969ac9ae6e7"
+origin = "Original MIT DMA3 tile scene in roms/dma/upload.s"
+startup = "cartridge-direct-arm"
+bios_required = true
+mailbox_address = 0x03000000
+completion_id = 0x0065
+max_instructions = 100000
+max_cycles = 4000000
+[fixture.verification]
+kind = "dma"
+ready_pc = 0x080000a8
+firmware_sha256 = "044a1305b3e47fcd568e77fcd792f251cd2cb85b359949931654ebb399a37498"
+input_events = [
+    { cycle = 1123584, button = "A", pressed = true },
+    { cycle = 1966272, button = "A", pressed = false },
+]
+# Data uploaded at VBlank is visible during the following complete scanout.
+checkpoints = [
+    { frame = 4, tile = 0x1111, color = 0x001f, vblank = 3, completions = 2 },
+    { frame = 6, tile = 0x2222, color = 0x001f, vblank = 5, completions = 4 },
+    { frame = 7, tile = 0x2222, color = 0x03e0, vblank = 6, completions = 5 },
+    { frame = 9, tile = 0x1111, color = 0x03e0, vblank = 8, completions = 7 },
+    { frame = 10, tile = 0x1111, color = 0x001f, vblank = 9, completions = 8 },
+]

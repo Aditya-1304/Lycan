@@ -11,6 +11,32 @@ assert.deepEqual(WebAssembly.Module.imports(module), [], "unexpected host depend
 const { exports: core } = await WebAssembly.instantiate(module, {});
 const verification = fixture.verification;
 const marker = (pc) => core.marker(pc, fixture.max_instructions, BigInt(fixture.max_cycles));
+if (verification.kind === "dma") {
+    core.initialize(1);
+    const setup = marker(verification.ready_pc);
+    assert.equal(core.inspect16(fixture.mailbox_address), fixture.completion_id);
+    for (let address = 0x06000000; address < 0x06010000; address += 2) {
+        assert.equal(core.inspect16(address), address >= 0x06008000 && address < 0x0600a000 ? 0 : 0x1111, "large DMA upload and map clear");
+    }
+    core.queue_dma_input();
+    for (const point of verification.checkpoints) {
+        core.advance(BigInt(point.frame) * 280896n, fixture.max_instructions, BigInt(fixture.max_cycles));
+        for (let address = 0x06000000; address < 0x06000020; address += 2) {
+            assert.equal(core.inspect16(address), point.tile, "uploaded tile data");
+        }
+        for (let index = 0; index < 38400; index++) {
+            assert.equal(core.pixel(index), point.color, `DMA frame ${point.frame} pixel ${index}`);
+        }
+        assert.equal(core.inspect16(fixture.mailbox_address + 2), point.vblank);
+        assert.equal(core.inspect16(fixture.mailbox_address + 4), point.completions);
+        assert.equal(core.inspect16(fixture.mailbox_address + 6), 0x801);
+        assert.equal(core.inspect16(fixture.mailbox_address + 8), 0);
+        assert.equal(core.halted(), 1);
+        console.log(`PASS WASM dma frame=${point.frame} pixels=38400 vblank=${point.vblank} completions=${point.completions}`);
+    }
+    console.log(`PASS WASM dma setup_cycles=${setup} cycles=${core.cycles()} instructions=${core.instructions()}`);
+    process.exit(0);
+}
 if (verification.kind === "keypad") {
     const mailbox = fixture.mailbox_address;
     const wake = verification.and_mode ? 30000n : 20000n;
