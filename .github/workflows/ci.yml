@@ -37,15 +37,15 @@ jobs:
       - name: Build fixtures
         run: |
           cargo run --locked -p gba-tools -- build-fixtures
+          git diff --exit-code -- roms
 
-      - name: Ensure fixture is reproducible
-        run: |
-          git diff --exit-code -- \
-            roms/pixels.gba \
-            roms/buttons.gba \
-            roms/palette.gba \
-            roms/calculations.gba \
-            roms/copy.gba
+      - name: Install Node runtime
+        uses: actions/setup-node@v4
+        with:
+          node-version: '26.10.0'
+
+      - name: WASM timing runtime
+        run: python3 roms/cartridge/verify_wasm.py --diagnostics
 
       - name: Formatting
         run: |
@@ -58,6 +58,9 @@ jobs:
       - name: Session tests
         run: |
           cargo test --locked -p gba-session
+
+      - name: Workspace tests
+        run: cargo test --locked --workspace
 
       - name: Headless fixture
         run: |
