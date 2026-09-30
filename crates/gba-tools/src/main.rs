@@ -84,6 +84,9 @@ struct PcmScene {
     firmware_sha256: String,
     input_events: Vec<InputEvent>,
     checkpoints: Vec<PcmCheckpoint>,
+    mixer_input_events: Vec<InputEvent>,
+    mixer_checkpoints: Vec<MixerCheckpoint>,
+    mixer_fifo_underruns: u64,
 }
 
 #[derive(Deserialize)]
@@ -96,6 +99,20 @@ struct PcmCheckpoint {
     samples: usize,
     pcm_sha256: String,
 }
+
+/// Stereo DAC levels are expressed in signed 10-bit units, before host gain.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MixerCheckpoint {
+    frame: u16,
+    control_h: u16,
+    master: u16,
+    bias: u16,
+    levels: Vec<[i16; 2]>,
+    pcm_sha256: String,
+}
+
+const MIXER_INPUT: &[(Cycle, Button, bool)] = &include!("../../../roms/pcm/mixer_input.rs");
 
 const PCM_INPUT: &[(Cycle, Button, bool)] = &include!("../../../roms/pcm/input.rs");
 
@@ -385,7 +402,23 @@ fn manifest(path: &Path) -> Result<Manifest> {
                     .iter()
                     .map(|event| Ok((Cycle(event.cycle), button(&event.button)?, event.pressed)))
                     .collect::<Result<Vec<_>>>()?;
-                if events != PCM_INPUT
+                let mixer_events = expected
+                    .mixer_input_events
+                    .iter()
+                    .map(|event| Ok((Cycle(event.cycle), button(&event.button)?, event.pressed)))
+                    .collect::<Result<Vec<_>>>()?;
+                if mixer_events != MIXER_INPUT
+                    || expected.mixer_checkpoints.is_empty()
+                    || expected
+                        .mixer_checkpoints
+                        .windows(2)
+                        .any(|p| p[0].frame >= p[1].frame)
+                    || expected.mixer_checkpoints.iter().any(|p| {
+                        p.levels.is_empty()
+                            || p.pcm_sha256.len() != 64
+                            || u64::from(p.frame) * CYCLES_PER_FRAME > fixture.max_cycles
+                    })
+                    || events != PCM_INPUT
                     || expected.ready_pc & 3 != 0
                     || expected.firmware_sha256 != hash(gba_core::TEST_FIRMWARE)
                     || expected.checkpoints.is_empty()
@@ -1338,7 +1371,98 @@ fn run_pcm(
         machine.cycles().0,
         machine.executed_instructions()
     );
+    run_mixer(&mut machine, fixture, expected, capture_path)?;
     Ok(machine)
+}
+
+/// Continues the original ROM through guest-written mixer settings. Expected
+/// stereo levels are independently derived from the signed FIFO bytes, gain,
+/// routing and DAC bias; captures retain both channels without downmixing.
+fn run_mixer(
+    machine: &mut Machine,
+    fixture: &Fixture,
+    expected: &PcmScene,
+    capture_path: Option<&str>,
+) -> Result<()> {
+    for &(cycle, button, pressed) in MIXER_INPUT {
+        machine.set_button_at(cycle, button, pressed)?;
+    }
+    let last = expected
+        .mixer_checkpoints
+        .last()
+        .ok_or_else(|| fail("missing mixer checkpoint"))?
+        .frame;
+    let first = expected
+        .checkpoints
+        .last()
+        .ok_or_else(|| fail("missing PCM checkpoint"))?
+        .frame
+        + 1;
+    let mut pcm = Vec::with_capacity(1024);
+    for frame in first..=last {
+        let remaining = fixture
+            .max_instructions
+            .checked_sub(machine.executed_instructions())
+            .ok_or_else(|| fail("mixer instruction budget exhausted"))?;
+        machine.advance_to(Cycle(u64::from(frame) * CYCLES_PER_FRAME), remaining)?;
+        pcm.clear();
+        machine.drain_stereo_pcm(&mut pcm);
+        if let Some(point) = expected.mixer_checkpoints.iter().find(|p| p.frame == frame) {
+            let levels: Vec<[i16; 2]> = pcm.iter().map(|f| f.map(|v| (v * 512.0) as i16)).collect();
+            if levels.iter().any(|f| !point.levels.contains(f))
+                || point.levels.iter().any(|f| !levels.contains(f))
+            {
+                return Err(fail(format!(
+                    "mixer levels mismatch frame={frame} observed={:?}",
+                    levels
+                        .iter()
+                        .copied()
+                        .collect::<std::collections::BTreeSet<_>>()
+                )));
+            }
+            let encoded: Vec<u8> = levels
+                .iter()
+                .flat_map(|f| f.iter().flat_map(|v| v.to_le_bytes()))
+                .collect();
+            let identity = hash(&encoded);
+            if let Some(path) = capture_path {
+                fs::write(format!("{path}.mixer-frame-{frame}.s16le"), &encoded)?;
+            }
+            if identity != point.pcm_sha256 {
+                return Err(fail(format!("mixer frame={frame} sha256={identity}")));
+            }
+            if machine.inspect16(0x04000082)? != point.control_h
+                || machine.inspect16(0x04000084)? != point.master
+                || machine.inspect16(0x04000088)? != point.bias
+                || machine.inspect16(fixture.mailbox_address + 2)? != frame
+                || machine.inspect16(fixture.mailbox_address + 4)? != 1
+                || machine.inspect16(fixture.mailbox_address + 6)? != 3
+                || !machine.halted()
+            {
+                return Err(fail(format!("mixer register/guest mismatch frame={frame}")));
+            }
+            println!(
+                "PASS mixer frame={frame} samples={} sha256={identity} control_h={:#06x} master={:#04x} bias={:#06x}",
+                pcm.len(),
+                point.control_h,
+                point.master,
+                point.bias
+            );
+        }
+    }
+    let (produced, dropped, empty) = machine.pcm_counters();
+    if produced != machine.cycles().0 / 512
+        || dropped != 0
+        || empty != expected.mixer_fifo_underruns
+    {
+        return Err(fail("mixer sample production mismatch"));
+    }
+    println!(
+        "PASS mixer cycles={} instructions={} produced={produced} dropped={dropped} fifo_underruns={empty}",
+        machine.cycles().0,
+        machine.executed_instructions()
+    );
+    Ok(())
 }
 
 fn run_dma(

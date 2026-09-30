@@ -48,16 +48,16 @@
             if (!node || !playing || context.state !== 'running' || error) return;
             // Bound messages in flight as well as the worklet ring; delayed port
             // delivery cannot build an unbounded queue on a busy browser thread.
-            if (pending + samples.length > Math.ceil(context.sampleRate * 0.08)) {
-                bridgeDrops += samples.length;
+            if (pending + samples.length / 2 > Math.ceil(context.sampleRate * 0.08)) {
+                bridgeDrops += samples.length / 2;
                 return;
             }
             const bytes = samples.length * 4;
             let index = pool.findIndex(buffer => buffer.byteLength >= bytes);
             const buffer = index < 0 ? new ArrayBuffer(Math.max(bytes, 16384 * 4)) : pool.splice(index, 1)[0];
             new Float32Array(buffer, 0, samples.length).set(samples);
-            pending += samples.length;
-            node.port.postMessage({ kind: 'pcm', epoch, frames: samples.length, buffer }, [buffer]);
+            pending += samples.length / 2;
+            node.port.postMessage({ kind: 'pcm', epoch, frames: samples.length / 2, buffer }, [buffer]);
         },
         clear() { epoch++; stats.depth = 0; message({ kind: 'clear', epoch }); },
         setPlaying(value) {

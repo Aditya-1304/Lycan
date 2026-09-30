@@ -8,6 +8,12 @@
 _start:
     ldr r0, =0x04000000
     mov r1, #0x80
+    strh r1, [r0, #0x84]   @ Enable the mixer before configuring Direct Sound.
+    ldr r1, =0x0304
+    strh r1, [r0, #0x82]   @ FIFO A, full volume, both speakers, timer 0.
+    mov r1, #0x200
+    strh r1, [r0, #0x88]   @ Centered 9-bit / 32768 Hz PWM output.
+    mov r1, #0x80
     strh r1, [r0]
     @ Tile 1 is an opaque palette-1 square; tile 0 and the remaining map stay empty.
     ldr r4, =0x040000d4
@@ -80,6 +86,29 @@ sound_irq:
     strh r1, [r11, #2]       @ VBlank count proves the normal IRQ/HALT path ran.
     ldr r0, =0x04000130
     ldrh r1, [r0]
+    @ Mixer controls are applied every VBlank, independently of the A-button
+    @ transition. Down disables master; Left/Right route A; Select halves gain;
+    @ Up selects 6-bit PWM with a raised bias; B strobes FIFO reset.
+    mvn r3, r1
+    ldr r0, =0x04000000
+    tst r3, #0x80
+    moveq r2, #0x80
+    movne r2, #0
+    strh r2, [r0, #0x84]
+    ldr r2, =0x0304
+    tst r3, #0x20
+    movne r2, #0x0204
+    tst r3, #0x10
+    movne r2, #0x0104
+    tst r3, #4
+    bicne r2, r2, #4
+    tst r3, #2
+    orrne r2, r2, #0x800
+    strh r2, [r0, #0x82]
+    mov r2, #0x200
+    tst r3, #0x40
+    ldrne r2, =0xc240
+    strh r2, [r0, #0x88]
     and r1, r1, #1
     eor r1, r1, #1
     ldrh r2, [r11, #4]

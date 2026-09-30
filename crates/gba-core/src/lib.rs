@@ -1643,6 +1643,7 @@ impl System {
         self.io[4..6].copy_from_slice(&(control | flags).to_le_bytes());
         self.io[6..8].copy_from_slice(&line.to_le_bytes());
         self.audio.refresh_timers(&mut self.io);
+        self.audio.refresh_controls(&mut self.io);
         self.io[0x130..0x132].copy_from_slice(&(!self.buttons.0 & 0x03ff).to_le_bytes());
     }
 
@@ -1713,11 +1714,19 @@ impl System {
                 self.audio.refresh_timers(&mut self.io);
                 return Ok(());
             }
-            if matches!(offset, 0xa0 | 0xa2) {
-                self.audio.push(&bytes);
+            if matches!(offset, 0x80 | 0x82 | 0x84 | 0x88) {
+                self.audio.write_control(offset, value);
+                if offset == 0x84 && value & 0x80 == 0 {
+                    self.io[0x60..0x82].fill(0);
+                }
+                self.audio.refresh_controls(&mut self.io);
                 return Ok(());
             }
-            if matches!(offset, 6 | 0x130) {
+            if matches!(offset, 0xa0 | 0xa2 | 0xa4 | 0xa6) {
+                self.audio.push_channel(usize::from(offset >= 0xa4), &bytes);
+                return Ok(());
+            }
+            if matches!(offset, 6 | 0x86 | 0x8a | 0x130) {
                 return Ok(());
             }
             if offset == 0x132 {
@@ -1889,9 +1898,9 @@ impl System {
         let (irq, refill) = self.audio.advance(target - self.cycles, target);
         let flags = u16::from_le_bytes([self.io[0x202], self.io[0x203]]) | irq;
         self.io[0x202..0x204].copy_from_slice(&flags.to_le_bytes());
-        if refill
+        if refill[usize::from(self.dma[1].destination == IO_START + 0xa4)]
             && self.dma[1].control & 0xb000 == 0xb000
-            && self.dma[1].destination == IO_START + 0xa0
+            && matches!(self.dma[1].destination, 0x040000a0 | 0x040000a4)
             && !self.dma[1].active
         {
             self.dma[1].active = true;
@@ -1921,7 +1930,10 @@ impl CpuBus for System {
             self.iwram[range.start] = value;
         } else if let Some(range) = range_for(address, IO_START, self.io.len(), 1) {
             let offset = range.start;
-            if offset == 0x301 {
+            if (0xa0..0xa8).contains(&offset) {
+                self.audio
+                    .push_channel(usize::from(offset >= 0xa4), &[value]);
+            } else if offset == 0x301 {
                 // STOP remains outside this fixture; HALT uses bit 7 clear.
                 self.halted = value & 0x80 == 0;
             } else if offset == 0x300 {
@@ -2360,6 +2372,11 @@ impl Machine {
     /// Drains completed mono PCM samples without advancing guest time.
     pub fn drain_pcm(&mut self, output: &mut Vec<f32>) {
         self.system.audio.drain(output);
+    }
+
+    /// Drains completed left/right PCM frames without advancing guest time.
+    pub fn drain_stereo_pcm(&mut self, output: &mut Vec<[f32; 2]>) {
+        self.system.audio.drain_stereo(output);
     }
 
     /// Discards host-bound samples at pause/focus boundaries, retaining devices.
@@ -2856,7 +2873,7 @@ mod tests {
     // to host deadlines. Existing DMA3 image tests do not consume audio FIFOs.
     #[test]
     fn timer_fifo_dma_sound_is_identical_across_bounded_advances() {
-        let run = |chunk: u64| {
+        let run = |chunk: u64, fifo: u32, bias: u16| {
             let mut machine = Machine::new();
             machine.system.halted = true;
             for (index, byte) in machine.system.ewram.iter_mut().take(128).enumerate() {
@@ -2872,7 +2889,7 @@ mod tests {
                 .unwrap();
             machine
                 .system
-                .write32_impl(IO_START + 0xc0, IO_START + 0xa0, data)
+                .write32_impl(IO_START + 0xc0, IO_START + fifo, data)
                 .unwrap();
             // FIFO mode forces four words and a fixed destination regardless of count/width.
             machine
@@ -2886,6 +2903,22 @@ mod tests {
             machine
                 .system
                 .write16_impl(IO_START + 0x102, 0xc0, data)
+                .unwrap();
+            machine
+                .system
+                .write16_impl(IO_START + 0x84, 0x80, data)
+                .unwrap();
+            machine
+                .system
+                .write16_impl(
+                    IO_START + 0x82,
+                    if fifo == 0xa0 { 0x304 } else { 0x3008 },
+                    data,
+                )
+                .unwrap();
+            machine
+                .system
+                .write16_impl(IO_START + 0x88, bias, data)
                 .unwrap();
             let end = machine.cycles().0 + 48 * 512;
             let mut pcm = Vec::new();
@@ -2901,7 +2934,13 @@ mod tests {
             assert!(pcm.iter().any(|&sample| sample < -0.5));
             pcm
         };
-        assert_eq!(run(37), run(4096));
+        // Both FIFO destinations and PWM cadences must remain independent of
+        // host chunk size, including chunks that split a PWM sample interval.
+        for fifo in [0xa0, 0xa4] {
+            for bias in [0x200, 0x4200, 0x8200, 0xc200] {
+                assert_eq!(run(37, fifo, bias), run(4096, fifo, bias));
+            }
+        }
     }
 
     #[test]

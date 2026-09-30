@@ -190,3 +190,35 @@ pub extern "C" fn pcm_counter(index: u32) -> u64 {
         match index { 0 => produced, 1 => dropped, 2 => empty, _ => panic!("invalid PCM counter") }
     })
 }
+
+
+thread_local! {
+    /// Stereo staging retains signed DAC units for native/WASM contract parity.
+    static STEREO_PCM: RefCell<Vec<[f32; 2]>> = RefCell::new(Vec::with_capacity(1024));
+}
+
+/// Continues the synchronized scene through the same guest mixer input replay.
+#[unsafe(no_mangle)]
+pub extern "C" fn queue_mixer_input() {
+    use gba_core::CYCLES_PER_FRAME;
+    const INPUT: &[(Cycle, Button, bool)] = &include!("../pcm/mixer_input.rs");
+    MACHINE.with_borrow_mut(|machine| {
+        for &(cycle, button, pressed) in INPUT { machine.set_button_at(cycle, button, pressed).unwrap(); }
+    });
+}
+
+/// Returns stereo frame count; samples remain owned by this WASM instance.
+#[unsafe(no_mangle)]
+pub extern "C" fn drain_stereo_pcm() -> u32 {
+    STEREO_PCM.with_borrow_mut(|samples| {
+        samples.clear();
+        MACHINE.with_borrow_mut(|machine| machine.drain_stereo_pcm(samples));
+        samples.len() as u32
+    })
+}
+
+/// Reads one signed DAC level without exposing or transferring linear memory.
+#[unsafe(no_mangle)]
+pub extern "C" fn stereo_level(index: u32, channel: u32) -> i32 {
+    STEREO_PCM.with_borrow(|samples| (samples[index as usize][channel as usize] * 512.0) as i32)
+}

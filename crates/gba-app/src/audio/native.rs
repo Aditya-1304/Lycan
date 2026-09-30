@@ -22,7 +22,7 @@ struct Shared {
 pub struct Output {
     // Keeping the stream alive owns the callback and its consumer.
     _stream: cpal::Stream,
-    producer: Producer<(u64, f32)>,
+    producer: Producer<(u64, [f32; 2])>,
     shared: Arc<Shared>,
     rate: u32,
     capacity: usize,
@@ -65,7 +65,7 @@ impl Output {
         self.rate
     }
 
-    pub fn submit(&mut self, samples: &[f32]) {
+    pub fn submit(&mut self, samples: &[[f32; 2]]) {
         if !self.shared.active.load(Ordering::Relaxed) {
             return;
         }
@@ -109,7 +109,7 @@ impl Output {
 fn stream<T: cpal::SizedSample + cpal::FromSample<f32>>(
     device: &cpal::Device,
     config: &cpal::StreamConfig,
-    mut consumer: Consumer<(u64, f32)>,
+    mut consumer: Consumer<(u64, [f32; 2])>,
     shared: Arc<Shared>,
 ) -> Result<cpal::Stream, cpal::Error> {
     let channels = usize::from(config.channels);
@@ -141,17 +141,26 @@ fn stream<T: cpal::SizedSample + cpal::FromSample<f32>>(
                     match consumer.pop() {
                         Ok((tag, sample)) if tag == epoch => {
                             played += 1;
-                            sample * gain
+                            sample.map(|value| value * gain)
                         }
                         _ => {
                             missing += 1;
-                            0.0
+                            [0.0; 2]
                         }
                     }
                 } else {
-                    0.0
+                    [0.0; 2]
                 };
-                frame.fill(T::from_sample(sample));
+                // Mono devices receive a downmix; stereo devices preserve the
+                // guest routing. Extra surround channels remain silent.
+                for (index, output) in frame.iter_mut().enumerate() {
+                    let value = if channels == 1 {
+                        (sample[0] + sample[1]) * 0.5
+                    } else {
+                        sample.get(index).copied().unwrap_or(0.0)
+                    };
+                    *output = T::from_sample(value);
+                }
             }
             if missing != 0 {
                 primed = false;

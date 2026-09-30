@@ -44,6 +44,38 @@ if (verification.kind === "pcm") {
     assert.equal(core.pcm_counter(1), 0n);
     assert.equal(core.pcm_counter(2), 0n);
     console.log(`PASS WASM pcm setup_cycles=${setup} cycles=${core.cycles()} instructions=${core.instructions()} produced=${total} rate=32768`);
+    core.queue_mixer_input();
+    for (let frame = last + 1; frame <= verification.mixer_checkpoints.at(-1).frame; frame++) {
+        core.advance(BigInt(frame) * 280896n, fixture.max_instructions, BigInt(fixture.max_cycles));
+        const count = core.drain_stereo_pcm();
+        total += count;
+        const point = verification.mixer_checkpoints.find(point => point.frame === frame);
+        if (!point) continue;
+        const pcm = Buffer.alloc(count * 4);
+        const observed = new Set();
+        for (let i = 0; i < count; i++) {
+            const pair = [core.stereo_level(i, 0), core.stereo_level(i, 1)];
+            observed.add(JSON.stringify(pair));
+            assert(point.levels.some(level => level[0] === pair[0] && level[1] === pair[1]));
+            pcm.writeInt16LE(pair[0], i * 4);
+            pcm.writeInt16LE(pair[1], i * 4 + 2);
+        }
+        for (const pair of point.levels) assert(observed.has(JSON.stringify(pair)));
+        assert.equal(createHash("sha256").update(pcm).digest("hex"), point.pcm_sha256);
+        assert.equal(core.inspect16(0x04000082), point.control_h);
+        assert.equal(core.inspect16(0x04000084), point.master);
+        assert.equal(core.inspect16(0x04000088), point.bias);
+        assert.equal(core.inspect16(fixture.mailbox_address + 2), frame);
+        assert.equal(core.inspect16(fixture.mailbox_address + 4), 1);
+        assert.equal(core.inspect16(fixture.mailbox_address + 6), 3);
+        assert.equal(core.halted(), 1);
+        console.log(`PASS WASM mixer frame=${frame} samples=${count} sha256=${point.pcm_sha256}`);
+    }
+    assert.equal(core.pcm_counter(0), BigInt(total));
+    assert.equal(core.pcm_counter(0), core.cycles() / 512n);
+    assert.equal(core.pcm_counter(1), 0n);
+    assert.equal(core.pcm_counter(2), BigInt(verification.mixer_fifo_underruns));
+    console.log(`PASS WASM mixer cycles=${core.cycles()} instructions=${core.instructions()} produced=${total} fifo_underruns=${core.pcm_counter(2)}`);
     process.exit(0);
 }
 if (verification.kind === "dma") {

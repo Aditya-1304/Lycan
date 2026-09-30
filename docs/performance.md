@@ -758,3 +758,173 @@ Open the printed localhost URL in Chrome, then Brave. For each platform:
 Slice 12 implementation and automated evidence are present. Full acceptance
 remains open for physical audiovisual alignment, audible controls and the
 Linux/Chrome/Brave live interaction checks; browser checks are owned by the user.
+
+
+## Slice 12A: Sound-register mixer controls
+
+Recorded 2026-09-30 against `2da964e68ab209f97bfc061b500049f257e4a3bd`
+plus the current Slice 12A changes. Earlier Slice 12 measurements above remain
+historical; user-entered timings were preserved. The default PCM scene now
+initializes the sound registers explicitly and supports interactive mixer controls.
+
+### Plan comparison
+
+| Slice 12A requirement | Evidence / status |
+| --- | --- |
+| SOUNDCNT_H A/B routing, timer selection, volume, FIFO reset | Independent 32-byte FIFOs, timer 0/1 selection, half/full gain, stereo routing and self-clearing reset strobes implemented. Focused core regression checks B on timer 1 independently of A on timer 0; existing DMA regression now checks both FIFO destinations at all four PWM settings across 37/4096-cycle advance chunks. |
+| SOUNDCNT_X master enable and readable status | Only bit 7 is writable; PSG activity bits are zero while PSG channels are absent. Master disable clears PSG control storage and silences PCM while retaining FIFO/timer state. Re-enable capture retains the original waveform phase. |
+| SOUNDBIAS and output PWM behavior | Writable mask `0xc3fe`, default `0x0200`, unsigned 10-bit saturation, 9/8/7/6-bit quantization and 32768/65536/131072/262144 Hz PWM edges implemented. Higher-rate edges are averaged into bounded 32768 Hz stereo frames. Tests check quantization/clipping; the guest checks raised bias and 6-bit PWM. |
+| SOUNDCNT_L storage/register semantics | Writable mask `0xff77`, writes ignored with master disabled, cleared by master disable, stored for later PSG integration. No PSG channel synthesis is claimed in this slice. |
+| Extend the original PCM fixture and record output | Same `pcm.gba` scene, mailbox, IRQ/HALT path and original five PCM/image checkpoints retained. Nine additional stereo captures check routing, disable/resume, half volume, bias/PWM, FIFO reset and recovery. Native and compiled WASM agree on every frozen hash. |
+| Existing synchronized PCM slice remains green | All five original PCM hashes are unchanged; workspace tests, complete fixture suite and prior compiled-WASM contracts pass. |
+| Deterministic PCM and audible routing on Linux/browser | Deterministic native/WASM contracts pass. Production Linux device probe recorded below. Physical listening, interactive Linux acceptance and Chrome/Brave output acceptance remain not verified; run the manual checklist below. |
+
+The register masks, mixer range and PWM settings follow
+[GBATEK sound control documentation](https://rust-console.github.io/gbatek-gbaonly/#gba-sound-control-registers).
+The PCM path models quantized DAC levels; it does not synthesize the MHz PWM
+carrier or model speaker/capacitor filtering. Stereo frames remain intact through
+host resampling, CPAL and the Worklet. Mono CPAL devices receive a downmix.
+Core staging remains bounded to 4096 frames and host queue capacity remains 80 ms.
+
+### Fixture identity and deterministic evidence
+
+- Original MIT guest, cartridge-direct ARM startup, bundled test firmware required.
+- ROM size: 568 bytes; SHA-256: `89b13fc1aa5f4d397324f7ded22f5830fc8cb3bf305b01bab8e276bcde78e5cb`.
+- Ready/HALT loop: `0x080000f4`; setup: 997 cycles; mailbox `0x03000000 = 0x0066`.
+- Bounds: 100,000 instructions / 9,000,000 cycles. Mixer replay ends after 28 frames at 7,865,088 cycles / 1,399 instructions, with 15,361 produced PCM frames and zero staging drops.
+- Exactly two empty-FIFO pops occur after the two deliberate reset strobes. They are required by the fixture contract and are distinct from host device underruns. Frame 26 contains four zero PCM frames; frame 28 recovers the alternating eight-sample waveform runs.
+- Captures encode signed DAC units (`PCM * 512`) as interleaved left/right little-endian i16. They are verification data, not conventional full-scale audio files. Before reset, zero-based sample phase is +11 modulo 16; recovery phase is +7. At 6-bit PWM, mixed transition samples average to +64 DAC units.
+
+| Frame | Setting | Stereo frames | SHA-256 (native = WASM) |
+| --- | --- | --- | --- |
+| 12 | Stereo A | 549 | `ab1bdbaa250b0b0c29cab6ee05dd485bbb32ace3d2f5c55805b4e0ec03984ed3` |
+| 14 | Left only | 548 | `1d17b23de2b859038d0d24e3dd859b6a0afd792bc2f73afd4d45f772fae0962c` |
+| 16 | Right only | 549 | `71fe9a2898b6a75976b5145c66dcd3b328c7f589b6f1104d32f2cc3319b64ac2` |
+| 18 | Master disabled | 549 | `47585db1c41fc8970c838bf60827198974f8bed7ae1958e222b6debe66d5e0c1` |
+| 20 | Master resumed | 549 | `2e971d144fc028d3666c10feb864519037b0fc70f63e2d87709985f0712bcc17` |
+| 22 | Half volume | 548 | `4f105a8df78053e4e1f3aeee86b394a7a6e960a830f4196f4cac02569e975522` |
+| 24 | Raised bias / 6-bit PWM | 549 | `7b69d7c4a448056bcb524d0f5d97ced61765138c94d568d23577652f52925ae4` |
+| 26 | FIFO reset | 549 | `11db43986e80ab2e5852966aecc7c995227c258bca10c142fd9d8a8f1a83ca4a` |
+| 28 | FIFO recovery | 549 | `216050410791b4138eb80335b20c2903c4eae779253bed66b99f1b216ad904fa` |
+
+### Validation and performance
+
+One focused regression was added: master-disabled playback previously emitted
+`0.25` instead of zero (RED); the implemented mixer silences output while FIFO
+consumption continues (GREEN). The same regression checks timer selection, B
+routing, gain, reset strobes, writable masks, status and DAC quantization/clipping.
+The existing DMA regression was extended for B and PWM chunk independence.
+
+- Workspace tests: 21 passed (12 core, 9 session); app/tools and doc tests completed.
+- All 21 fixture identities rebuilt/verified and the full native fixture suite passed.
+- Compiled WASM: original five PCM checkpoints and nine stereo checkpoints passed; the existing WAITCNT, ARM/Thumb/services/memory, VBlank, keypad and DMA contracts also passed.
+- Clippy with warnings denied, native release build, WASM app check, Trunk release build, JavaScript syntax and formatting/whitespace checks: passed.
+
+Headless complete-frame benchmark: 600 samples, mean **0.236 ms**, p95
+**0.245 ms**, below the 12 ms core-only target. It runs after the 28-frame replay
+with A held and default mixer settings. The historical Slice 12 result ran after
+10 frames with A released; differing workload and concurrent build activity mean
+these numbers are not a controlled regression comparison. Higher-PWM-mode frame
+cost, full app-frame cost and physical audiovisual latency remain not measured.
+Host resampling, playback, GPU work and PCM draining are outside the timed window.
+Environment: x86_64 Linux, Intel Core i7-13620H, Rust 1.98.1, Node 26.10.0,
+Trunk 0.21.14. Governor, thermals and exact audio device identity were not recorded.
+
+| Platform | Core mean / p95 (ms) | Conversion mean / p95 (ms) | Texture submission mean / p95 (ms) | App timing sample counts | Live mixer acceptance |
+| --- | --- | --- | --- | --- | --- |
+| Native Linux | 0.875 / 1.223 | 0.123 / 0.162 | 0.026 / 0.033 | 120 / 120 / 120 | Live counters recorded; zero device underruns/overflow/errors; listening/interactive acceptance not verified |
+| Google Chrome | 1.152 / 1.500 | 0.243 / 0.300 | 0.031 / 0.100 | 120 / 120 / 120 | Running audio context; 115 underrun frames and 209 overflow frames recorded; streaming acceptance remains open |
+| Brave | 1.123 / 1.600 | 0.246 / 0.400 | 0.039 / 0.100 | 120 / 120 / 120 | Running audio context; zero device underruns/overflow; listening/interactive acceptance not verified |
+
+### User-recorded live mixer counters
+
+Source: user-supplied Linux, Chrome and Brave application readouts for Slice 12A.
+Each timing stage contains 120 samples. These are app callback timings, not
+complete emulated-frame measurements. Browser versions, capture duration,
+control sequence and whether counters were cleared before capture were not
+recorded; output frame totals do not establish uninterrupted session duration.
+
+| Platform | Output rate / state | Queue snapshot / maximum / capacity (ms) | Device underrun frames | Overflow frames | Output frames | Device errors |
+| --- | --- | --- | --- | --- | --- | --- |
+| Native Linux | 48,000 Hz | 69.9 / 75.8 / 80 | 0 | 0 | 770,048 | 0 |
+| Google Chrome | 48,000 Hz / running | 62.6 / 80.0 / 80 | 115 | 209 | 2,883,341 | Not reported by browser adapter |
+| Brave | 48,000 Hz / running | 54.7 / 77.7 / 80 | 0 | 0 | 1,170,432 | Not reported by browser adapter |
+
+| Platform | Core PCM rate (Hz) | Produced frames | Staging drops | Empty-FIFO pops |
+| --- | --- | --- | --- | --- |
+| Native Linux | 32,768 | 472,401 | 0 | 132 |
+| Google Chrome | 32,768 | 2,136,802 | 0 | 138 |
+| Brave | 32,768 | 739,078 | 0 | 294 |
+
+All recorded queue snapshots lie within the 40–80 ms buffering target, and all
+recorded core callback p95 values are below 12 ms. Chrome reached queue capacity
+and recorded both starvation and overflow; these counters prevent claiming clean
+streaming acceptance for that capture. Their timing and recurrence are not known
+from a single readout. Native and Brave recorded zero device underruns/overflow.
+Core empty-FIFO pops are separate from host underruns: FIFO reset can produce
+them deliberately, but the supplied control sequence does not establish the
+cause of these particular counts. Audible routing, synchronization, lifecycle
+behavior and a 30-minute queue/resource check remain not verified.
+
+### Automated Linux device probe
+
+The final eight-second Linux probe exercised left/right routing, pause/resume,
+reset, focus suspension/resumption, master-disable, bias/PWM, half gain and FIFO
+reset through the original guest and production stereo playback path:
+
+| Native device metric | Recorded result |
+| --- | --- |
+| Negotiated output rate | 48,000 Hz |
+| Active phase snapshots / maximum queue | 56.6–60.1 ms / 67.6 ms; resume 58.6 ms; capacity 80 ms |
+| Device underrun / overflow / errors | 0 / 0 / 0 |
+| Played device frames | 276,480 |
+| Core counters at end (since reset) | 98,265 produced / 0 staging drops / 24 intentional empty-FIFO pops during held reset |
+
+The probe establishes successful device streaming and counters, not physical
+listening or audiovisual alignment. Its wall-clock scheduling makes final counts
+host-dependent; the separate bounded fixture provides exact deterministic proof.
+Browser output rate and queue/error snapshots for Slice 12A are recorded above;
+long-session trends remain not measured. The previous Slice 12 browser counters
+are historical.
+
+Temporary evidence: `/tmp/gba-mixer-results/fixtures.txt`, `wasm.txt`, `trunk.txt`,
+`audio-probe.txt`, and `pcm.mixer-frame-{frame}.s16le`; these are local temporary
+artifacts, not durable release evidence. Reproduce automated output with:
+
+```bash
+cd /home/aditya/Projects/GBA/gba-rs
+cargo run --locked -p gba-tools -- build-fixtures
+cargo test --locked --workspace
+cargo clippy --locked --workspace --all-targets -- -D warnings
+cargo run --locked -p gba-tools --release -- fixtures run --fixture pcm --capture /tmp/mixer
+python3 roms/cartridge/verify_wasm.py --pcm
+cargo run --locked -p gba-app --release -- --audio-probe
+cargo run --locked -p gba-tools --release -- bench --scenario pcm --frames 600
+```
+
+### Manual Linux / Chrome / Brave acceptance
+
+Linux:
+
+```bash
+cd /home/aditya/Projects/GBA/gba-rs
+cargo run --locked -p gba-app --release
+```
+
+Browser (open the printed localhost URL in Chrome, then Brave):
+
+```bash
+cd /home/aditya/Projects/GBA/gba-rs
+env -u NO_COLOR trunk --config web/Trunk.toml serve --release
+```
+
+1. Click **Load PCM scene**, then **Enable audio**. Hold **Z**: expect a green square and a tone in both speakers. Stereo headphones make routing easier to verify.
+2. While holding Z, hold **Left**, then **Right** separately: expect only the corresponding speaker. Release the arrow: expect both speakers again.
+3. Hold **Down**: expect silence while the square stays green. Release Down: sound resumes; repeat ten times. The original tone cadence must continue, and device underruns/overflows must not grow.
+4. Hold **Backspace**: expect half Direct Sound amplitude; release it to restore full gain. Hold **Up** to select the raised bias / 6-bit PWM setting; release it to restore the default. Core captures establish exact bias/quantization effects; speaker filtering may affect their audible character.
+5. Tap **X** while holding Z: the FIFO clears and refills. Repeated or held X deliberately increments the core empty-FIFO counter; this must not be confused with host device underruns. Release X and check the tone recovers.
+6. Repeat pause/resume, reset, mute/volume, focus loss and hidden-tab checks from Slice 12. **Replay PCM input** still runs the original ten-frame synchronized scene; the extra mixer chronology is exercised by the CLI/WASM contract and manual controls.
+7. Record actual output rate, queue range/max, device underruns, overflow, timing sample counts and your millisecond timings above. Audible routing, physical synchronization and a 30-minute queue/resource check remain pending until recorded.
+
+All five implementation requirements and automated contracts pass. Full Slice 12A
+acceptance remains open for the manual Linux and browser listening/runtime checks.

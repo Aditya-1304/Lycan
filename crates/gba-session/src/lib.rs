@@ -59,6 +59,11 @@ impl Session {
         self.machine.drain_pcm(output);
     }
 
+    /// Drains left/right frames for platform playback without advancing time.
+    pub fn drain_stereo_pcm(&mut self, output: &mut Vec<[f32; 2]>) {
+        self.machine.drain_stereo_pcm(output);
+    }
+
     /// Reports core sample production, staging overflow and empty-FIFO consumption.
     pub fn pcm_counters(&self) -> (u64, u64, u64) {
         self.machine.pcm_counters()
