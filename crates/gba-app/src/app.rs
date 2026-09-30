@@ -35,6 +35,12 @@ const CALCULATIONS_ROM: &[u8] = include_bytes!(concat!(
 /// browser hosts; copying, redraw, and return all execute inside the emulated CPU.
 const COPY_ROM: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../roms/copy.gba"));
 
+/// ARM draws the bar after a Thumb routine updates its guest-owned counter.
+const COUNTER_ROM: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../roms/counter.gba"
+));
+
 /// The replay uses the same ordered cycle transitions verified by gba-tools.
 const DEMO_INPUT: &[(Cycle, Button, bool)] = &include!(concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -221,7 +227,12 @@ impl GbaApp {
             }
             if ui.button("Load copy demo").clicked() {
                 self.load_rom_bytes("copy.gba", COPY_ROM);
-                self.status = "Copy demo: red upper band and green lower band".to_owned();
+                self.status = "Copy demo: red upper band and palette-byte-write lower band".to_owned();
+                ui.ctx().request_repaint();
+            }
+            if ui.button("Load counter demo").clicked() {
+                self.load_rom_bytes("counter.gba", COUNTER_ROM);
+                self.status = "Counter demo: hold Z (A) to fill 16 green cells; Reset clears the counter".to_owned();
                 ui.ctx().request_repaint();
             }
             if ui.button("Load CPU diagnostic").clicked() {

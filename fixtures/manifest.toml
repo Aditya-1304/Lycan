@@ -1,6 +1,41 @@
 version = 2
 
 [[fixture]]
+name = "counter"
+rom = "../roms/counter.gba"
+source = "../roms/counter/counter.s"
+linker = "../roms/pixels/linker.ld"
+sha256 = "4d02748bdfb9a8f8a61b6c8c300c415117db7f4985c578c272b6dd70eb7b2d79"
+origin = "Original MIT guest assembly in roms/counter/counter.s"
+startup = "cartridge-direct-arm"
+bios_required = false
+mailbox_address = 0x03000000
+completion_id = 0x005f
+max_instructions = 1500000
+max_cycles = 7000000
+[fixture.verification]
+kind = "counter"
+return_pc = 0x08000040
+adr_address = 0x080000d0
+observed_pc = 0x080000b4
+input_events = [
+    { cycle = 0, button = "A", pressed = true },
+    { cycle = 842688, button = "A", pressed = false },
+    { cycle = 1404480, button = "A", pressed = true },
+    { cycle = 1966272, button = "A", pressed = false },
+    { cycle = 2247168, button = "A", pressed = true },
+]
+# Mailbox reflects this VBlank's update; scanout contains the preceding drawing.
+checkpoints = [
+    { frame = 1, count = 1, image_count = 0 },
+    { frame = 3, count = 3, image_count = 2 },
+    { frame = 5, count = 3, image_count = 3 },
+    { frame = 7, count = 5, image_count = 4 },
+    { frame = 8, count = 5, image_count = 5 },
+    { frame = 24, count = 16, image_count = 16 },
+]
+
+[[fixture]]
 name = "pixels"
 rom = "../roms/pixels.gba"
 source = "../roms/pixels/pixels.s"
