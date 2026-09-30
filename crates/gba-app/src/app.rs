@@ -52,6 +52,10 @@ const STRIPES_ROM: &[u8] = include_bytes!("../../../roms/gba-tests/stripes.gba")
 const TILED_INPUT: &[(Cycle, Button, bool)] = &include!("../../../roms/tiled/input.rs");
 
 /// Explicit original IRQ diagnostic; normal cartridges never map test firmware.
+const KEYPAD_OR_ROM: &[u8] = include_bytes!("../../../roms/keypad-or.gba");
+const KEYPAD_AND_ROM: &[u8] = include_bytes!("../../../roms/keypad-and.gba");
+/// The same logical input deadlines are used by the bounded headless runner.
+const KEYPAD_INPUT: &[(Cycle, Button, bool)] = &include!("../../../roms/keypad/input.rs");
 const VBLANK_ROM: &[u8] = include_bytes!("../../../roms/vblank.gba");
 /// IRQ variant shares the polling scene assets and scripted logical input.
 const IRQ_SPRITES_ROM: &[u8] = include_bytes!("../../../roms/irq-sprites.gba");
@@ -155,6 +159,8 @@ impl GbaApp {
                 if bytes == ARM_DIAGNOSTIC_ROM
                     || bytes == THUMB_DIAGNOSTIC_ROM
                     || bytes == MEMORY_ROM
+                    || bytes == KEYPAD_OR_ROM
+                    || bytes == KEYPAD_AND_ROM
                     || bytes == VBLANK_ROM
                     || bytes == IRQ_SPRITES_ROM
                 {
@@ -280,6 +286,20 @@ impl GbaApp {
                 self.status = "Replaying IRQ sprite scene; final player (116, 74)".to_owned();
                 ui.ctx().request_repaint();
             }
+            for (name, rom) in [("keypad-or.gba", KEYPAD_OR_ROM), ("keypad-and.gba", KEYPAD_AND_ROM)] {
+                if ui.button(format!("Replay {name}")).clicked() {
+                    self.load_rom_bytes(name, rom);
+                    for &(cycle, button, pressed) in KEYPAD_INPUT {
+                        if let Err(error) = self.session.set_button_at(cycle, button, pressed) {
+                            self.status = format!("Keypad replay failed: {error}");
+                            return;
+                        }
+                    }
+                    self.replay_deadline = Some(Cycle(2 * CYCLES_PER_FRAME));
+                    self.status = format!("{name}: Right ignored; A wakes OR; A+B wakes AND");
+                    ui.ctx().request_repaint();
+                }
+            }
             if ui.button("Load VBlank IRQ demo").clicked() {
                 self.load_rom_bytes("vblank.gba", VBLANK_ROM);
                 self.status = "VBlank IRQ: callback changes the red backdrop; guest sleeps between frames".to_owned();
@@ -402,6 +422,16 @@ impl GbaApp {
                     ui.label("CPU diagnostic running");
                 }
             }
+        }
+        if matches!(self.rom_name.as_str(), "keypad-or.gba" | "keypad-and.gba")
+            && let (Ok(callbacks), Ok(before), Ok(after), Ok(wakes)) = (
+                self.session.inspect16(0x03000002),
+                self.session.inspect16(0x03000004),
+                self.session.inspect16(0x03000006),
+                self.session.inspect16(0x03000008),
+            )
+        {
+            ui.label(format!("Keypad callbacks: {callbacks} | wakes: {wakes} | IF before: {before:#06x} | after: {after:#06x}"));
         }
         ui.label("Drop a .gba ROM here to load it.");
         ui.label("Demo: arrow keys move the square once per GBA frame.");
