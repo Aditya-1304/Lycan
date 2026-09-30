@@ -17,7 +17,7 @@ const BUTTONS_ROM: &[u8] = include_bytes!(concat!(
     "/../../roms/buttons.gba"
 ));
 
-/// Original Slice 3 guest. Loading this artifact uses the same session,
+/// Loading this artifact uses the same session,
 /// master-clock pacing, and completed-frame presentation as dropped ROMs.
 const PALETTE_ROM: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),

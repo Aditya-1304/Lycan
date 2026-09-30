@@ -58,6 +58,27 @@ enum Verification {
     Palette(Palette),
     Hello(Hello),
     Counter(Counter),
+    Timing(Timing),
+}
+
+/// Independently derived timing intervals are measured after both marker
+/// instructions, including CPU pipeline fetches but excluding setup/reporting.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Timing {
+    terminal_pc: u32,
+    checkpoints: Vec<TimingCheckpoint>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TimingCheckpoint {
+    start_pc: u32,
+    end_pc: u32,
+    cycles: u64,
+    waitcnt: u16,
+    width: u32,
+    window: u32,
 }
 
 /// Frozen observations bind input, ARM return, Thumb PC semantics, and scanout.
@@ -203,6 +224,26 @@ fn manifest(path: &Path) -> Result<Manifest> {
             )));
         }
         match &fixture.verification {
+            Verification::Timing(expected) => {
+                if expected.checkpoints.len() != 24
+                    || expected.terminal_pc & 3 != 0
+                    || expected.checkpoints.iter().any(|point| {
+                        if point.window > 2 {
+                            return true;
+                        }
+                        let base = 0x08000000 + point.window * 0x02000000;
+                        !matches!(point.width, 16 | 32)
+                            || point.start_pc < base
+                            || point.end_pc >= base + 0x02000000
+                            || point.start_pc >= point.end_pc
+                            || point.cycles == 0
+                            || point.cycles > fixture.max_cycles
+                            || point.waitcnt & !0x5fff != 0
+                    })
+                {
+                    return Err(fail("invalid cartridge timing checkpoints"));
+                }
+            }
             Verification::Counter(expected) => {
                 if expected.return_pc & 3 != 0
                     || expected.adr_address & 3 != 0
@@ -406,7 +447,8 @@ fn pixels(fixture: &Fixture) -> Result<&Pixels> {
         Verification::Buttons(_)
         | Verification::Palette(_)
         | Verification::Hello(_)
-        | Verification::Counter(_) => Err(fail("expected a terminal pixels fixture")),
+        | Verification::Counter(_)
+        | Verification::Timing(_) => Err(fail("expected a terminal pixels fixture")),
     }
 }
 
@@ -783,6 +825,62 @@ fn run_counter(
     Ok(())
 }
 
+/// Requires exact elapsed cycles, bounded execution, data identity, and the
+/// guest's declared mailbox. Reaching a self-branch alone never passes.
+fn verify_timing(fixture: &Fixture, bytes: &[u8], expected: &Timing) -> Result<()> {
+    let mut machine = Machine::new();
+    machine.load_rom(bytes)?;
+    for point in &expected.checkpoints {
+        for (pc, measured) in [(point.start_pc, false), (point.end_pc, true)] {
+            let before = machine.cycles().0;
+            let remaining = fixture
+                .max_instructions
+                .checked_sub(machine.executed_instructions())
+                .ok_or_else(|| fail("timing instruction budget exhausted"))?;
+            machine.run_until_pc(pc, remaining, Cycle(fixture.max_cycles))?;
+            if machine.inspect16(0x04000204)? != point.waitcnt {
+                return Err(fail("guest WAITCNT differs from declared timing case"));
+            }
+            if measured && machine.cycles().0 - before != point.cycles {
+                return Err(fail(format!(
+                    "timing WS{} width={} WAITCNT={:#06x}: expected {}, got {}",
+                    point.window,
+                    point.width,
+                    point.waitcnt,
+                    point.cycles,
+                    machine.cycles().0 - before
+                )));
+            }
+        }
+        println!(
+            "PASS timing WS{} width={} WAITCNT={:#06x} cycles={}",
+            point.window, point.width, point.waitcnt, point.cycles
+        );
+    }
+    let remaining = fixture
+        .max_instructions
+        .checked_sub(machine.executed_instructions())
+        .ok_or_else(|| fail("timing instruction budget exhausted"))?;
+    machine.run_until_pc(expected.terminal_pc, remaining, Cycle(fixture.max_cycles))?;
+    if machine.inspect16(fixture.mailbox_address)? != fixture.completion_id
+        || machine.inspect16(fixture.mailbox_address + 2)? != 1
+        || machine.inspect16(fixture.mailbox_address + 4)? != 0x5678
+        || machine.inspect16(fixture.mailbox_address + 6)? != 0x1234
+    {
+        return Err(fail("timing completion/data mailbox mismatch"));
+    }
+    for (index, point) in expected.checkpoints.iter().enumerate() {
+        if u64::from(machine.inspect16(fixture.mailbox_address + 8 + index as u32 * 2)?)
+            != point.cycles
+        {
+            return Err(fail(
+                "guest timing report differs from declared expectation",
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn option(args: &[String], key: &str) -> Result<Option<String>> {
     match args.iter().position(|arg| arg == key) {
         Some(index) => args
@@ -818,6 +916,10 @@ fn run() -> Result<()> {
     let manifest = manifest(&path)?;
     for fixture in &manifest.fixture {
         let bytes = load(fixture, path.parent().unwrap())?;
+        if let Verification::Timing(expected) = &fixture.verification {
+            verify_timing(fixture, &bytes, expected)?;
+            continue;
+        }
         if let Verification::Counter(expected) = &fixture.verification {
             if !bench {
                 run_counter(
