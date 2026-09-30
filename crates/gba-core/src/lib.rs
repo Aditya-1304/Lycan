@@ -241,6 +241,8 @@ trait CpuBus {
     fn write32(&mut self, address: u32, value: u32, access: Access) -> Result<(), CoreError>;
 
     fn idle(&mut self, cycles: u64);
+    /// Signals a pipeline redirect; the bus discards cartridge prefetch state.
+    fn restart_fetch(&mut self);
 }
 
 struct Cpu {
@@ -270,6 +272,7 @@ impl Cpu {
     /// Fills the two-stage instruction pipeline after reset or a taken branch.
     fn refill<B: CpuBus>(&mut self, bus: &mut B) -> Result<(), CoreError> {
         let pc = self.registers[15];
+        bus.restart_fetch();
         self.pipeline[0] = self.fetch(
             bus,
             pc,
@@ -897,6 +900,105 @@ struct StepOutcome {
     address: u32,
 }
 
+/// Cartridge bus ownership and the eight-halfword opcode FIFO. Addresses stay
+/// in their waitstate window; changing windows cannot reuse another bank's fill.
+#[derive(Default)]
+struct GamePak {
+    /// Contiguous address eligible for the next sequential cartridge access.
+    next_access: Option<u32>,
+    /// Distinguishes opcode fetch continuity from a cartridge data transfer.
+    fetch_stream: bool,
+    /// Address of the next halfword the CPU can consume from the opcode FIFO.
+    head: Option<u32>,
+    /// Completed halfwords available to the CPU, bounded by the eight-entry FIFO.
+    buffered: u32,
+    /// Cycles already spent fetching the next unbuffered halfword.
+    progress: u64,
+}
+
+impl GamePak {
+    /// WAITCNT fields contain wait cycles; each beat also needs a transfer cycle.
+    fn beat_cycles(waitcnt: u16, address: u32, sequential: bool) -> u64 {
+        let bank = ((address >> 25) - 4) as usize;
+        let first_shift = [2, 5, 8][bank];
+        let second_shift = [4, 7, 10][bank];
+        if sequential && address & 0x1ffff != 0 {
+            if waitcnt & (1 << second_shift) != 0 {
+                2
+            } else {
+                [3, 5, 9][bank]
+            }
+        } else {
+            [5, 4, 3, 9][((waitcnt >> first_shift) & 3) as usize]
+        }
+    }
+
+    /// Fills only while the cartridge bus is free, retaining an unfinished beat.
+    fn fill(&mut self, waitcnt: u16, cycles: u64) {
+        if waitcnt & 0x4000 == 0 {
+            return;
+        }
+        let Some(head) = self.head else {
+            return;
+        };
+        self.progress += cycles;
+        while self.buffered < 8 {
+            let address = head + self.buffered * 2;
+            if !(0x08000000..0x0e000000).contains(&address) {
+                self.progress = 0;
+                break;
+            }
+            let cost = Self::beat_cycles(waitcnt, address, true);
+            if self.progress < cost {
+                break;
+            }
+            self.progress -= cost;
+            self.buffered += 1;
+        }
+        if self.buffered == 8 {
+            self.progress = 0;
+        }
+    }
+
+    /// Consumes instruction beats without letting data reads enter the FIFO.
+    /// A matching FIFO address survives CPU accesses to internal RAM; cartridge
+    /// data, redirects, and WAITCNT writes discard the old stream instead.
+    fn access(&mut self, waitcnt: u16, address: u32, width: usize, access: Access) -> u64 {
+        let fetch = matches!(access.kind, AccessKind::Fetch);
+        let enabled = waitcnt & 0x4000 != 0;
+        let hit = fetch && enabled && self.head == Some(address);
+        let sequential =
+            access.sequential && self.next_access == Some(address) && self.fetch_stream == fetch;
+        if !hit {
+            self.head = None;
+            self.buffered = 0;
+            self.progress = 0;
+        }
+        let mut cycles = 0;
+        for beat in 0..(width / 2).max(1) as u32 {
+            let current = address + beat * 2;
+            if hit && self.buffered != 0 {
+                self.buffered -= 1;
+            } else {
+                let cost = Self::beat_cycles(waitcnt, current, beat != 0 || sequential || hit);
+                cycles += cost.saturating_sub(self.progress);
+                self.progress = 0;
+            }
+        }
+        let next = address + (width as u32).max(2);
+        self.next_access = Some(next);
+        self.fetch_stream = fetch;
+        self.head = (fetch && enabled).then_some(next);
+        if cycles == 0 {
+            // A FIFO hit occupies one CPU cycle while the cartridge keeps filling.
+            self.fill(waitcnt, 1);
+            1
+        } else {
+            cycles
+        }
+    }
+}
+
 struct System {
     buttons: ButtonState,
     inputs: VecDeque<InputEvent>,
@@ -909,6 +1011,7 @@ struct System {
     vram: Vec<u8>,
     display: Display,
     cycles: u64,
+    gamepak: GamePak,
 }
 
 impl System {
@@ -924,6 +1027,7 @@ impl System {
             vram: vec![0; VRAM_BYTES],
             display: Display::new(),
             cycles: 0,
+            gamepak: GamePak::default(),
         };
         system.refresh_status();
         system
@@ -990,6 +1094,13 @@ impl System {
             if matches!(offset, 6 | 0x130) {
                 return Ok(());
             }
+            if offset == 0x204 {
+                self.gamepak.head = None;
+                self.gamepak.buffered = 0;
+                self.gamepak.progress = 0;
+                self.io[range].copy_from_slice(&(value & 0x5fff).to_le_bytes());
+                return Ok(());
+            }
             self.io[range].copy_from_slice(&bytes);
             if offset == 4 {
                 self.refresh_status();
@@ -1025,7 +1136,9 @@ impl System {
     }
 
     fn read_bytes(&self, address: u32, width: usize) -> Result<&[u8], CoreError> {
-        if let Some(range) = range_for(address, ROM_START, self.rom.len(), width) {
+        if (0x08000000..0x0e000000).contains(&address)
+            && let Some(range) = range_for(address & 0x01ffffff, 0, self.rom.len(), width)
+        {
             return Ok(&self.rom[range]);
         }
         if let Some(range) = ram_range(address, EWRAM_START, self.ewram.len(), width) {
@@ -1047,24 +1160,29 @@ impl System {
         Err(CoreError::UnmappedAddress { address, width })
     }
 
-    /// Charges default GBA bus waitstates. WAITCNT/prefetch and video contention
-    /// refinements are deferred until a guest fixture demonstrates their need.
+    /// Charges timing at the bus boundary, once per CPU access. Internal memory
+    /// leaves the cartridge free to prefetch; SRAM and ROM accesses own that bus.
     fn charge(&mut self, address: u32, width: usize, access: Access) {
-        let _classification = access.kind;
+        let waitcnt = u16::from_le_bytes([self.io[0x204], self.io[0x205]]);
         let beats = (width / 2).max(1) as u64;
-        let cycles =
-            if address >= ROM_START && (address as u64) < ROM_START as u64 + MAX_ROM_BYTES as u64 {
-                let sequential = access.sequential && address & 0x1FFFF != 0;
-                (if sequential { 3 } else { 5 }) + if width == 4 { 3 } else { 0 }
-            } else if ram_range(address, EWRAM_START, 256 * 1024, 1).is_some() {
-                3 * beats
-            } else if ram_range(address, IWRAM_START, 32 * 1024, 1).is_some()
-                || range_for(address, IO_START, IO_BYTES, 1).is_some()
-            {
-                1
-            } else {
-                beats
-            };
+        let cartridge = (0x08000000..0x10000000).contains(&address);
+        let cycles = if (0x08000000..0x0e000000).contains(&address) {
+            self.gamepak.access(waitcnt, address, width, access)
+        } else if (0x0e000000..0x10000000).contains(&address) {
+            self.gamepak = GamePak::default();
+            [5, 4, 3, 9][(waitcnt & 3) as usize]
+        } else if ram_range(address, EWRAM_START, 256 * 1024, 1).is_some() {
+            3 * beats
+        } else if ram_range(address, IWRAM_START, 32 * 1024, 1).is_some()
+            || range_for(address, IO_START, IO_BYTES, 1).is_some()
+        {
+            1
+        } else {
+            beats
+        };
+        if !cartridge {
+            self.gamepak.fill(waitcnt, cycles);
+        }
         self.advance_time(cycles);
     }
 
@@ -1087,6 +1205,10 @@ impl System {
 }
 
 impl CpuBus for System {
+    fn restart_fetch(&mut self) {
+        self.gamepak = GamePak::default();
+    }
+
     fn read8(&mut self, address: u32, access: Access) -> Result<u8, CoreError> {
         self.charge(address, 1, access);
         Ok(self.read_bytes(address, 1)?[0])
@@ -1133,6 +1255,8 @@ impl CpuBus for System {
     }
 
     fn idle(&mut self, cycles: u64) {
+        let waitcnt = u16::from_le_bytes([self.io[0x204], self.io[0x205]]);
+        self.gamepak.fill(waitcnt, cycles);
         self.advance_time(cycles);
     }
 }
@@ -1437,6 +1561,101 @@ fn range_for(address: u32, start: u32, length: usize, width: usize) -> Option<Ra
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Catches ignored WAITCNT writes and ROM aliases charged as ordinary memory.
+    // Existing fixtures use default WS0 timing exclusively.
+    #[test]
+    fn cartridge_windows_use_programmed_waitstates() {
+        let mut bus = System::new();
+        bus.rom = vec![0x34, 0x12, 0x78, 0x56];
+        let data = Access {
+            kind: AccessKind::Data,
+            sequential: false,
+        };
+        bus.rom.resize(0x20004, 0);
+        for (bank, address) in [0x08000000, 0x0a000000, 0x0c000000].into_iter().enumerate() {
+            for (selector, first) in [5, 4, 3, 9].into_iter().enumerate() {
+                for (fast, second) in [[3, 5, 9][bank], 2].into_iter().enumerate() {
+                    let control = ((selector as u16) << [2, 5, 8][bank])
+                        | ((fast as u16) << [4, 7, 10][bank]);
+                    bus.write16_impl(IO_START + 0x204, control, data).unwrap();
+                    let start = bus.cycles;
+                    assert_eq!(bus.read32_impl(address, data).unwrap(), 0x56781234);
+                    assert_eq!(bus.cycles - start, first + second);
+                    let start = bus.cycles;
+                    bus.read16_impl(
+                        address + 4,
+                        Access {
+                            sequential: true,
+                            ..data
+                        },
+                    )
+                    .unwrap();
+                    assert_eq!(bus.cycles - start, second);
+                    // The cartridge forces N timing at each 128 KiB boundary.
+                    bus.read16_impl(address + 0x1fffe, data).unwrap();
+                    let start = bus.cycles;
+                    bus.read16_impl(
+                        address + 0x20000,
+                        Access {
+                            sequential: true,
+                            ..data
+                        },
+                    )
+                    .unwrap();
+                    assert_eq!(bus.cycles - start, first);
+                }
+            }
+        }
+        for (selector, cycles) in [5, 4, 3, 9].into_iter().enumerate() {
+            bus.write16_impl(IO_START + 0x204, selector as u16, data)
+                .unwrap();
+            let start = bus.cycles;
+            bus.charge(0x0e000000, 1, data);
+            assert_eq!(bus.cycles - start, cycles);
+        }
+    }
+
+    // Catches lost partial fills, incorrect word consumption, and stale opcodes
+    // surviving a cartridge data access. No earlier test enables prefetch.
+    #[test]
+    fn prefetch_consumes_halfwords_and_resets_on_cartridge_data() {
+        let mut bus = System::new();
+        let fetch = Access {
+            kind: AccessKind::Fetch,
+            sequential: true,
+        };
+        let data = Access {
+            kind: AccessKind::Data,
+            sequential: false,
+        };
+        bus.write16_impl(IO_START + 0x204, 0x4000, data).unwrap();
+        bus.charge(
+            ROM_START,
+            2,
+            Access {
+                sequential: false,
+                ..fetch
+            },
+        );
+        bus.idle(2);
+        let start = bus.cycles;
+        bus.charge(ROM_START + 2, 2, fetch);
+        assert_eq!(bus.cycles - start, 1);
+        bus.idle(24);
+        let start = bus.cycles;
+        bus.charge(ROM_START + 4, 4, fetch);
+        assert_eq!(bus.cycles - start, 1);
+        bus.charge(ROM_START + 0x100, 2, data);
+        let start = bus.cycles;
+        bus.charge(ROM_START + 8, 2, fetch);
+        assert_eq!(bus.cycles - start, 5);
+        bus.write16_impl(IO_START + 0x204, 0, data).unwrap();
+        bus.idle(24);
+        let start = bus.cycles;
+        bus.charge(ROM_START + 10, 2, fetch);
+        assert_eq!(bus.cycles - start, 3);
+    }
 
     // Catches stale ARM pipeline words after BX, incorrect Thumb PC alignment,
     // and a BL return that loses its Thumb tag before the final ARM return.

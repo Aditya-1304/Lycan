@@ -196,3 +196,46 @@ memory_checks = [
     { address = 0x06010000, value = 0x0202 },
     { address = 0x06014000, value = 0x0000 },
 ]
+
+[[fixture]]
+name = "cartridge"
+rom = "../roms/cartridge.gba"
+source = "../roms/cartridge/cartridge.s"
+linker = "../roms/pixels/linker.ld"
+sha256 = "5b4fc59af58129cad68743df97fde3fa37fd48e206c415455b16486728f9cf2c"
+origin = "Original MIT guest assembly in roms/cartridge/cartridge.s"
+startup = "cartridge-direct-arm"
+bios_required = false
+mailbox_address = 0x03000000
+completion_id = 0x0060
+max_instructions = 2000
+max_cycles = 20000
+[fixture.verification]
+kind = "timing"
+terminal_pc = 0x08002018
+checkpoints = [
+    { start_pc = 0x8000140, end_pc = 0x800016c, cycles = 121, waitcnt = 0x0, width = 32, window = 0 },
+    { start_pc = 0x8000240, end_pc = 0x8000256, cycles = 88, waitcnt = 0x0, width = 16, window = 0 },
+    { start_pc = 0xa000340, end_pc = 0xa00036c, cycles = 155, waitcnt = 0x0, width = 32, window = 1 },
+    { start_pc = 0xa000440, end_pc = 0xa000456, cycles = 100, waitcnt = 0x0, width = 16, window = 1 },
+    { start_pc = 0xc000540, end_pc = 0xc00056c, cycles = 223, waitcnt = 0x0, width = 32, window = 2 },
+    { start_pc = 0xc000640, end_pc = 0xc000656, cycles = 124, waitcnt = 0x0, width = 16, window = 2 },
+    { start_pc = 0x8000740, end_pc = 0x800076c, cycles = 88, waitcnt = 0x6da, width = 32, window = 0 },
+    { start_pc = 0x8000840, end_pc = 0x8000856, cycles = 66, waitcnt = 0x6da, width = 16, window = 0 },
+    { start_pc = 0xa000940, end_pc = 0xa00096c, cycles = 88, waitcnt = 0x6da, width = 32, window = 1 },
+    { start_pc = 0xa000a40, end_pc = 0xa000a56, cycles = 66, waitcnt = 0x6da, width = 16, window = 1 },
+    { start_pc = 0xc000b40, end_pc = 0xc000b6c, cycles = 88, waitcnt = 0x6da, width = 32, window = 2 },
+    { start_pc = 0xc000c40, end_pc = 0xc000c56, cycles = 66, waitcnt = 0x6da, width = 16, window = 2 },
+    { start_pc = 0x8000d40, end_pc = 0x8000d6c, cycles = 85, waitcnt = 0x4000, width = 32, window = 0 },
+    { start_pc = 0x8000e40, end_pc = 0x8000e56, cycles = 64, waitcnt = 0x4000, width = 16, window = 0 },
+    { start_pc = 0xa000f40, end_pc = 0xa000f6c, cycles = 127, waitcnt = 0x4000, width = 32, window = 1 },
+    { start_pc = 0xa001040, end_pc = 0xa001056, cycles = 72, waitcnt = 0x4000, width = 16, window = 1 },
+    { start_pc = 0xc001140, end_pc = 0xc00116c, cycles = 211, waitcnt = 0x4000, width = 32, window = 2 },
+    { start_pc = 0xc001240, end_pc = 0xc001256, cycles = 112, waitcnt = 0x4000, width = 16, window = 2 },
+    { start_pc = 0x8001340, end_pc = 0x800136c, cycles = 60, waitcnt = 0x46da, width = 32, window = 0 },
+    { start_pc = 0x8001440, end_pc = 0x8001456, cycles = 54, waitcnt = 0x46da, width = 16, window = 0 },
+    { start_pc = 0xa001540, end_pc = 0xa00156c, cycles = 60, waitcnt = 0x46da, width = 32, window = 1 },
+    { start_pc = 0xa001640, end_pc = 0xa001656, cycles = 54, waitcnt = 0x46da, width = 16, window = 1 },
+    { start_pc = 0xc001740, end_pc = 0xc00176c, cycles = 60, waitcnt = 0x46da, width = 32, window = 2 },
+    { start_pc = 0xc001840, end_pc = 0xc001856, cycles = 54, waitcnt = 0x46da, width = 16, window = 2 },
+]
