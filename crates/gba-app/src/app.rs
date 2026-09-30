@@ -57,6 +57,9 @@ const KEYPAD_AND_ROM: &[u8] = include_bytes!("../../../roms/keypad-and.gba");
 /// The same logical input deadlines are used by the bounded headless runner.
 const KEYPAD_INPUT: &[(Cycle, Button, bool)] = &include!("../../../roms/keypad/input.rs");
 const VBLANK_ROM: &[u8] = include_bytes!("../../../roms/vblank.gba");
+/// Original DMA tile scene; firmware is mapped only for these recognized bytes.
+const DMA_ROM: &[u8] = include_bytes!("../../../roms/dma.gba");
+const DMA_INPUT: &[(Cycle, Button, bool)] = &include!("../../../roms/dma/input.rs");
 /// IRQ variant shares the polling scene assets and scripted logical input.
 const IRQ_SPRITES_ROM: &[u8] = include_bytes!("../../../roms/irq-sprites.gba");
 /// Original guest-owned sprite scene and its independently verified replay.
@@ -163,6 +166,7 @@ impl GbaApp {
                     || bytes == KEYPAD_AND_ROM
                     || bytes == VBLANK_ROM
                     || bytes == IRQ_SPRITES_ROM
+                    || bytes == DMA_ROM
                 {
                     self.session.enable_test_firmware();
                 }
@@ -266,6 +270,23 @@ impl GbaApp {
             }
             if ui.button("Reset").clicked() {
                 self.reset_demo();
+                ui.ctx().request_repaint();
+            }
+            if ui.button("Load DMA tile scene").clicked() {
+                self.load_rom_bytes("dma.gba", DMA_ROM);
+                self.status = "DMA tiles: hold Z for green; release for red (VBlank upload)".to_owned();
+                ui.ctx().request_repaint();
+            }
+            if ui.button("Replay DMA input").clicked() {
+                self.load_rom_bytes("dma.gba", DMA_ROM);
+                for &(cycle, button, pressed) in DMA_INPUT {
+                    if let Err(error) = self.session.set_button_at(cycle, button, pressed) {
+                        self.status = format!("DMA replay failed: {error}");
+                        return;
+                    }
+                }
+                self.replay_deadline = Some(Cycle(10 * CYCLES_PER_FRAME));
+                self.status = "DMA replay: red, green, then red; final frame is red".to_owned();
                 ui.ctx().request_repaint();
             }
             if ui.button("Load IRQ sprite scene").clicked() {
@@ -617,6 +638,18 @@ impl eframe::App for GbaApp {
                         "Keypad replay failed: {} completion mailbox does not match the expected IRQ result",
                         self.rom_name
                     ),
+                }
+            } else if self.rom_name == "dma.gba" {
+                match (
+                    self.session.inspect16(0x03000000),
+                    self.session.inspect16(0x03000002),
+                    self.session.inspect16(0x03000004),
+                    self.session.inspect16(0x03000006),
+                    self.session.inspect16(0x03000008),
+                ) {
+                    (Ok(0x65), Ok(9), Ok(8), Ok(0x801), Ok(0)) =>
+                        "DMA replay complete: 9 VBlanks, 8 uploads; IF acknowledged; final frame red".to_owned(),
+                    _ => "DMA replay failed: completion mailbox mismatch".to_owned(),
                 }
             } else {
                 match (

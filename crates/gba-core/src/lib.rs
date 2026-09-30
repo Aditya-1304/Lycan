@@ -1421,7 +1421,22 @@ impl GamePak {
     }
 }
 
+/// DMA3 owns the bus while active. Programmed registers remain distinct from
+/// latched addresses so repeat transfers retain their source progression.
+#[derive(Default)]
+struct DmaTransfer {
+    source: u32,
+    destination: u32,
+    initial_destination: u32,
+    count: u32,
+    remaining: u32,
+    control: u16,
+    active: bool,
+    sequential: bool,
+}
+
 struct System {
+    dma: DmaTransfer,
     /// HALT stops instruction retirement while hardware time continues.
     halted: bool,
     buttons: ButtonState,
@@ -1447,6 +1462,7 @@ struct System {
 impl System {
     fn new() -> Self {
         let mut system = Self {
+            dma: DmaTransfer::default(),
             halted: false,
             buttons: ButtonState::default(),
             inputs: VecDeque::new(),
@@ -1491,9 +1507,98 @@ impl System {
 
     /// HALT must stop at input transitions as well as display interrupt edges.
     fn next_wake_event(&self) -> u64 {
-        self.inputs.front().map_or(self.next_vblank(), |event| {
-            self.next_vblank().min(event.cycle.0)
-        })
+        let display = if self.dma.control & 0xb000 == 0xa000 {
+            self.next_vblank().min(self.next_hblank())
+        } else {
+            self.next_vblank()
+        };
+        self.inputs
+            .front()
+            .map_or(display, |event| display.min(event.cycle.0))
+    }
+
+    /// HBlank DMA starts after the visible pixel interval on visible lines.
+    fn next_hblank(&self) -> u64 {
+        let edge = self.cycles / CYCLES_PER_SCANLINE * CYCLES_PER_SCANLINE + HBLANK_FLAG_CYCLE;
+        if edge > self.cycles {
+            edge
+        } else {
+            edge + CYCLES_PER_SCANLINE
+        }
+    }
+
+    /// Enable rising edges latch the complete descriptor. A zero DMA3 count
+    /// means 65,536 transfers; immediate mode ignores the repeat bit.
+    fn configure_dma(&mut self, value: u16) {
+        let old = self.dma.control;
+        self.dma.control = value;
+        if value & 0x8000 == 0 {
+            self.dma.active = false;
+        } else if old & 0x8000 == 0 {
+            let width = if value & 0x400 != 0 { 4 } else { 2 };
+            self.dma.source = u32::from_le_bytes(self.io[0xd4..0xd8].try_into().unwrap())
+                & 0x0fff_ffff
+                & !(width - 1);
+            self.dma.destination = u32::from_le_bytes(self.io[0xd8..0xdc].try_into().unwrap())
+                & 0x0fff_ffff
+                & !(width - 1);
+            self.dma.initial_destination = self.dma.destination;
+            let count = u16::from_le_bytes([self.io[0xdc], self.io[0xdd]]);
+            self.dma.count = if count == 0 { 65536 } else { u32::from(count) };
+            self.dma.remaining = self.dma.count;
+            self.dma.active = value & 0x3000 == 0;
+            self.dma.sequential = false;
+        }
+    }
+
+    /// Services one read/write beat, preserving state between host deadlines.
+    /// CPU execution and IRQ entry wait for DMA to release bus ownership. Every
+    /// memory access advances scanout and requests through the ordinary bus path.
+    fn dma_beat(&mut self) -> Result<(), CoreError> {
+        let control = self.dma.control;
+        let width = if control & 0x400 != 0 { 4 } else { 2 };
+        if !self.dma.sequential {
+            self.gamepak = GamePak::default();
+            self.advance_time(2);
+        }
+        let access = Access {
+            kind: AccessKind::Data,
+            sequential: self.dma.sequential,
+        };
+        if width == 4 {
+            let value = self.read32_impl(self.dma.source, access)?;
+            self.write32_impl(self.dma.destination, value, access)?;
+        } else {
+            let value = self.read16_impl(self.dma.source, access)?;
+            self.write16_impl(self.dma.destination, value, access)?;
+        }
+        let advance = |address: u32, mode: u16| match mode {
+            1 => address.wrapping_sub(width),
+            2 => address,
+            _ => address.wrapping_add(width),
+        };
+        self.dma.source = advance(self.dma.source, (control >> 7) & 3);
+        self.dma.destination = advance(self.dma.destination, (control >> 5) & 3);
+        self.dma.sequential = true;
+        self.dma.remaining -= 1;
+        if self.dma.remaining == 0 {
+            self.dma.active = false;
+            self.gamepak = GamePak::default();
+            if control & 0x4000 != 0 {
+                self.io[0x203] |= 8;
+            }
+            if control & 0x200 != 0 && control & 0x3000 != 0 {
+                self.dma.remaining = self.dma.count;
+                if control & 0x60 == 0x60 {
+                    self.dma.destination = self.dma.initial_destination;
+                }
+                self.dma.sequential = false;
+            } else {
+                self.dma.control &= !0x8000;
+                self.io[0xdf] &= !0x80;
+            }
+        }
+        Ok(())
     }
 
     /// Absolute next VBlank edge; sleeping callers clip it to their own deadline.
@@ -1577,6 +1682,11 @@ impl System {
 
         if let Some(range) = range_for(address, IO_START, self.io.len(), 2) {
             let offset = range.start;
+            if offset == 0xde {
+                self.io[range].copy_from_slice(&bytes);
+                self.configure_dma(value);
+                return Ok(());
+            }
             if matches!(offset, 6 | 0x130) {
                 return Ok(());
             }
@@ -1711,6 +1821,17 @@ impl System {
         // Latch VBlank at line 160 even when an access crosses the boundary.
         // Repeated reads in VBlank must not regenerate an acknowledged request.
         let next = self.next_vblank();
+        let hblank = self.next_hblank();
+        let trigger = (self.dma.control >> 12) & 3;
+        if self.dma.control & 0x8000 != 0
+            && !self.dma.active
+            && ((trigger == 1 && next <= target)
+                || (trigger == 2
+                    && hblank <= target
+                    && hblank / CYCLES_PER_SCANLINE % SCANLINES_PER_FRAME < 160))
+        {
+            self.dma.active = true;
+        }
         if next <= target && self.io[4] & 8 != 0 {
             self.io[0x202] |= 1;
         }
@@ -2186,9 +2307,13 @@ impl Machine {
         self.cpu.exception_banks[1][0] = 0x0300_7fe0;
     }
 
-    /// Executes one instruction, or advances HALT to the next input/display event.
-    /// Sleeping steps return the resume PC without incrementing instruction count.
+    /// Executes one instruction, one DMA read/write beat, or advances HALT to
+    /// the next input/display event. DMA and sleep preserve instruction count.
     pub fn step(&mut self) -> Result<u32, CoreError> {
+        if self.system.dma.active {
+            self.system.dma_beat()?;
+            return Ok(self.cpu.registers[15]);
+        }
         let pending = self.system.pending_interrupts();
         if pending != 0 {
             self.system.halted = false;
@@ -2217,7 +2342,8 @@ impl Machine {
     }
 
     /// Advances toward an absolute cycle deadline with a hard instruction budget.
-    /// An instruction may finish beyond the deadline; subsequent targets retain that excess.
+    /// An instruction or DMA beat may finish beyond the deadline; subsequent
+    /// targets retain that excess. A complete DMA descriptor never runs atomically.
     pub fn advance_to(
         &mut self,
         target: Cycle,
@@ -2233,7 +2359,10 @@ impl Machine {
                     cycles: self.cycles(),
                 });
             }
-            if self.system.halted && self.system.pending_interrupts() == 0 {
+            if self.system.halted
+                && self.system.pending_interrupts() == 0
+                && !self.system.dma.active
+            {
                 let next = self.system.next_wake_event();
                 let deadline = next.min(target.0);
                 self.system.advance_time(deadline - self.system.cycles);
@@ -2652,6 +2781,97 @@ mod tests {
             machine.advance_to(Cycle(2 * CYCLES_PER_FRAME), 1),
             Err(RunError::StepLimitExceeded { .. })
         ));
+    }
+
+    #[test]
+    fn dma_upload_resumes_at_deadlines_and_latches_vblank_irq() {
+        // A large immediate upload must relinquish the host at a beat boundary,
+        // without retiring CPU instructions or skipping the intervening IRQ edge.
+        let mut machine = Machine::new();
+        machine.system.halted = true;
+        machine.system.ewram.fill(0x5a);
+        let data = Access {
+            kind: AccessKind::Data,
+            sequential: false,
+        };
+        machine.system.write16_impl(IO_START + 4, 8, data).unwrap();
+        machine
+            .system
+            .advance_time(160 * CYCLES_PER_SCANLINE - 20 - machine.cycles().0);
+        machine
+            .system
+            .write32_impl(IO_START + 0xd4, EWRAM_START, data)
+            .unwrap();
+        machine
+            .system
+            .write32_impl(IO_START + 0xd8, VRAM_START, data)
+            .unwrap();
+        machine
+            .system
+            .write32_impl(IO_START + 0xdc, 0x8000_4000, data)
+            .unwrap();
+        let start = machine.cycles().0;
+        machine.advance_to(Cycle(start + 8), 1).unwrap();
+        assert_eq!(machine.inspect16(VRAM_START).unwrap(), 0x5a5a);
+        assert_eq!(machine.inspect16(VRAM_START + 32766).unwrap(), 0);
+        assert_eq!(machine.inspect16(IO_START + 0xde).unwrap() & 0x8000, 0x8000);
+        assert_eq!(machine.executed_instructions(), 0);
+        assert!(machine.cycles().0 <= start + 12);
+        machine.advance_to(Cycle(start + 70000), 1).unwrap();
+        assert_eq!(machine.inspect16(VRAM_START + 32766).unwrap(), 0x5a5a);
+        assert_eq!(machine.inspect16(IO_START + 0xde).unwrap() & 0x8000, 0);
+        assert_eq!(machine.inspect16(IO_START + 0x202).unwrap() & 1, 1);
+    }
+
+    #[test]
+    fn repeating_dma_reloads_destination_without_rewinding_source() {
+        // Repeated HBlank uploads must progress through successive source rows.
+        // Reloading both addresses would silently display the first row forever.
+        let mut machine = Machine::new();
+        machine.system.halted = true;
+        let data = Access {
+            kind: AccessKind::Data,
+            sequential: false,
+        };
+        for (offset, value) in [(0, 0x11223344), (4, 0x55667788)] {
+            machine
+                .system
+                .write32_impl(EWRAM_START + offset, value, data)
+                .unwrap();
+        }
+        machine
+            .system
+            .write32_impl(IO_START + 0xd4, EWRAM_START, data)
+            .unwrap();
+        machine
+            .system
+            .write32_impl(IO_START + 0xd8, VRAM_START, data)
+            .unwrap();
+        machine
+            .system
+            .write32_impl(IO_START + 0xdc, 0xa6600001, data)
+            .unwrap();
+        machine.advance_to(Cycle(HBLANK_FLAG_CYCLE - 1), 1).unwrap();
+        assert_eq!(machine.inspect16(VRAM_START).unwrap(), 0);
+        machine
+            .advance_to(Cycle(HBLANK_FLAG_CYCLE + 20), 1)
+            .unwrap();
+        assert_eq!(machine.inspect16(VRAM_START).unwrap(), 0x3344);
+        assert_eq!(machine.inspect16(VRAM_START + 2).unwrap(), 0x1122);
+        machine
+            .advance_to(Cycle(CYCLES_PER_SCANLINE + HBLANK_FLAG_CYCLE + 20), 1)
+            .unwrap();
+        assert_eq!(machine.inspect16(VRAM_START).unwrap(), 0x7788);
+        assert_eq!(machine.inspect16(VRAM_START + 2).unwrap(), 0x5566);
+        assert_eq!(machine.inspect16(VRAM_START + 4).unwrap(), 0);
+        machine
+            .system
+            .write16_impl(IO_START + 0xde, 0, data)
+            .unwrap();
+        machine
+            .advance_to(Cycle(3 * CYCLES_PER_SCANLINE), 1)
+            .unwrap();
+        assert_eq!(machine.inspect16(VRAM_START).unwrap(), 0x7788);
     }
 
     #[test]

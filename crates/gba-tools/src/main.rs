@@ -25,6 +25,7 @@ const TILED_INPUT: &[(Cycle, Button, bool)] = &include!("../../../roms/tiled/inp
 
 /// The application timeline must match independently retained fixture events.
 const SPRITE_INPUT: &[(Cycle, Button, bool)] = &include!("../../../roms/sprites/input.rs");
+const DMA_INPUT: &[(Cycle, Button, bool)] = &include!("../../../roms/dma/input.rs");
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -68,9 +69,31 @@ enum Verification {
     Sprites(Sprites),
     Vblank(Vblank),
     Keypad(Keypad),
+    Dma(DmaScene),
     Stripes(Stripes),
     Timing(Timing),
     Diagnostic(Diagnostic),
+}
+
+/// The DMA scene has an independently frozen startup PC and firmware identity.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DmaScene {
+    ready_pc: u32,
+    firmware_sha256: String,
+    input_events: Vec<InputEvent>,
+    checkpoints: Vec<DmaCheckpoint>,
+}
+
+/// Frozen data, complete scanout and interrupt counts at one frame boundary.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DmaCheckpoint {
+    frame: u16,
+    tile: u16,
+    color: u16,
+    vblank: u16,
+    completions: u16,
 }
 
 /// Frozen keypad mode and mapped firmware identity for bounded guest acceptance.
@@ -316,7 +339,10 @@ fn manifest(path: &Path) -> Result<Manifest> {
             || (fixture.bios_required
                 != (matches!(
                     fixture.verification,
-                    Verification::Diagnostic(_) | Verification::Vblank(_) | Verification::Keypad(_)
+                    Verification::Diagnostic(_)
+                        | Verification::Vblank(_)
+                        | Verification::Keypad(_)
+                        | Verification::Dma(_)
                 ) || matches!(&fixture.verification, Verification::Sprites(expected) if expected.firmware_sha256.is_some())))
             || fixture.max_instructions == 0
             || fixture.max_cycles == 0
@@ -328,6 +354,34 @@ fn manifest(path: &Path) -> Result<Manifest> {
             )));
         }
         match &fixture.verification {
+            Verification::Dma(expected) => {
+                if expected.ready_pc & 3 != 0
+                    || expected.firmware_sha256.len() != 64
+                    || fixture.max_cycles < 10 * CYCLES_PER_FRAME
+                {
+                    return Err(fail("invalid DMA scene bounds or identity"));
+                }
+                let events = expected
+                    .input_events
+                    .iter()
+                    .map(|event| Ok((Cycle(event.cycle), button(&event.button)?, event.pressed)))
+                    .collect::<Result<Vec<_>>>()?;
+                if events != DMA_INPUT
+                    || expected.checkpoints.is_empty()
+                    || expected
+                        .checkpoints
+                        .windows(2)
+                        .any(|points| points[0].frame >= points[1].frame)
+                    || expected.checkpoints.iter().any(|point| {
+                        point.frame == 0
+                            || u64::from(point.frame) * CYCLES_PER_FRAME > fixture.max_cycles
+                    })
+                {
+                    return Err(fail(
+                        "invalid DMA replay or app timeline differs from manifest",
+                    ));
+                }
+            }
             Verification::Keypad(expected) => {
                 if expected.firmware_sha256.len() != 64 || fixture.max_cycles < 2 * CYCLES_PER_FRAME
                 {
@@ -631,6 +685,7 @@ fn build_fixtures(path: &Path) -> Result<()> {
                 Verification::Diagnostic(expected) => Some(&expected.firmware_sha256),
                 Verification::Vblank(expected) => Some(&expected.firmware_sha256),
                 Verification::Keypad(expected) => Some(&expected.firmware_sha256),
+                Verification::Dma(expected) => Some(&expected.firmware_sha256),
                 Verification::Sprites(expected) => expected.firmware_sha256.as_ref(),
                 _ => None,
             };
@@ -738,7 +793,8 @@ fn pixels(fixture: &Fixture) -> Result<&Pixels> {
         | Verification::Timing(_)
         | Verification::Diagnostic(_)
         | Verification::Keypad(_)
-        | Verification::Vblank(_) => Err(fail("expected a terminal pixels fixture")),
+        | Verification::Vblank(_)
+        | Verification::Dma(_) => Err(fail("expected a terminal pixels fixture")),
     }
 }
 
@@ -1105,8 +1161,93 @@ fn check_sprite_image(machine: &Machine, point: &SpriteCheckpoint) -> Result<()>
     Ok(())
 }
 
-/// Checks negative combinations before the exact input deadline, then guest IRQ
-/// dispatch, W1C acknowledgement and return to HALT under a total work budget.
+/// Verifies bus ownership during setup and the two-frame input/upload/scanout
+/// pipeline. Full-frame colors and all copied tile words are independent oracles.
+fn run_dma(
+    fixture: &Fixture,
+    expected: &DmaScene,
+    bytes: &[u8],
+    capture_path: Option<&str>,
+) -> Result<Machine> {
+    if expected.firmware_sha256 != hash(gba_core::TEST_FIRMWARE) {
+        return Err(fail("DMA firmware identity mismatch"));
+    }
+    let mut machine = Machine::new();
+    machine.load_rom(bytes)?;
+    machine.enable_test_firmware();
+    machine.run_until_pc(
+        expected.ready_pc,
+        fixture.max_instructions,
+        Cycle(fixture.max_cycles),
+    )?;
+    let initialized = machine.cycles().0;
+    if machine.inspect16(fixture.mailbox_address)? != fixture.completion_id {
+        return Err(fail("DMA setup mailbox mismatch"));
+    }
+    for address in (0x06000000..0x06010000).step_by(2) {
+        if machine.inspect16(address)?
+            != if (0x06008000..0x0600a000).contains(&address) {
+                0
+            } else {
+                0x1111
+            }
+        {
+            return Err(fail("large DMA upload or map clear mismatch"));
+        }
+    }
+    // Input is shared with the app; its frozen frame offsets are checked here.
+    for &(cycle, button, pressed) in DMA_INPUT {
+        machine.set_button_at(cycle, button, pressed)?;
+    }
+    for point in &expected.checkpoints {
+        let frame = u64::from(point.frame);
+        let tile = point.tile;
+        let color = point.color;
+        let remaining = fixture
+            .max_instructions
+            .checked_sub(machine.executed_instructions())
+            .ok_or_else(|| fail("DMA instruction budget exhausted"))?;
+        machine.advance_to(Cycle(frame * CYCLES_PER_FRAME), remaining)?;
+        for address in (0x06000000..0x06000020).step_by(2) {
+            if machine.inspect16(address)? != tile {
+                return Err(fail(format!("DMA tile mismatch at frame {frame}")));
+            }
+        }
+        if machine.framebuffer().iter().any(|&pixel| pixel != color)
+            || machine.inspect16(fixture.mailbox_address + 6)? != 0x0801
+            || machine.inspect16(fixture.mailbox_address + 8)? != 0
+            || !machine.halted()
+        {
+            return Err(fail(format!(
+                "DMA frame/IRQ/HALT mismatch at frame {frame}"
+            )));
+        }
+        let vblank = machine.inspect16(fixture.mailbox_address + 2)?;
+        let completed = machine.inspect16(fixture.mailbox_address + 4)?;
+        if vblank != point.vblank || completed != point.completions {
+            return Err(fail(format!(
+                "DMA event order frame={frame} vblank={vblank} completed={completed} setup_cycles={initialized}"
+            )));
+        }
+        if let Some(path) = capture_path {
+            capture(
+                Path::new(&format!("{path}.dma-frame-{frame}.ppm")),
+                machine.framebuffer(),
+            )?;
+        }
+        println!(
+            "PASS dma frame={frame} tile={tile:#06x} color={color:#06x} vblank={vblank} completions={completed} pixels=38400"
+        );
+    }
+    println!(
+        "PASS dma setup_cycles={initialized} cycles={} instructions={}",
+        machine.cycles().0,
+        machine.executed_instructions()
+    );
+    Ok(machine)
+}
+
+/// Verifies keypad dispatch, W1C acknowledgement and return to bounded HALT.
 fn run_keypad(fixture: &Fixture, expected: &Keypad, bytes: &[u8]) -> Result<()> {
     if hash(gba_core::TEST_FIRMWARE) != expected.firmware_sha256 {
         return Err(fail("keypad firmware identity mismatch"));
@@ -1822,18 +1963,18 @@ fn run() -> Result<()> {
         && !(args[0] == "fixtures" && args.get(1).map(String::as_str) == Some("run"))
     {
         return Err(fail(
-            "usage: build-fixtures | fixtures run --manifest PATH [--fixture NAME] [--capture PATH] | bench --scenario pixels|tiled|sprites|vblank|irq-sprites --frames N",
+            "usage: build-fixtures | fixtures run --manifest PATH [--fixture NAME] [--capture PATH] | bench --scenario pixels|tiled|sprites|vblank|irq-sprites|dma --frames N",
         ));
     }
     let scenario = option(&args, "--scenario")?.unwrap_or_else(|| "pixels".to_owned());
     if bench
         && !matches!(
             scenario.as_str(),
-            "pixels" | "tiled" | "sprites" | "vblank" | "irq-sprites"
+            "pixels" | "tiled" | "sprites" | "vblank" | "irq-sprites" | "dma"
         )
     {
         return Err(fail(
-            "benchmark scenario must be pixels, tiled, sprites, vblank or irq-sprites",
+            "benchmark scenario must be pixels, tiled, sprites, vblank, irq-sprites or dma",
         ));
     }
     let manifest = manifest(&path)?;
@@ -1855,6 +1996,24 @@ fn run() -> Result<()> {
             continue;
         }
         let bytes = load(fixture, path.parent().unwrap())?;
+        if let Verification::Dma(expected) = &fixture.verification {
+            let mut machine = run_dma(
+                fixture,
+                expected,
+                &bytes,
+                option(&args, "--capture")?.as_deref(),
+            )?;
+            if bench {
+                let frames = option(&args, "--frames")?
+                    .unwrap_or_else(|| "600".to_owned())
+                    .parse()?;
+                benchmark_frames(fixture, &mut machine, frames)?;
+                if machine.framebuffer().iter().any(|&pixel| pixel != 0x001f) || !machine.halted() {
+                    return Err(fail("DMA benchmark scene mismatch"));
+                }
+            }
+            continue;
+        }
         if let Verification::Keypad(expected) = &fixture.verification {
             run_keypad(fixture, expected, &bytes)?;
             continue;
