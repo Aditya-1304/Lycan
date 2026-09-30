@@ -156,7 +156,28 @@ marker_2d:
     strh r1, [r11, #14]
     ldr r1, =0x1140             @ BG0 + OBJ enabled, initial 1D object mapping.
     strh r1, [r0]
+.ifdef VBLANK_IRQ
+    @ The scene supplies its own IRQ stack and the standard firmware callback.
+    msr cpsr_c, #0xd2
+    ldr sp, =0x03007fa0
+    msr cpsr_c, #0xdf
+    ldr r1, =scene_irq
+    ldr r4, =0x03007ffc
+    str r1, [r4]
+    add r4, r0, #0x200
+    mov r1, #1
+    strh r1, [r4]
+    strh r1, [r4, #8]
+    mov r1, #8
+    strh r1, [r0, #4]
+    msr cpsr_c, #0x5f
+.endif
 frame:
+.ifdef VBLANK_IRQ
+    ldr r4, =0x04000301
+    mov r1, #0
+    strb r1, [r4]              @ VBlank dispatch drives the existing scene update.
+.else
     ldrh r1, [r0, #6]
     cmp r1, #160
     bhs frame
@@ -164,6 +185,7 @@ wait_vblank:
     ldrh r1, [r0, #4]
     tst r1, #1
     beq wait_vblank
+.endif
     ldrh r8, [r10]
     tst r8, #0x10
     addeq r2, r2, #2
@@ -215,6 +237,21 @@ wait_vblank:
     strh r12, [r11, #6]
     b frame
     .ltorg
+.ifdef VBLANK_IRQ
+scene_irq:
+    @ Save/restore of volatile registers and exception return belong to firmware.
+    ldr r0, =0x04000202
+    ldrh r1, [r0]
+    strh r1, [r11, #20]
+    strh r1, [r0]
+    ldrh r1, [r0]
+    strh r1, [r11, #22]
+    ldrh r1, [r11, #16]
+    add r1, r1, #1
+    strh r1, [r11, #16]        @ IRQ count is independent of main-loop update count.
+    bx lr
+    .ltorg
+.endif
     .word 0, 0
 .size _start, . - _start
 

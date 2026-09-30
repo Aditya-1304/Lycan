@@ -51,6 +51,10 @@ const TILED_ROM: &[u8] = include_bytes!("../../../roms/tiled.gba");
 const STRIPES_ROM: &[u8] = include_bytes!("../../../roms/gba-tests/stripes.gba");
 const TILED_INPUT: &[(Cycle, Button, bool)] = &include!("../../../roms/tiled/input.rs");
 
+/// Explicit original IRQ diagnostic; normal cartridges never map test firmware.
+const VBLANK_ROM: &[u8] = include_bytes!("../../../roms/vblank.gba");
+/// IRQ variant shares the polling scene assets and scripted logical input.
+const IRQ_SPRITES_ROM: &[u8] = include_bytes!("../../../roms/irq-sprites.gba");
 /// Original guest-owned sprite scene and its independently verified replay.
 const SPRITES_ROM: &[u8] = include_bytes!("../../../roms/sprites.gba");
 const SPRITE_INPUT: &[(Cycle, Button, bool)] = &include!("../../../roms/sprites/input.rs");
@@ -130,7 +134,7 @@ impl GbaApp {
             #[cfg(target_arch = "wasm32")]
             load_generation: Default::default(),
         };
-        app.load_rom_bytes("sprites.gba", SPRITES_ROM);
+        app.load_rom_bytes("irq-sprites.gba", IRQ_SPRITES_ROM);
         app
     }
 
@@ -151,6 +155,8 @@ impl GbaApp {
                 if bytes == ARM_DIAGNOSTIC_ROM
                     || bytes == THUMB_DIAGNOSTIC_ROM
                     || bytes == MEMORY_ROM
+                    || bytes == VBLANK_ROM
+                    || bytes == IRQ_SPRITES_ROM
                 {
                     self.session.enable_test_firmware();
                 }
@@ -254,6 +260,29 @@ impl GbaApp {
             }
             if ui.button("Reset").clicked() {
                 self.reset_demo();
+                ui.ctx().request_repaint();
+            }
+            if ui.button("Load IRQ sprite scene").clicked() {
+                self.load_rom_bytes("irq-sprites.gba", IRQ_SPRITES_ROM);
+                self.status = "IRQ sprite scene: arrows move; Z changes priority; X selects 2D tiles".to_owned();
+                ui.ctx().request_repaint();
+            }
+            if ui.button("Replay IRQ sprite input").clicked() {
+                self.load_rom_bytes("irq-sprites.gba", IRQ_SPRITES_ROM);
+                for &(cycle, button, pressed) in SPRITE_INPUT {
+                    if let Err(error) = self.session.set_button_at(cycle, button, pressed) {
+                        self.status = format!("Replay input failed: {error}");
+                        self.session.toggle_pause();
+                        return;
+                    }
+                }
+                self.replay_deadline = Some(Cycle(20 * CYCLES_PER_FRAME));
+                self.status = "Replaying IRQ sprite scene; final player (116, 74)".to_owned();
+                ui.ctx().request_repaint();
+            }
+            if ui.button("Load VBlank IRQ demo").clicked() {
+                self.load_rom_bytes("vblank.gba", VBLANK_ROM);
+                self.status = "VBlank IRQ: callback changes the red backdrop; guest sleeps between frames".to_owned();
                 ui.ctx().request_repaint();
             }
             if ui.button("Load sprite demo").clicked() {
@@ -544,7 +573,9 @@ impl eframe::App for GbaApp {
                 self.session.inspect16(0x03000002),
                 self.session.inspect16(0x03000004),
             ) {
-                (Ok(x), Ok(y)) if self.rom_name == "sprites.gba" => {
+                (Ok(x), Ok(y))
+                    if matches!(self.rom_name.as_str(), "sprites.gba" | "irq-sprites.gba") =>
+                {
                     match (
                         self.session.inspect16(0x03000008),
                         self.session.inspect16(0x0300000a),

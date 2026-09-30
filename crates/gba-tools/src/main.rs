@@ -66,9 +66,20 @@ enum Verification {
     Counter(Counter),
     Tiled(Tiled),
     Sprites(Sprites),
+    Vblank(Vblank),
     Stripes(Stripes),
     Timing(Timing),
     Diagnostic(Diagnostic),
+}
+
+/// IRQ guest identity and bounded completion; configuration variants only change
+/// the declared source/master/CPU mask word in the verified original ROM.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Vblank {
+    configuration_offset: usize,
+    frames: u16,
+    firmware_sha256: String,
 }
 
 /// Scripted guest offsets and independently computed complete tile-scene captures.
@@ -95,6 +106,9 @@ struct TiledCheckpoint {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Sprites {
+    /// Present only for the IRQ scene; the polling fixture leaves firmware unmapped.
+    #[serde(default)]
+    firmware_sha256: Option<String>,
     ready_pc: u32,
     input_events: Vec<InputEvent>,
     checkpoints: Vec<SpriteCheckpoint>,
@@ -289,7 +303,10 @@ fn manifest(path: &Path) -> Result<Manifest> {
     for fixture in &manifest.fixture {
         if fixture.startup != "cartridge-direct-arm"
             || (fixture.bios_required
-                != matches!(fixture.verification, Verification::Diagnostic(_)))
+                != (matches!(
+                    fixture.verification,
+                    Verification::Diagnostic(_) | Verification::Vblank(_)
+                ) || matches!(&fixture.verification, Verification::Sprites(expected) if expected.firmware_sha256.is_some())))
             || fixture.max_instructions == 0
             || fixture.max_cycles == 0
             || fixture.origin.is_empty()
@@ -300,7 +317,24 @@ fn manifest(path: &Path) -> Result<Manifest> {
             )));
         }
         match &fixture.verification {
+            Verification::Vblank(expected) => {
+                if expected.frames < 2
+                    || u64::from(expected.frames) * CYCLES_PER_FRAME > fixture.max_cycles
+                    || expected.configuration_offset != 0x300
+                    || expected.firmware_sha256.len() != 64
+                {
+                    return Err(fail("invalid VBlank fixture bounds or identity"));
+                }
+            }
+
             Verification::Sprites(expected) => {
+                if expected
+                    .firmware_sha256
+                    .as_ref()
+                    .is_some_and(|hash| hash.len() != 64)
+                {
+                    return Err(fail("invalid IRQ scene firmware identity"));
+                }
                 if expected.ready_pc & 3 != 0
                     || expected.checkpoints.is_empty()
                     || expected
@@ -541,11 +575,7 @@ fn build_fixtures(path: &Path) -> Result<()> {
     let directory = path.parent().unwrap();
     let build = std::env::temp_dir().join(format!("gba-fixtures-{}", std::process::id()));
     fs::create_dir_all(&build)?;
-    if manifest
-        .fixture
-        .iter()
-        .any(|fixture| matches!(fixture.verification, Verification::Diagnostic(_)))
-    {
+    if manifest.fixture.iter().any(|fixture| fixture.bios_required) {
         let object = build.join("division.o");
         let elf = build.join("division.elf");
         let binary = build.join("division.bin");
@@ -578,15 +608,20 @@ fn build_fixtures(path: &Path) -> Result<()> {
             ],
         )?;
         let bytes = fs::read(binary)?;
+        let identity = hash(&bytes);
         for fixture in &manifest.fixture {
-            if let Verification::Diagnostic(expected) = &fixture.verification
-                && hash(&bytes) != expected.firmware_sha256
-            {
+            let expected = match &fixture.verification {
+                Verification::Diagnostic(expected) => Some(&expected.firmware_sha256),
+                Verification::Vblank(expected) => Some(&expected.firmware_sha256),
+                Verification::Sprites(expected) => expected.firmware_sha256.as_ref(),
+                _ => None,
+            };
+            if expected.is_some_and(|expected| *expected != identity) {
                 return Err(fail("rebuilt test firmware differs from frozen SHA-256"));
             }
         }
         fs::write(root().join("roms/test-firmware/division.bin"), bytes)?;
-        println!("BUILT original test firmware (SWI 0x06 only)");
+        println!("BUILT original test firmware (SWI 0x06 and IRQ vector)");
     }
     for fixture in &manifest.fixture {
         if matches!(
@@ -613,6 +648,8 @@ fn build_fixtures(path: &Path) -> Result<()> {
             "arm-none-eabi-as",
             &[
                 "-mcpu=arm7tdmi".as_ref(),
+                "-I".as_ref(),
+                root().as_os_str(),
                 "-o".as_ref(),
                 object.as_os_str(),
                 source.as_os_str(),
@@ -681,7 +718,8 @@ fn pixels(fixture: &Fixture) -> Result<&Pixels> {
         | Verification::Sprites(_)
         | Verification::Stripes(_)
         | Verification::Timing(_)
-        | Verification::Diagnostic(_) => Err(fail("expected a terminal pixels fixture")),
+        | Verification::Diagnostic(_)
+        | Verification::Vblank(_) => Err(fail("expected a terminal pixels fixture")),
     }
 }
 
@@ -1048,6 +1086,110 @@ fn check_sprite_image(machine: &Machine, point: &SpriteCheckpoint) -> Result<()>
     Ok(())
 }
 
+/// Checks callback results and scanout together; disabled-source success is an
+/// explicit expected stall, never an arbitrary idle PC counted as completion.
+fn run_vblank(
+    fixture: &Fixture,
+    expected: &Vblank,
+    bytes: &[u8],
+    capture_path: Option<&str>,
+) -> Result<Machine> {
+    if hash(gba_core::TEST_FIRMWARE) != expected.firmware_sha256 {
+        return Err(fail("VBlank firmware identity mismatch"));
+    }
+    let mut machine = Machine::new();
+    machine.load_rom(bytes)?;
+    machine.enable_test_firmware();
+    for frame in 1..=expected.frames {
+        machine.advance_to(
+            Cycle(u64::from(frame) * CYCLES_PER_FRAME),
+            fixture.max_instructions,
+        )?;
+        if machine.inspect16(fixture.mailbox_address)? != fixture.completion_id
+            || machine.inspect16(fixture.mailbox_address + 2)? != frame
+            || machine.inspect16(fixture.mailbox_address + 4)? != 1
+            || machine.inspect16(fixture.mailbox_address + 6)? != 0
+            || machine.inspect16(fixture.mailbox_address + 8)? != frame
+            || !machine.halted()
+            || machine.cpsr() & 0xff != 0x5f
+            || machine.framebuffer_generation() != u64::from(frame)
+            || machine
+                .framebuffer()
+                .iter()
+                .any(|&pixel| pixel != (frame - 1) & 31)
+        {
+            return Err(fail(format!(
+                "VBlank callback/sleep/frame mismatch at frame {frame}"
+            )));
+        }
+    }
+    if machine.executed_instructions() >= fixture.max_instructions {
+        return Err(fail("VBlank instruction budget exceeded"));
+    }
+    if let Some(path) = capture_path {
+        capture(Path::new(path), machine.framebuffer())?;
+    }
+    for configuration in [6u32, 5, 3, 15] {
+        let mut variant = bytes.to_vec();
+        variant
+            .get_mut(expected.configuration_offset..expected.configuration_offset + 4)
+            .ok_or_else(|| fail("VBlank configuration outside ROM"))?
+            .copy_from_slice(&configuration.to_le_bytes());
+        let mut probe = Machine::new();
+        probe.load_rom(&variant)?;
+        probe.enable_test_firmware();
+        probe.advance_to(
+            Cycle(u64::from(expected.frames) * CYCLES_PER_FRAME),
+            fixture.max_instructions,
+        )?;
+        let wakes = if configuration == 6 {
+            0
+        } else {
+            expected.frames
+        };
+        if !probe.halted()
+            || probe.inspect16(fixture.mailbox_address + 2)?
+                != if configuration == 15 {
+                    expected.frames
+                } else {
+                    0
+                }
+            || probe.inspect16(fixture.mailbox_address + 8)? != wakes
+        {
+            return Err(fail("VBlank source/mask/Thumb check failed"));
+        }
+        if configuration == 15 && (!probe.is_thumb() || probe.cpsr() & 0xff != 0x7f) {
+            return Err(fail("VBlank IRQ return did not restore Thumb state"));
+        }
+        println!(
+            "PASS vblank configuration={configuration} wakes={wakes} {}",
+            if configuration == 6 {
+                "expected-stall"
+            } else if configuration == 15 {
+                "Thumb-exception-return"
+            } else {
+                "masked-delivery"
+            }
+        );
+    }
+    let mut unmapped = Machine::new();
+    unmapped.load_rom(bytes)?;
+    if unmapped
+        .advance_to(Cycle(CYCLES_PER_FRAME), fixture.max_instructions)
+        .is_ok()
+        || unmapped.inspect16(fixture.mailbox_address + 2)? != 0
+    {
+        return Err(fail("VBlank callback ran without a mapped exception entry"));
+    }
+    println!(
+        "PASS vblank frames={} cycles={} instructions={} mapped-vector-required",
+        expected.frames,
+        machine.cycles().0,
+        machine.executed_instructions()
+    );
+    Ok(machine)
+}
+
 /// One bounded replay checks guest RAM, OAM, scroll registers and full scanout.
 fn run_sprites(
     fixture: &Fixture,
@@ -1057,6 +1199,13 @@ fn run_sprites(
 ) -> Result<Machine> {
     let mut machine = Machine::new();
     machine.load_rom(bytes)?;
+    if let Some(expected) = &expected.firmware_sha256 {
+        if hash(gba_core::TEST_FIRMWARE) != *expected {
+            return Err(fail("IRQ sprite firmware identity mismatch"));
+        }
+        machine.enable_test_firmware();
+    }
+
     for event in &expected.input_events {
         machine.set_button_at(Cycle(event.cycle), button(&event.button)?, event.pressed)?;
     }
@@ -1105,6 +1254,16 @@ fn run_sprites(
             || machine.framebuffer_generation() != u64::from(b.frame)
         {
             return Err(fail("sprite OAM/register/frame state mismatch"));
+        }
+        if expected.firmware_sha256.is_some()
+            && (!machine.halted()
+                || machine.inspect16(fixture.mailbox_address + 16)? != b.updates
+                || machine.inspect16(fixture.mailbox_address + 20)? != 1
+                || machine.inspect16(fixture.mailbox_address + 22)? != 0)
+        {
+            return Err(fail(
+                "IRQ sprite scene did not acknowledge and sleep between updates",
+            ));
         }
         check_sprite_image(&machine, point)?;
         if let Some(path) = capture_path {
@@ -1555,12 +1714,19 @@ fn run() -> Result<()> {
         && !(args[0] == "fixtures" && args.get(1).map(String::as_str) == Some("run"))
     {
         return Err(fail(
-            "usage: build-fixtures | fixtures run --manifest PATH [--fixture NAME] [--capture PATH] | bench --scenario pixels|tiled|sprites --frames N",
+            "usage: build-fixtures | fixtures run --manifest PATH [--fixture NAME] [--capture PATH] | bench --scenario pixels|tiled|sprites|vblank|irq-sprites --frames N",
         ));
     }
     let scenario = option(&args, "--scenario")?.unwrap_or_else(|| "pixels".to_owned());
-    if bench && !matches!(scenario.as_str(), "pixels" | "tiled" | "sprites") {
-        return Err(fail("benchmark scenario must be pixels, tiled or sprites"));
+    if bench
+        && !matches!(
+            scenario.as_str(),
+            "pixels" | "tiled" | "sprites" | "vblank" | "irq-sprites"
+        )
+    {
+        return Err(fail(
+            "benchmark scenario must be pixels, tiled, sprites, vblank or irq-sprites",
+        ));
     }
     let manifest = manifest(&path)?;
     let selected = option(&args, "--fixture")?;
@@ -1581,6 +1747,32 @@ fn run() -> Result<()> {
             continue;
         }
         let bytes = load(fixture, path.parent().unwrap())?;
+        if let Verification::Vblank(expected) = &fixture.verification {
+            let mut machine = run_vblank(
+                fixture,
+                expected,
+                &bytes,
+                option(&args, "--capture")?.as_deref(),
+            )?;
+            if bench {
+                let frames: usize = option(&args, "--frames")?
+                    .unwrap_or_else(|| "600".to_owned())
+                    .parse()?;
+                let before = machine.inspect16(fixture.mailbox_address + 2)?;
+                benchmark_frames(fixture, &mut machine, frames)?;
+                let count = before.wrapping_add(frames as u16);
+                if machine.inspect16(fixture.mailbox_address + 2)? != count
+                    || !machine.halted()
+                    || machine
+                        .framebuffer()
+                        .iter()
+                        .any(|&pixel| pixel != count.wrapping_sub(1) & 31)
+                {
+                    return Err(fail("VBlank benchmark output mismatch"));
+                }
+            }
+            continue;
+        }
         if let Verification::Sprites(expected) = &fixture.verification {
             let mut machine = run_sprites(
                 fixture,

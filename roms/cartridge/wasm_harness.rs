@@ -81,3 +81,32 @@ pub extern "C" fn advance(target: u64, instructions: u32, cycles: u64) {
 pub extern "C" fn pixel(index: u32) -> u32 {
     MACHINE.with_borrow(|machine| u32::from(machine.framebuffer()[index as usize]))
 }
+
+/// Reloads a declared guest configuration variant for interrupt gating checks.
+/// Patching affects guest ROM data only; interrupt delivery still uses the core.
+#[unsafe(no_mangle)]
+pub extern "C" fn initialize_variant(offset: u32, configuration: u32, firmware: u32) {
+    let mut bytes = include_bytes!(env!("GBA_VERIFICATION_ROM")).to_vec();
+    bytes[offset as usize..offset as usize + 4].copy_from_slice(&configuration.to_le_bytes());
+    MACHINE.with_borrow_mut(|machine| {
+        machine.load_rom(&bytes).unwrap();
+        if firmware != 0 {
+            machine.enable_test_firmware();
+        }
+    });
+}
+
+/// Observes CPU sleep without changing pending flags or dispatching a callback.
+#[unsafe(no_mangle)]
+pub extern "C" fn halted() -> u32 {
+    MACHINE.with_borrow(|machine| u32::from(machine.halted()))
+}
+
+/// Keeps a deliberately unmapped-vector probe recoverable so its mailbox can
+/// be checked after rejection; normal contract failures still trap in advance.
+#[unsafe(no_mangle)]
+pub extern "C" fn rejects_advance(target: u64, instructions: u32) -> u32 {
+    MACHINE.with_borrow_mut(|machine| {
+        u32::from(machine.advance_to(Cycle(target), instructions as usize).is_err())
+    })
+}

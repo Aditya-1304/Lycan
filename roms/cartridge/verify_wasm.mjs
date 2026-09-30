@@ -11,6 +11,34 @@ assert.deepEqual(WebAssembly.Module.imports(module), [], "unexpected host depend
 const { exports: core } = await WebAssembly.instantiate(module, {});
 const verification = fixture.verification;
 const marker = (pc) => core.marker(pc, fixture.max_instructions, BigInt(fixture.max_cycles));
+if (verification.kind === "vblank") {
+    const mailbox = fixture.mailbox_address;
+    for (const configuration of [7, 15, 6, 5, 3]) {
+        core.initialize_variant(verification.configuration_offset, configuration, 1);
+        for (let frame = 1; frame <= verification.frames; frame++) {
+            core.advance(BigInt(frame) * 280896n, fixture.max_instructions, BigInt(fixture.max_cycles));
+            const callbacks = configuration === 7 || configuration === 15 ? frame : 0;
+            assert.equal(core.inspect16(mailbox), fixture.completion_id);
+            assert.equal(core.inspect16(mailbox + 2), callbacks);
+            assert.equal(core.inspect16(mailbox + 8), configuration === 6 ? 0 : frame);
+            assert.equal(core.halted(), 1);
+            if (callbacks) {
+                assert.equal(core.inspect16(mailbox + 4), 1);
+                assert.equal(core.inspect16(mailbox + 6), 0);
+                assert.equal(core.cpsr() & 0xff, configuration === 15 ? 0x7f : 0x5f);
+            }
+            for (let index = 0; index < 240 * 160; index++) {
+                assert.equal(core.pixel(index), callbacks ? (frame - 1) & 31 : 0);
+            }
+        }
+        console.log(`PASS WASM vblank configuration=${configuration} frames=${verification.frames} instructions=${core.instructions()} ${configuration === 6 ? "expected-stall" : "wake/dispatch"}`);
+    }
+    core.initialize(0);
+    assert.equal(core.rejects_advance(280896n, fixture.max_instructions), 1);
+    assert.equal(core.inspect16(mailbox + 2), 0);
+    console.log("PASS WASM vblank unmapped vector rejected before callback");
+    process.exit(0);
+}
 if (verification.kind === "diagnostic") {
     core.initialize(1);
     const total = marker(verification.terminal_pc);

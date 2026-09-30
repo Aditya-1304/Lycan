@@ -3,7 +3,7 @@
 .arm
 .section .text.entry,"ax",%progbits
 .global _start
-/* Original test-only firmware. Only SWI 0x06 is supported; every other
+/* Original test-only firmware. SWI 0x06 and IRQ dispatch are supported; every other
  * vector/service traps instead of pretending to provide a retail BIOS. */
 _start:
     b trap
@@ -12,7 +12,7 @@ _start:
     b trap
     b trap
     b trap
-    b trap
+    b irq
     b trap
 trap:
     b trap
@@ -52,5 +52,17 @@ bit:
     rsblt r1, r1, #0
     ldmia sp!, {r4-r6}
     movs pc, lr
+/* IRQ dispatch preserves volatile registers and calls the cartridge callback
+ * through the standard IWRAM pointer. SPSR_irq restores ARM/Thumb and CPU masks. */
+irq:
+    stmdb sp!, {r0-r3, r12, lr}
+    ldr r0, =0x03007ffc
+    ldr r0, [r0]
+    adr lr, irq_return
+    bx r0
+irq_return:
+    ldmia sp!, {r0-r3, r12, lr}
+    subs pc, lr, #4
+    .ltorg
 /* The CPU fetches ahead of the final return; map the complete BIOS window. */
 .org 0x4000

@@ -296,3 +296,70 @@ No fresh sustained app-speed or GPU/presentation measurement was made. No new
 unthrottled-speed value was recorded; the historical 15.33× figure remains
 unchanged. The complete-frame core p95 results meet the 12 ms core-only target
 under these local conditions; total application-frame cost remains unmeasured.
+
+## Slice 10: VBlank IRQ / HALT
+
+The default app now loads `irq-sprites.gba`: the existing scrolling background,
+player, priority and object-layout scene waits in HALT instead of polling display
+status. The original polling `sprites.gba` remains available. Both variants match
+the same five scripted full-frame checkpoints. A separate `vblank.gba` guest
+checks interrupt dispatch, acknowledgement, masked wake and disabled-source stall.
+Detailed plan acceptance and manual commands: [VBlank interrupt record](vblank_interrupt.md).
+
+### Application measurements
+
+Each platform row is reserved for the IRQ sprite scene. Previous user-entered
+millisecond measurements are preserved above; no app timing was inferred from
+headless measurements.
+
+| Platform | Core mean / p95 (ms) | Conversion mean / p95 (ms) | Texture submission mean / p95 (ms) | Samples | Visual acceptance |
+| --- | --- | --- | --- | --- | --- |
+| Native Linux | 0.942 / 1.223 | 0.123 / 0.157 | 0.024 / 0.036 | 120 / 120 / 120 | Not verified; manual check pending |
+| Google Chrome | 1.442 / 1.800 | 0.241 / 0.300 | 0.037 / 0.100 | 120 / 120 / 120 | Pending user check |
+| Brave | 1.478 / 2.000 | 0.242 / 0.300 | 0.032 / 0.100 | 120 / 120 / 120 | Pending user check |
+
+### Automated execution and headless measurements
+
+Baseline: `a41eec4cd267dd21f7484610e4721121e8e9ef79` plus Slice 10 changes.
+CPU rechecked: Intel Core i7-13620H, 10 cores / 16 threads; rustc 1.98.1;
+release opt-level 3 / thin LTO; platform power profile balanced. OS, AC state,
+thermal state and other host load were not independently refreshed for this run.
+Benchmarks ran sequentially after validation builds completed.
+
+| Scenario | Complete emulated frame samples | Core mean (ms) | Core p95 (ms) | Core p95 <12 ms |
+| --- | --- | --- | --- | --- |
+| IRQ sprite scene, after 20-frame replay with keys released | 600 | 0.229 | 0.235 | Yes |
+| VBlank backdrop diagnostic, after eight-frame verification | 600 | 0.143 | 0.146 | Yes |
+
+Samples are absolute advances of 280,896 cycles. Loading, initialization and
+scripted replay precede the measured window. Conversion, texture submission,
+GPU and host pacing are excluded. The runner rechecks scene output after the
+benchmark. Raw logs: `/tmp/gba-vblank-results/bench-irq-sprites.txt` and
+`/tmp/gba-vblank-results/bench-vblank.txt` (temporary provenance).
+
+| Guest evidence | Result |
+| --- | --- |
+| IRQ sprite initialization | 425,957 cycles |
+| IRQ sprite replay | 5,617,920 cycles; 59,833 instructions; five 38,400-pixel comparisons passed |
+| Original polling sprite replay, same input/checkpoints | 5,617,935 cycles; 491,556 instructions; five image comparisons passed |
+| IRQ scene callback / sleep | IRQ count equals scene update count at each checkpoint; IF before acknowledgement = 1, after = 0; CPU halted |
+| VBlank diagnostic | Eight frames; 2,247,168 cycles; 274 instructions; eight callbacks and wakes; completed image reflects preceding callback |
+| Disabled VBlank source | Expected stall: eight frames elapsed, zero callbacks and wakes; CPU remains halted; WASM diagnostic executes 34 setup instructions |
+| IME disabled / CPSR.I set | Eight wakes, zero callbacks; ordinary guest acknowledgement permits returning to HALT |
+| Thumb interrupted / returned | Eight callbacks and wakes; Thumb state restored |
+| Firmware not mapped | Exception fetch at 0x18 rejected before the guest callback |
+| Fixture build | Original ROMs rebuilt or upstream identities verified; new ROM and firmware SHA-256 checked against manifest |
+| Regression checks | All 17 manifest fixtures passed; workspace tests passed (8 core, 7 session); Clippy with warnings denied passed |
+| WASM execution | 24 WAITCNT cases, ARM/Thumb/services/memory diagnostics, all VBlank diagnostic variants and unmapped-vector rejection passed in Node |
+| Application builds | Native workspace test compilation, WASM app check and Trunk release build passed |
+| Formatting | cargo fmt check and git diff whitespace check passed |
+
+Firmware SHA-256: `044a1305b3e47fcd568e77fcd792f251cd2cb85b359949931654ebb399a37498`. Fixture identities, cycle/instruction budgets,
+mailbox and source paths are frozen in `fixtures/manifest.toml`. The firmware
+remains test-only and is mapped explicitly for recognized original fixtures.
+
+The headless p95 meets the core-only target. Total app-frame time, sustained
+Linux/Chrome/Brave cycles per wall second, allocation counts and 30-minute
+resource stability are not measured. Browser visual/runtime acceptance remains
+pending for the user; a WASM core run or build does not establish it. Audio is
+outside Slice 10. Slice 10A keypad interrupts and Slice 11 DMA were not implemented.
