@@ -6,8 +6,11 @@ use gba_session::{
 use std::time::Duration;
 use web_time::Instant;
 
-#[cfg(target_arch = "wasm32")]
-type PendingRom = Option<(String, Result<Vec<u8>, String>)>;
+/// Completion of a picker or dropped-file request. None means dialog cancellation.
+struct RomRead {
+    generation: u64,
+    result: Option<(String, Result<Vec<u8>, String>)>,
+}
 
 const WIDTH: usize = SCREEN_WIDTH;
 const HEIGHT: usize = SCREEN_HEIGHT;
@@ -115,15 +118,18 @@ pub struct GbaApp {
     capture_path: Option<std::path::PathBuf>,
     #[cfg(not(target_arch = "wasm32"))]
     capture_requested: bool,
-    #[cfg(target_arch = "wasm32")]
-    pending_rom: std::rc::Rc<std::cell::RefCell<PendingRom>>,
-    #[cfg(target_arch = "wasm32")]
-    load_generation: std::rc::Rc<std::cell::Cell<u64>>,
+    // File work completes off the UI loop. Generations prevent stale reads from
+    // replacing a newer dropped file or built-in scene on either platform.
+    rom_sender: std::sync::mpsc::Sender<RomRead>,
+    rom_receiver: std::sync::mpsc::Receiver<RomRead>,
+    load_generation: u64,
+    picker_open: bool,
 }
 
 impl GbaApp {
     /// Creates a session and loads the assembled guest artifact without executing in startup.
     pub fn new(_cc: &eframe::CreationContext<'_>) -> Self {
+        let (rom_sender, rom_receiver) = std::sync::mpsc::channel();
         let mut app = Self {
             session: Session::new(),
             audio: Audio::default(),
@@ -145,17 +151,61 @@ impl GbaApp {
             capture_path: std::env::var_os("GBA_CAPTURE_PATH").map(Into::into),
             #[cfg(not(target_arch = "wasm32"))]
             capture_requested: false,
-            #[cfg(target_arch = "wasm32")]
-            pending_rom: Default::default(),
-            #[cfg(target_arch = "wasm32")]
-            load_generation: Default::default(),
+            rom_sender,
+            rom_receiver,
+            load_generation: 0,
+            picker_open: false,
         };
         app.load_rom_bytes("pcm.gba", PCM_ROM);
         app
     }
 
-    /// Accepts bytes from the built-in ROM or a native/browser dropped file.
+    /// Starts one asynchronous picker from the user's click. Native dialog/read
+    /// work runs on a worker; browser work stays on its local executor.
+    fn pick_rom(&mut self, ctx: &egui::Context) {
+        self.load_generation = self.load_generation.wrapping_add(1);
+        let generation = self.load_generation;
+        self.picker_open = true;
+        let sender = self.rom_sender.clone();
+        let ctx = ctx.clone();
+        let dialog = rfd::AsyncFileDialog::new()
+            .set_title("Load GBA ROM")
+            .add_filter("GBA ROM", &["gba"]);
+        // Construct the future during the click so browsers retain user activation.
+        let selection = dialog.pick_file();
+        let task = async move {
+            let result = if let Some(file) = selection.await {
+                let name = file.file_name();
+                #[cfg(not(target_arch = "wasm32"))]
+                let bytes = std::fs::read(file.path()).map_err(|error| error.to_string());
+                #[cfg(target_arch = "wasm32")]
+                let bytes = wasm_bindgen_futures::JsFuture::from(file.inner().array_buffer())
+                    .await
+                    .map(|buffer| js_sys::Uint8Array::new(&buffer).to_vec())
+                    .map_err(|error| format!("{error:?}"));
+                Some((name, bytes))
+            } else {
+                None
+            };
+            let _ = sender.send(RomRead { generation, result });
+            ctx.request_repaint();
+        };
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Err(error) = std::thread::Builder::new()
+            .name("rom-picker".into())
+            .spawn(move || pollster::block_on(task))
+        {
+            self.picker_open = false;
+            self.status = format!("ROM picker failed: {error}");
+        }
+        #[cfg(target_arch = "wasm32")]
+        wasm_bindgen_futures::spawn_local(task);
+    }
+
+    /// Accepts bytes from built-in scenes, picked files and dropped files.
     fn load_rom_bytes(&mut self, name: &str, bytes: &[u8]) {
+        self.load_generation = self.load_generation.wrapping_add(1);
+        self.picker_open = false;
         // The pinned stripes file ends at its idle branch. Two unexecuted words
         // allow this loader's ARM pipeline look-ahead without changing the asset.
         let mut mapped;
@@ -271,6 +321,9 @@ impl GbaApp {
 
         ui.heading("gba-rs");
         ui.horizontal_wrapped(|ui| {
+            if ui.add_enabled(!self.picker_open, egui::Button::new("Load ROM")).clicked() {
+                self.pick_rom(ui.ctx());
+            }
             let pause_label = if self.session.paused() {
                 "Resume"
             } else {
@@ -525,7 +578,7 @@ impl GbaApp {
         {
             ui.label(format!("Keypad callbacks: {callbacks} | wakes: {wakes} | IF before: {before:#06x} | after: {after:#06x}"));
         }
-        ui.label("Drop a .gba ROM here to load it.");
+        ui.label("Click Load ROM or drop a .gba file here.");
         ui.label("Demo: arrow keys move the square once per GBA frame.");
         if self.session.slowed() {
             ui.label("Slow emulation: host delay exceeded the work budget.");
@@ -612,26 +665,25 @@ impl eframe::App for GbaApp {
             }
             #[cfg(target_arch = "wasm32")]
             {
-                let generation = self.load_generation.get().wrapping_add(1);
-                self.load_generation.set(generation);
-                self.pending_rom.borrow_mut().take();
-                let current = self.load_generation.clone();
-                let pending = self.pending_rom.clone();
+                self.load_generation = self.load_generation.wrapping_add(1);
+                self.picker_open = false;
+                let generation = self.load_generation;
+                let sender = self.rom_sender.clone();
                 let ctx = ctx.clone();
                 self.status = format!("Reading {name}");
                 wasm_bindgen_futures::spawn_local(async move {
-                    let result = file.bytes_async().await;
-                    if current.get() == generation {
-                        *pending.borrow_mut() = Some((name, result));
-                        ctx.request_repaint();
-                    }
+                    let result = Some((name, file.bytes_async().await));
+                    let _ = sender.send(RomRead { generation, result });
+                    ctx.request_repaint();
                 });
             }
         }
-        #[cfg(target_arch = "wasm32")]
-        {
-            let completed = self.pending_rom.borrow_mut().take();
-            if let Some((name, result)) = completed {
+        while let Ok(completion) = self.rom_receiver.try_recv() {
+            if completion.generation != self.load_generation {
+                continue;
+            }
+            self.picker_open = false;
+            if let Some((name, result)) = completion.result {
                 match result {
                     Ok(bytes) => self.load_rom_bytes(&name, &bytes),
                     Err(error) => self.status = format!("ROM read failed: {error}"),
