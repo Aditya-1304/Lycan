@@ -928,3 +928,111 @@ env -u NO_COLOR trunk --config web/Trunk.toml serve --release
 
 All five implementation requirements and automated contracts pass. Full Slice 12A
 acceptance remains open for the manual Linux and browser listening/runtime checks.
+
+## Slice 12B — cartridge backup identification (2026-09-30)
+
+One core detector now selects cartridge configuration at ROM load, before guest
+execution or persistence. Both Session and the native/WASM app use this path.
+Detection scans word-aligned SDK library identifiers with three numeric version
+characters (or the documented `nnn` placeholder). It recognizes `SRAM_V`,
+`SRAM_F_V`, `EEPROM_V`, `FLASH_V`, `FLASH512_V` and `FLASH1M_V`.
+EEPROM capacity remains unresolved until its serial protocol is implemented.
+Unknown means unidentified hardware, not a claim that the cartridge has no save.
+Different families produce `Ambiguous` with stable ordering and no guessed winner;
+aliases of one family agree. Game titles never participate in selection.
+
+The typed override accepts only None/Sram/Eeprom/Flash64/Flash128. A strict text
+parser rejects invalid names. ROM evidence stays visible alongside the effective
+selection. Overrides survive reset, while ordinary loading selects afresh. Failed
+ROM validation retains the previous cartridge and selection. The app's **Backup
+override for next ROM load** control applies when loading/reloading a cartridge,
+not immediately when the menu changes. Hardware protocols and persistence are
+outside this slice; slices 13–16 can consume `Machine::backup_selection()`.
+
+### Frozen load-time fixtures
+
+Original generated cartridges, reproducible with `roms/backup/build.py`, live in
+`roms/backup/`. Their individual SHA-256 identities are frozen in
+`roms/backup/manifest.json` and checked by the WASM verifier. Startup is direct
+ARM with an entry self-branch; this is a loading contract, so no terminal mailbox,
+CPU execution, framebuffer output or persistence is used as acceptance evidence.
+Selection occurs with zero executed instructions and zero guest cycles.
+
+| Cartridge | Automatic result |
+| --- | --- |
+| sram.gba / sram-fast.gba | Sram |
+| eeprom.gba / override.gba | Eeprom |
+| flash64.gba / flash64-old.gba / same-family.gba | Flash64 |
+| flash128.gba | Flash128 |
+| unknown.gba / malformed.gba | Unknown; no selected hardware |
+| conflicting.gba | Ambiguous [Sram, Flash128]; no selected hardware |
+
+The shared native/WASM contract checks automatic results, forces Flash64 for the
+unknown, conflicting and EEPROM override cartridges, retains selection through
+reset and rejected empty loads, clears overrides on a subsequent automatic load,
+and rejects invalid text overrides. One focused regression was added: RED failed
+on the SRAM fixture (`None` instead of `Some(Sram)`), then GREEN passed after
+implementing detection. This catches missing/wrong selection at load, not an
+internal protocol call sequence.
+
+### Automated evidence and plan audit
+
+Linux CLI validation on the current checkout:
+
+- Workspace tests: 22 passed (12 core, one backup regression, nine session).
+- Strict workspace Clippy, all targets: passed.
+- Existing complete release fixture suite, including synchronized PCM/mixer: passed.
+- Backup fixture rebuild: all 11 frozen hashes matched.
+- Production core WASM execution: shared backup contract passed in Node.
+- Native app compilation through workspace checks: passed.
+- WASM app check and Trunk release build: passed.
+- Formatting and diff whitespace checks: passed.
+
+All six plan items are implemented: centralized load selection; four hardware
+families and aliases; separation from protocols; validated overrides; recognized,
+unknown, conflicting and forced fixtures with diagnostics; no title patches.
+Native/WASM deterministic load behavior is verified by executable contracts.
+Native and Chrome/Brave UI checks remain **not verified**. ROM-load wall-clock
+milliseconds, sample counts and browser timings are **not measured**; no existing
+user timing entries were changed. Full manual acceptance remains pending.
+
+Reproduce automated evidence:
+
+```bash
+cd /home/aditya/Projects/GBA/gba-rs
+python3 roms/backup/build.py
+cargo test --locked --workspace
+cargo clippy --locked --workspace --all-targets -- -D warnings
+cargo run --locked -p gba-tools --release -- fixtures run
+python3 roms/backup/verify.py
+cargo check --locked -p gba-app --target wasm32-unknown-unknown
+env -u NO_COLOR trunk --config web/Trunk.toml build --release
+```
+
+### Manual native / Chrome / Brave checks
+
+Native command (UI check pending):
+
+```bash
+cd /home/aditya/Projects/GBA/gba-rs
+cargo run --locked -p gba-app --release
+```
+
+Browser command; open the printed URL in Chrome and then Brave:
+
+```bash
+cd /home/aditya/Projects/GBA/gba-rs
+env -u NO_COLOR trunk --config web/Trunk.toml serve --release
+```
+
+1. Set the override to **Auto detect**. Load each `roms/backup/*.gba` using the
+   existing file picker/drop route. Compare the Backup diagnostic to the table;
+   these cartridges intentionally display no scene.
+2. For unknown and conflicting cartridges, confirm the explicit unresolved
+   message. Select **Flash64** and reload the same file: selected hardware must be
+   Flash64 while the original Unknown/Ambiguous evidence remains visible.
+3. Force **Flash64**, load `override.gba`, and confirm Eeprom detection plus a
+   Flash64 override. Reset: the selection and evidence must remain unchanged.
+4. Select **Auto detect**, reload `override.gba`, and confirm Eeprom with no
+   override. Force **None** and reload to confirm explicit no-save hardware.
+5. Record native/Chrome/Brave results and any manually measured load timings.

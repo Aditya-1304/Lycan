@@ -96,6 +96,8 @@ pub struct GbaApp {
     session: Session,
     audio: Audio,
     rom_name: String,
+    // Typed choices prevent invalid overrides; each choice applies to the next load.
+    backup_override: Option<gba_session::BackupType>,
     loaded: bool,
     host_origin: Instant,
     replay_deadline: Option<Cycle>,
@@ -126,6 +128,7 @@ impl GbaApp {
             session: Session::new(),
             audio: Audio::default(),
             rom_name: String::new(),
+            backup_override: None,
             loaded: false,
             host_origin: Instant::now(),
             replay_deadline: None,
@@ -163,7 +166,10 @@ impl GbaApp {
         } else {
             bytes
         };
-        match self.session.load_rom(bytes_to_load) {
+        match self
+            .session
+            .load_rom_with_backup(bytes_to_load, self.backup_override)
+        {
             Ok(()) => {
                 if bytes == ARM_DIAGNOSTIC_ROM
                     || bytes == THUMB_DIAGNOSTIC_ROM
@@ -464,6 +470,33 @@ impl GbaApp {
         ui.label(format!("Core PCM: 32768 Hz | produced {produced} | staging drops {dropped} | empty FIFO {empty}"));
         if self.rom_name == "pcm.gba" {
             ui.label("Mixer while holding Z: Left/Right = route, Down = sound off, Backspace = half volume, Up = bias/PWM, X = FIFO reset");
+        }
+        egui::ComboBox::from_label("Backup override for next ROM load")
+            .selected_text(
+                self.backup_override
+                    .map_or_else(|| "Auto detect".to_owned(), |kind| format!("{kind:?}")),
+            )
+            .show_ui(ui, |ui| {
+                ui.selectable_value(&mut self.backup_override, None, "Auto detect");
+                for kind in [
+                    gba_session::BackupType::None,
+                    gba_session::BackupType::Sram,
+                    gba_session::BackupType::Eeprom,
+                    gba_session::BackupType::Flash64,
+                    gba_session::BackupType::Flash128,
+                ] {
+                    ui.selectable_value(&mut self.backup_override, Some(kind), format!("{kind:?}"));
+                }
+            });
+        let backup = self.session.backup_selection();
+        ui.label(format!(
+            "Backup: {:?} | detected: {:?} | override: {:?}",
+            backup.selected(),
+            backup.detection,
+            backup.manual_override
+        ));
+        if backup.selected().is_none() {
+            ui.label("Backup unresolved: choose an override and reload the cartridge if save hardware is needed.");
         }
         ui.label(&self.status);
         if self.rom_name == "calculations.gba" {
