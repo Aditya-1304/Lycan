@@ -24,6 +24,13 @@ const PALETTE_ROM: &[u8] = include_bytes!(concat!(
     "/../../roms/palette.gba"
 ));
 
+/// Guest calculations use the shared session and timed display route on both
+/// platforms; the application only observes the guest's completion mailbox.
+const CALCULATIONS_ROM: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../roms/calculations.gba"
+));
+
 /// The replay uses the same ordered cycle transitions verified by gba-tools.
 const DEMO_INPUT: &[(Cycle, Button, bool)] = &include!(concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -208,6 +215,11 @@ impl GbaApp {
                 self.reset_demo();
                 ui.ctx().request_repaint();
             }
+            if ui.button("Load CPU diagnostic").clicked() {
+                self.load_rom_bytes("calculations.gba", CALCULATIONS_ROM);
+                self.status = "CPU diagnostic: bands 1–16 run from top to bottom; green passes, red fails".to_owned();
+                ui.ctx().request_repaint();
+            }
             if ui.button("Load palette demo").clicked() {
                 self.load_rom_bytes("palette.gba", PALETTE_ROM);
                 self.status = "Palette demo: hold Z (A) for page 1; hold X (B) to change its white stripes to red".to_owned();
@@ -240,6 +252,22 @@ impl GbaApp {
         });
 
         ui.label(&self.status);
+        if self.rom_name == "calculations.gba" {
+            match (
+                self.session.inspect16(0x03000000),
+                self.session.inspect16(0x03000002),
+                self.session.inspect16(0x03000004),
+            ) {
+                (Ok(0x005d), Ok(result), Ok(first_failure)) => {
+                    ui.label(format!(
+                        "CPU diagnostic complete: mailbox 0x005d | result {result} | first failing case {first_failure}"
+                    ));
+                }
+                _ => {
+                    ui.label("CPU diagnostic running");
+                }
+            }
+        }
         ui.label("Drop a .gba ROM here to load it.");
         ui.label("Demo: arrow keys move the square once per GBA frame.");
         if self.session.slowed() {
