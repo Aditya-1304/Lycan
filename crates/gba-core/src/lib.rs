@@ -1641,7 +1641,7 @@ impl System {
             self.buttons.set(event.button, event.pressed);
         }
         self.display
-            .synchronize_to(target, &self.vram, &self.palette);
+            .synchronize_to(target, &self.vram, &self.palette, &self.io);
         self.cycles = target;
         self.refresh_status();
     }
@@ -1710,6 +1710,69 @@ impl Default for System {
     }
 }
 
+/// Register snapshot for one text-background scanline. This is rebuilt at each
+/// drawing boundary so guest writes need no tile or register cache invalidation.
+struct TextBackground {
+    control: u16,
+    scroll_x: usize,
+    scroll_y: usize,
+    width: usize,
+    height: usize,
+}
+
+impl TextBackground {
+    fn from_registers(io: &[u8], background: usize) -> Self {
+        let halfword = |offset| u16::from_le_bytes([io[offset], io[offset + 1]]);
+        let control = halfword(8 + background * 2);
+        Self {
+            control,
+            scroll_x: usize::from(halfword(0x10 + background * 4) & 0x1ff),
+            scroll_y: usize::from(halfword(0x12 + background * 4) & 0x1ff),
+            width: if control & (1 << 14) != 0 { 512 } else { 256 },
+            height: if control & (1 << 15) != 0 { 512 } else { 256 },
+        }
+    }
+
+    /// Resolves a texel through screen blocks, tile flips, and its palette.
+    /// Color index zero is transparent regardless of the selected palette bank.
+    fn pixel(&self, x: usize, y: usize, vram: &[u8], palette: &[u8]) -> Option<u16> {
+        let x = (x + self.scroll_x) % self.width;
+        let y = (y + self.scroll_y) % self.height;
+        let block = x / 256 + (y / 256) * (self.width / 256);
+        let map_base = usize::from((self.control >> 8) & 31) * 0x800;
+        let map_offset = (map_base + block * 0x800 + ((y / 8 % 32) * 32 + x / 8 % 32) * 2) & 0xffff;
+        let entry = u16::from_le_bytes([vram[map_offset], vram[map_offset + 1]]);
+        let tile_x = if entry & (1 << 10) != 0 {
+            7 - x % 8
+        } else {
+            x % 8
+        };
+        let tile_y = if entry & (1 << 11) != 0 {
+            7 - y % 8
+        } else {
+            y % 8
+        };
+        let character_base = usize::from((self.control >> 2) & 3) * 0x4000;
+        let tile = usize::from(entry & 0x3ff);
+        let (color, bank) = if self.control & (1 << 7) != 0 {
+            let offset = character_base + tile * 64 + tile_y * 8 + tile_x;
+            // Text tiles cannot source the OBJ character region above 64 KiB.
+            let color = *vram.get(..0x10000)?.get(offset)?;
+            (usize::from(color), 0)
+        } else {
+            let offset = character_base + tile * 32 + tile_y * 4 + tile_x / 2;
+            let packed = *vram.get(..0x10000)?.get(offset)?;
+            let color = (packed >> ((tile_x % 2) * 4)) & 15;
+            (usize::from(color), usize::from(entry >> 12) * 16)
+        };
+        if color == 0 {
+            return None;
+        }
+        let offset = (bank + color) * 2;
+        Some(u16::from_le_bytes([palette[offset], palette[offset + 1]]) & 0x7fff)
+    }
+}
+
 /// Display timing is independent of VRAM writes and frontend presentation.
 struct Display {
     control: u16,
@@ -1736,7 +1799,7 @@ impl Display {
 
     /// Renders each visible scanline at its drawing boundary and publishes at VBlank.
     /// Within-line register effects remain the documented scanline approximation.
-    fn synchronize_to(&mut self, target: u64, vram: &[u8], palette: &[u8]) {
+    fn synchronize_to(&mut self, target: u64, vram: &[u8], palette: &[u8], io: &[u8]) {
         while self.next_event <= target {
             if self.line < SCREEN_HEIGHT {
                 let mode = self.control & 7;
@@ -1763,6 +1826,27 @@ impl Display {
                     } else {
                         u16::from_le_bytes([palette[0], palette[1]]) & 0x7FFF
                     };
+                }
+                if mode == 0 && !forced_blank {
+                    // Paint back to front. Lower priority values win, with the
+                    // lower BG number winning ties. Transparent texels preserve
+                    // the lower background or the already-filled backdrop.
+                    for priority in (0..4).rev() {
+                        for background in (0..4).rev() {
+                            if self.control & (1 << (8 + background)) == 0 {
+                                continue;
+                            }
+                            let layer = TextBackground::from_registers(io, background);
+                            if layer.control & 3 != priority {
+                                continue;
+                            }
+                            for x in 0..SCREEN_WIDTH {
+                                if let Some(color) = layer.pixel(x, self.line, vram, palette) {
+                                    self.drawing[start + x] = color;
+                                }
+                            }
+                        }
+                    }
                 }
                 self.line += 1;
                 self.next_event = self.frame_start

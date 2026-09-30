@@ -310,3 +310,56 @@ cpsr_value = 0x600000df
 firmware_sha256 = "c7e0ef3c08cded916bc6057f5a2214741508db83cb089ce8993e3c7926fc7732"
 result_register = 12
 result = 0
+
+[[fixture]]
+name = "tiled"
+rom = "../roms/tiled.gba"
+source = "../roms/tiled/tiled.s"
+linker = "../roms/pixels/linker.ld"
+sha256 = "2b0627b372f31e389be512d9a5c43e15e0fc643223ed36f94b2146602841601d"
+origin = "Original MIT guest assembly in roms/tiled/tiled.s"
+startup = "cartridge-direct-arm"
+bios_required = false
+mailbox_address = 0x03000000
+completion_id = 0x0061
+max_instructions = 1500000
+max_cycles = 6000000
+[fixture.verification]
+kind = "tiled"
+ready_pc = 0x08000124
+input_events = [
+    { cycle = 2808960, button = "Right", pressed = true },
+    { cycle = 3651648, button = "Right", pressed = false },
+    { cycle = 3651648, button = "Down", pressed = true },
+    { cycle = 4213440, button = "Down", pressed = false },
+    { cycle = 4494336, button = "Left", pressed = true },
+    { cycle = 4775232, button = "Left", pressed = false },
+    { cycle = 4775232, button = "Up", pressed = true },
+    { cycle = 5056128, button = "Up", pressed = false },
+]
+# Image offsets precede the current VBlank update by one frame.
+checkpoints = [
+    { frame = 10, updates = 9, x = 510, y = 510, image_x = 510, image_y = 510 },
+    { frame = 11, updates = 10, x = 0, y = 510, image_x = 510, image_y = 510 },
+    { frame = 13, updates = 12, x = 4, y = 510, image_x = 2, image_y = 510 },
+    { frame = 15, updates = 14, x = 4, y = 2, image_x = 4, image_y = 0 },
+    { frame = 18, updates = 17, x = 2, y = 0, image_x = 2, image_y = 2 },
+    { frame = 19, updates = 18, x = 2, y = 0, image_x = 2, image_y = 0 },
+]
+
+[[fixture]]
+name = "stripes"
+rom = "../roms/gba-tests/stripes.gba"
+source = "../roms/gba-tests/stripes.asm"
+linker = "../roms/pixels/linker.ld"
+sha256 = "80d6cc05b5f289b9a2392621fc245270f08e9f0d77fd33982120cef240f5a504"
+origin = "jsmolka/gba-tests ppu/stripes.gba at a7113b67e63f83a9b321696ddd7042ccfad6c881; MIT notice in roms/gba-tests/LICENSE"
+startup = "cartridge-direct-arm"
+bios_required = false
+mailbox_address = 0
+completion_id = 0
+max_instructions = 150000
+max_cycles = 1500000
+[fixture.verification]
+kind = "stripes"
+terminal_pc = 0x08000140
