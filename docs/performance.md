@@ -436,9 +436,13 @@ the new DMA scene; no app measurements are inferred from CLI benchmarks.
 
 | Platform | Core mean / p95 (ms) | Conversion mean / p95 (ms) | Texture submission mean / p95 (ms) | Samples | Visual acceptance |
 | --- | --- | --- | --- | --- | --- |
-| Native Linux | Not measured | Not measured | Not measured | Not recorded / Not recorded / Not recorded | Pending user check |
-| Google Chrome | Not measured | Not measured | Not measured | Not recorded / Not recorded / Not recorded | Pending user check |
-| Brave | Not measured | Not measured | Not measured | Not recorded / Not recorded / Not recorded | Pending user check |
+| Native Linux | 0.838 / 1.174 | 0.126 / 0.166 | 0.025 / 0.036 | 120 / 120 / 120 | Pending user check |
+| Google Chrome | 1.112 / 1.500 | 0.242 / 0.400 | 0.033 / 0.100 | 120 / 120 / 120 | Pending user check |
+| Brave | 1.167 / 1.500 | 0.242 / 0.300 | 0.044 / 0.100 | 120 / 120 / 120 | Pending user check |
+
+Provenance: user-supplied Slice 11 app measurements for Linux, Chrome and Brave.
+Measurement timestamp and moving/idle input conditions were not recorded.
+These callback timings do not establish full-frame cost or visual acceptance.
 
 ### Headless frame measurements
 
