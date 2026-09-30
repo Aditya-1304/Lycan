@@ -53,6 +53,35 @@ struct Fixture {
 enum Verification {
     Pixels(Pixels),
     Buttons(Movement),
+    Palette(Palette),
+    Hello(Hello),
+}
+
+/// Pinned upstream hello completion and an independently derived full-frame
+/// digest. The reference ROM has no original-fixture completion mailbox.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Hello {
+    terminal_pc: u32,
+    framebuffer_sha256: String,
+}
+
+/// One guest reproduction covers indexed lookup, both pages, and a palette-only
+/// change. Frozen colors are independent of the renderer and guest stores.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Palette {
+    input_events: Vec<InputEvent>,
+    checkpoints: Vec<PaletteCheckpoint>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PaletteCheckpoint {
+    frame: u16,
+    page: u16,
+    palette_changed: u16,
+    colors: [u16; 2],
 }
 
 #[derive(Deserialize)]
@@ -135,6 +164,32 @@ fn manifest(path: &Path) -> Result<Manifest> {
             )));
         }
         match &fixture.verification {
+            Verification::Hello(expected) => {
+                if expected.terminal_pc & 3 != 0 || expected.framebuffer_sha256.len() != 64 {
+                    return Err(fail("invalid hello expectation"));
+                }
+            }
+            Verification::Palette(expected) => {
+                if expected.checkpoints.is_empty()
+                    || expected
+                        .checkpoints
+                        .windows(2)
+                        .any(|pair| pair[0].frame >= pair[1].frame)
+                    || expected.checkpoints.iter().any(|point| {
+                        point.frame == 0
+                            || point.page > 1
+                            || point.palette_changed > 1
+                            || u64::from(point.frame) * CYCLES_PER_FRAME > fixture.max_cycles
+                            || point.colors.iter().any(|color| *color > 0x7fff)
+                    })
+                    || expected
+                        .input_events
+                        .iter()
+                        .any(|event| event.cycle > fixture.max_cycles)
+                {
+                    return Err(fail("invalid palette checkpoint"));
+                }
+            }
             Verification::Pixels(expected) => {
                 if !expected.input_events.is_empty()
                     || !expected.time_events.is_empty()
@@ -200,6 +255,16 @@ fn build_fixtures(path: &Path) -> Result<()> {
     let build = std::env::temp_dir().join(format!("gba-fixtures-{}", std::process::id()));
     fs::create_dir_all(&build)?;
     for fixture in &manifest.fixture {
+        if matches!(fixture.verification, Verification::Hello(_)) {
+            // Upstream distributes a FASMARM binary. Verify its identity rather
+            // than attempting to assemble its source with GNU Arm binutils.
+            load(fixture, directory)?;
+            println!(
+                "VERIFIED {} upstream binary sha256={}",
+                fixture.name, fixture.sha256
+            );
+            continue;
+        }
         let source = directory.join(&fixture.source);
         let linker = directory.join(&fixture.linker);
         let object = build.join(format!("{}.o", fixture.name));
@@ -267,7 +332,9 @@ fn load(fixture: &Fixture, directory: &Path) -> Result<Vec<u8>> {
 fn pixels(fixture: &Fixture) -> Result<&Pixels> {
     match &fixture.verification {
         Verification::Pixels(expected) => Ok(expected),
-        Verification::Buttons(_) => Err(fail("expected a terminal pixels fixture")),
+        Verification::Buttons(_) | Verification::Palette(_) | Verification::Hello(_) => {
+            Err(fail("expected a terminal pixels fixture"))
+        }
     }
 }
 
@@ -452,6 +519,70 @@ fn run_movement(
     Ok(())
 }
 
+/// Checks complete frames after each guest-controlled transition. The capture
+/// suffix preserves all three outputs rather than overwriting the earlier pages.
+fn run_palette(
+    fixture: &Fixture,
+    expected: &Palette,
+    bytes: &[u8],
+    capture_path: Option<&str>,
+) -> Result<()> {
+    let mut session = Session::new();
+    session.load_rom(bytes)?;
+    for event in &expected.input_events {
+        session.set_button_at(Cycle(event.cycle), button(&event.button)?, event.pressed)?;
+    }
+    let mut frame = 0;
+    for point in &expected.checkpoints {
+        while frame < point.frame {
+            session.advance_frame_with_budget(fixture.max_instructions)?;
+            frame += 1;
+            if session.cycles().0 > fixture.max_cycles {
+                return Err(fail("palette fixture exceeded its cycle limit"));
+            }
+        }
+        let actual = [
+            session.inspect16(fixture.mailbox_address)?,
+            session.inspect16(fixture.mailbox_address + 2)?,
+            session.inspect16(fixture.mailbox_address + 4)?,
+        ];
+        let wanted = [fixture.completion_id, point.page, point.palette_changed];
+        if actual != wanted || session.framebuffer_generation() != u64::from(point.frame) {
+            return Err(fail(format!(
+                "{} frame {} mailbox {actual:?}, expected {wanted:?}",
+                fixture.name, point.frame
+            )));
+        }
+        for (index, &pixel) in session.framebuffer().iter().enumerate() {
+            let wanted = point.colors[index % 2];
+            if pixel != wanted {
+                return Err(fail(format!(
+                    "{} frame {} pixel ({},{}) expected {wanted:#06x}, got {pixel:#06x}",
+                    fixture.name,
+                    point.frame,
+                    index % SCREEN_WIDTH,
+                    index / SCREEN_WIDTH
+                )));
+            }
+        }
+        if let Some(path) = capture_path {
+            capture(
+                Path::new(&format!("{path}.palette-frame-{}.ppm", point.frame)),
+                session.framebuffer(),
+            )?;
+        }
+        println!(
+            "PASS {} frame={} page={} palette_changed={} pixels={}",
+            fixture.name,
+            point.frame,
+            point.page,
+            point.palette_changed,
+            SCREEN_WIDTH * SCREEN_HEIGHT
+        );
+    }
+    Ok(())
+}
+
 fn option(args: &[String], key: &str) -> Result<Option<String>> {
     match args.iter().position(|arg| arg == key) {
         Some(index) => args
@@ -497,6 +628,59 @@ fn run() -> Result<()> {
                 &bytes,
                 option(&args, "--capture")?.as_deref(),
             )?;
+            continue;
+        }
+        if let Verification::Palette(expected) = &fixture.verification {
+            if !bench {
+                run_palette(
+                    fixture,
+                    expected,
+                    &bytes,
+                    option(&args, "--capture")?.as_deref(),
+                )?;
+            }
+            continue;
+        }
+        if let Verification::Hello(expected) = &fixture.verification {
+            if !bench {
+                let mut machine = Machine::new();
+                machine.load_rom(&bytes)?;
+                machine.run_until_pc(
+                    expected.terminal_pc,
+                    fixture.max_instructions,
+                    Cycle(fixture.max_cycles),
+                )?;
+                // Drawing finishes during VBlank, after that frame was published.
+                // Wait through a complete subsequent visible frame before capture.
+                let next_frame =
+                    Cycle((machine.cycles().0 / CYCLES_PER_FRAME + 2) * CYCLES_PER_FRAME);
+                if next_frame.0 > fixture.max_cycles {
+                    return Err(fail("hello cycle limit leaves no scanout budget"));
+                }
+                machine.advance_to(next_frame, fixture.max_instructions)?;
+                let mut digest = Sha256::new();
+                for &pixel in machine.framebuffer() {
+                    digest.update(pixel.to_le_bytes());
+                }
+                let actual = format!("{:x}", digest.finalize());
+                if actual != expected.framebuffer_sha256 {
+                    return Err(fail(format!(
+                        "hello framebuffer SHA-256 {actual}, expected {}",
+                        expected.framebuffer_sha256
+                    )));
+                }
+                if let Some(path) = option(&args, "--capture")? {
+                    capture(
+                        Path::new(&format!("{path}.hello.ppm")),
+                        machine.framebuffer(),
+                    )?;
+                }
+                println!(
+                    "PASS hello terminal={:#010x} cycles={} framebuffer_sha256={actual}",
+                    expected.terminal_pc,
+                    machine.cycles().0
+                );
+            }
             continue;
         }
         let expected = pixels(fixture)?;

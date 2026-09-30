@@ -17,6 +17,13 @@ const BUTTONS_ROM: &[u8] = include_bytes!(concat!(
     "/../../roms/buttons.gba"
 ));
 
+/// Original Slice 3 guest. Loading this artifact uses the same session,
+/// master-clock pacing, and completed-frame presentation as dropped ROMs.
+const PALETTE_ROM: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../roms/palette.gba"
+));
+
 /// The replay uses the same ordered cycle transitions verified by gba-tools.
 const DEMO_INPUT: &[(Cycle, Button, bool)] = &include!(concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -199,6 +206,11 @@ impl GbaApp {
             }
             if ui.button("Reset").clicked() {
                 self.reset_demo();
+                ui.ctx().request_repaint();
+            }
+            if ui.button("Load palette demo").clicked() {
+                self.load_rom_bytes("palette.gba", PALETTE_ROM);
+                self.status = "Palette demo: hold Z (A) for page 1; hold X (B) to change its white stripes to red".to_owned();
                 ui.ctx().request_repaint();
             }
             if ui.button("Replay square demo").clicked() {

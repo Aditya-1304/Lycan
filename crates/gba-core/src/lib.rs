@@ -72,6 +72,8 @@ const EWRAM_START: u32 = 0x0200_0000;
 const IWRAM_START: u32 = 0x0300_0000;
 const IO_START: u32 = 0x0400_0000;
 const IO_BYTES: usize = 0x400;
+const PALETTE_START: u32 = 0x0500_0000;
+const PALETTE_BYTES: usize = 1024;
 const VRAM_START: u32 = 0x0600_0000;
 const VRAM_BYTES: usize = 96 * 1024;
 // The scanline renderer samples at 960 cycles, but the DISPSTAT HBlank flag
@@ -235,6 +237,7 @@ trait CpuBus {
     fn read32(&mut self, address: u32, access: Access) -> Result<u32, CoreError>;
 
     fn write16(&mut self, address: u32, value: u16, access: Access) -> Result<(), CoreError>;
+    fn write32(&mut self, address: u32, value: u32, access: Access) -> Result<(), CoreError>;
 
     fn idle(&mut self, cycles: u64);
 }
@@ -305,33 +308,26 @@ impl Cpu {
         if !self.condition_passes(instruction >> 28) {
             return Ok(StepOutcome { address });
         }
-        if instruction & 0x0F00_0000 == 0x0A00_0000 {
+        if instruction & 0x0E00_0000 == 0x0A00_0000 {
+            if instruction & (1 << 24) != 0 {
+                self.registers[14] = address.wrapping_add(4);
+            }
             let offset = ((instruction & 0x00FF_FFFF) << 8) as i32 >> 6;
             let target = address.wrapping_add(8).wrapping_add(offset as u32);
             self.registers[15] = target;
             self.refill(bus)?;
+        } else if self.execute_multiply(instruction, bus) {
+            // Multiply timing adds internal cycles to the already charged fetch.
         } else if self.execute_data_processing(address, instruction) {
-            // Immediate ALU operations use only the pipeline fetch cycle.
-        } else if instruction & 0x0F7F_0000 == 0x051F_0000 && (instruction >> 12) & 15 != 15 {
-            let offset = instruction & 0xFFF;
-            let base = address.wrapping_add(8);
-            let target = if instruction & (1 << 23) != 0 {
-                base.wrapping_add(offset)
-            } else {
-                base.wrapping_sub(offset)
-            };
-            let destination = ((instruction >> 12) & 15) as usize;
-            self.registers[destination] = bus.read32(
-                target,
-                Access {
-                    kind: AccessKind::Data,
-                    sequential: false,
-                },
-            )?;
-            bus.idle(1);
-            self.next_fetch_is_sequential = false;
-        } else if self.execute_halfword(address, instruction, bus)? {
-            self.next_fetch_is_sequential = false;
+            // The immediate shifts used here require no additional idle cycle.
+        } else if self.execute_word_transfer(address, instruction, bus)?
+            || self.execute_block_transfer(address, instruction, bus)?
+            || self.execute_halfword(address, instruction, bus)?
+        {
+            // A data access breaks fetch sequentiality, except when an LDM
+            // return already refilled the pipeline at its new instruction PC.
+            let loaded_pc = instruction & 0x0E10_8000 == 0x0810_8000;
+            self.next_fetch_is_sequential = loaded_pc;
         } else {
             return Err(CoreError::UnsupportedInstruction {
                 address,
@@ -367,24 +363,19 @@ impl Cpu {
         }
     }
 
-    /// Implements the immediate ALU and unshifted register MOV forms used by the demos.
-    /// Unsupported shifts and writes to the pipeline PC remain explicit errors.
+    /// Executes the ALU forms required by the bitmap guests and hello text
+    /// routines. Register-controlled shifts and PC writes remain unsupported.
     fn execute_data_processing(&mut self, address: u32, instruction: u32) -> bool {
-        if instruction & 0x0FFF_0FF0 == 0x01A0_0000 && (instruction >> 12) & 15 != 15 {
-            let source = (instruction & 15) as usize;
-            self.registers[((instruction >> 12) & 15) as usize] = if source == 15 {
-                address.wrapping_add(8)
-            } else {
-                self.registers[source]
-            };
-            return true;
-        }
-        if instruction & 0x0E00_0000 != 0x0200_0000 {
+        if instruction & 0x0C00_0000 != 0
+            || (instruction & (1 << 25) == 0 && instruction & (1 << 4) != 0)
+        {
             return false;
         }
         let opcode = (instruction >> 21) & 15;
         let set_flags = instruction & (1 << 20) != 0;
-        if !matches!(opcode, 2 | 4 | 8 | 10 | 12 | 13) || (matches!(opcode, 8 | 10) && !set_flags) {
+        if !matches!(opcode, 0 | 2 | 4 | 8 | 10 | 12 | 13)
+            || (matches!(opcode, 8 | 10) && !set_flags)
+        {
             return false;
         }
         let destination = ((instruction >> 12) & 15) as usize;
@@ -397,11 +388,30 @@ impl Cpu {
         } else {
             self.registers[source]
         };
-        let operand = (instruction & 255).rotate_right(((instruction >> 8) & 15) * 2);
+        let (operand, shifter_carry) = if instruction & (1 << 25) != 0 {
+            let rotate = ((instruction >> 8) & 15) * 2;
+            let value = (instruction & 255).rotate_right(rotate);
+            (
+                value,
+                if rotate == 0 {
+                    self.cpsr & CPSR_C != 0
+                } else {
+                    value >> 31 != 0
+                },
+            )
+        } else {
+            let source = (instruction & 15) as usize;
+            let value = if source == 15 {
+                address.wrapping_add(8)
+            } else {
+                self.registers[source]
+            };
+            self.shift_immediate(value, (instruction >> 5) & 3, (instruction >> 7) & 31)
+        };
         let result = match opcode {
             2 | 10 => lhs.wrapping_sub(operand),
             4 => lhs.wrapping_add(operand),
-            8 => lhs & operand,
+            0 | 8 => lhs & operand,
             12 => lhs | operand,
             _ => operand,
         };
@@ -432,13 +442,8 @@ impl Cpu {
                 if overflow {
                     self.cpsr |= CPSR_V;
                 }
-            } else if (instruction >> 8) & 15 != 0 {
-                self.cpsr = (self.cpsr & !CPSR_C)
-                    | if operand & 0x8000_0000 != 0 {
-                        CPSR_C
-                    } else {
-                        0
-                    };
+            } else {
+                self.cpsr = (self.cpsr & !CPSR_C) | if shifter_carry { CPSR_C } else { 0 };
             }
         }
         if !matches!(opcode, 8 | 10) {
@@ -447,14 +452,186 @@ impl Cpu {
         true
     }
 
-    /// Routes immediate LDRH/STRH through the shared timed bus and load idle cycle.
+    /// Decodes ARM immediate shifts, including the zero encodings for shifts
+    /// by 32 and RRX. The carry result is used only when the ALU updates flags.
+    fn shift_immediate(&self, value: u32, kind: u32, amount: u32) -> (u32, bool) {
+        let carry = self.cpsr & CPSR_C != 0;
+        match (kind, amount) {
+            (0, 0) => (value, carry),
+            (0, n) => (value << n, value & (1 << (32 - n)) != 0),
+            (1, 0) => (0, value >> 31 != 0),
+            (1, n) => (value >> n, value & (1 << (n - 1)) != 0),
+            (2, 0) => (((value as i32) >> 31) as u32, value >> 31 != 0),
+            (2, n) => (((value as i32) >> n) as u32, value & (1 << (n - 1)) != 0),
+            (3, 0) => ((u32::from(carry) << 31) | (value >> 1), value & 1 != 0),
+            (3, n) => (value.rotate_right(n), value & (1 << (n - 1)) != 0),
+            _ => unreachable!("shift encoding contains two bits"),
+        }
+    }
+
+    /// MUL/MLA supply the text routine's row offset through ordinary CPU
+    /// arithmetic. Timing follows ARM7 early termination of the multiplier.
+    fn execute_multiply<B: CpuBus>(&mut self, instruction: u32, bus: &mut B) -> bool {
+        if instruction & 0x0FC0_00F0 != 0x0000_0090 {
+            return false;
+        }
+        let rd = ((instruction >> 16) & 15) as usize;
+        let rn = ((instruction >> 12) & 15) as usize;
+        let rs = ((instruction >> 8) & 15) as usize;
+        let rm = (instruction & 15) as usize;
+        let accumulate = instruction & (1 << 21) != 0;
+        if rd == 15 || rs == 15 || rm == 15 || (accumulate && rn == 15) {
+            return false;
+        }
+        let multiplier = self.registers[rs];
+        let mut result = self.registers[rm].wrapping_mul(multiplier);
+        if accumulate {
+            result = result.wrapping_add(self.registers[rn]);
+        }
+        self.registers[rd] = result;
+        if instruction & (1 << 20) != 0 {
+            self.cpsr = (self.cpsr & !(CPSR_N | CPSR_Z))
+                | if result >> 31 != 0 { CPSR_N } else { 0 }
+                | if result == 0 { CPSR_Z } else { 0 };
+        }
+        let iterations = [8_u32, 16, 24]
+            .into_iter()
+            .find(|bits| {
+                let upper = (multiplier as i32) >> bits;
+                upper == 0 || upper == -1
+            })
+            .map_or(4, |bits| bits / 8);
+        bus.idle(u64::from(iterations) + u64::from(accumulate));
+        true
+    }
+
+    /// Handles immediate-offset word transfers, including literal loads and
+    /// display-status polling. Byte and shifted-offset transfers remain deferred.
+    fn execute_word_transfer<B: CpuBus>(
+        &mut self,
+        address: u32,
+        instruction: u32,
+        bus: &mut B,
+    ) -> Result<bool, CoreError> {
+        if instruction & 0x0E40_0000 != 0x0400_0000 {
+            return Ok(false);
+        }
+        let rn = ((instruction >> 16) & 15) as usize;
+        let rd = ((instruction >> 12) & 15) as usize;
+        let pre = instruction & (1 << 24) != 0;
+        let writeback = instruction & (1 << 21) != 0 || !pre;
+        let load = instruction & (1 << 20) != 0;
+        if rd == 15
+            || (writeback && (rn == 15 || (load && rn == rd)))
+            || (!pre && instruction & (1 << 21) != 0)
+        {
+            return Ok(false);
+        }
+        let base = if rn == 15 {
+            address.wrapping_add(8)
+        } else {
+            self.registers[rn]
+        };
+        let offset = instruction & 0xfff;
+        let updated = if instruction & (1 << 23) != 0 {
+            base.wrapping_add(offset)
+        } else {
+            base.wrapping_sub(offset)
+        };
+        let target = if pre { updated } else { base };
+        let access = Access {
+            kind: AccessKind::Data,
+            sequential: false,
+        };
+        if load {
+            self.registers[rd] = bus.read32(target, access)?;
+            bus.idle(1);
+        } else {
+            bus.write32(target, self.registers[rd], access)?;
+        }
+        if writeback {
+            self.registers[rn] = updated;
+        }
+        Ok(true)
+    }
+
+    /// Transfers ascending register numbers to ascending addresses for ARM
+    /// stack and glyph-data operations. A loaded PC refills the ARM pipeline;
+    /// exception-return/user-bank and unpredictable forms are deferred.
+    fn execute_block_transfer<B: CpuBus>(
+        &mut self,
+        address: u32,
+        instruction: u32,
+        bus: &mut B,
+    ) -> Result<bool, CoreError> {
+        if instruction & 0x0E40_0000 != 0x0800_0000 {
+            return Ok(false);
+        }
+        let rn = ((instruction >> 16) & 15) as usize;
+        let list = instruction & 0xffff;
+        let load = instruction & (1 << 20) != 0;
+        let writeback = instruction & (1 << 21) != 0;
+        if rn == 15 || list == 0 || (writeback && list & (1 << rn) != 0) {
+            return Ok(false);
+        }
+        let bytes = list.count_ones() * 4;
+        let base = self.registers[rn];
+        let up = instruction & (1 << 23) != 0;
+        let pre = instruction & (1 << 24) != 0;
+        let updated = if up {
+            base.wrapping_add(bytes)
+        } else {
+            base.wrapping_sub(bytes)
+        };
+        let mut target = if up {
+            base.wrapping_add(if pre { 4 } else { 0 })
+        } else {
+            updated.wrapping_add(if pre { 0 } else { 4 })
+        };
+        let mut sequential = false;
+        for register in 0..16 {
+            if list & (1 << register) == 0 {
+                continue;
+            }
+            let access = Access {
+                kind: AccessKind::Data,
+                sequential,
+            };
+            if load {
+                self.registers[register] = bus.read32(target, access)?;
+            } else {
+                let value = if register == 15 {
+                    address.wrapping_add(12)
+                } else {
+                    self.registers[register]
+                };
+                bus.write32(target, value, access)?;
+            }
+            target = target.wrapping_add(4);
+            sequential = true;
+        }
+        if writeback {
+            self.registers[rn] = updated;
+        }
+        if load {
+            bus.idle(1);
+            if list & (1 << 15) != 0 {
+                self.registers[15] &= !3;
+                self.refill(bus)?;
+            }
+        }
+        Ok(true)
+    }
+
+    /// Routes immediate/register-offset LDRH/STRH through the timed bus.
+    /// Register offsets are unshifted, as required by ARM halfword transfers.
     fn execute_halfword<B: CpuBus>(
         &mut self,
         address: u32,
         instruction: u32,
         bus: &mut B,
     ) -> Result<bool, CoreError> {
-        if instruction & 0x0E40_00F0 != 0x0040_00B0 {
+        if instruction & 0x0E00_00F0 != 0x0000_00B0 {
             return Ok(false);
         }
         let pre = instruction & (1 << 24) != 0;
@@ -469,7 +646,14 @@ impl Cpu {
         } else {
             self.registers[base_register]
         };
-        let offset = ((instruction >> 4) & 0xF0) | (instruction & 15);
+        let offset = if instruction & (1 << 22) != 0 {
+            ((instruction >> 4) & 0xF0) | (instruction & 15)
+        } else {
+            if instruction & 0xF00 != 0 || instruction & 15 == 15 {
+                return Ok(false);
+            }
+            self.registers[(instruction & 15) as usize]
+        };
         let updated = if instruction & (1 << 23) != 0 {
             base.wrapping_add(offset)
         } else {
@@ -507,6 +691,8 @@ struct System {
     ewram: Vec<u8>,
     iwram: Vec<u8>,
     io: Vec<u8>,
+    /// Shared BG/OBJ color RAM; mode 4 indexes the first 256 entries.
+    palette: Vec<u8>,
     vram: Vec<u8>,
     display: Display,
     cycles: u64,
@@ -521,6 +707,7 @@ impl System {
             ewram: vec![0; 256 * 1024],
             iwram: vec![0; 32 * 1024],
             io: vec![0; IO_BYTES],
+            palette: vec![0; PALETTE_BYTES],
             vram: vec![0; VRAM_BYTES],
             display: Display::new(),
             cycles: 0,
@@ -567,6 +754,12 @@ impl System {
 
         self.charge(address, 2, access);
 
+        self.write_halfword(address, value)
+    }
+
+    /// Applies a bus beat after its access time has synchronized scanout. Word
+    /// transfers reuse this path without charging the hardware clock twice.
+    fn write_halfword(&mut self, address: u32, value: u16) -> Result<(), CoreError> {
         let bytes = value.to_le_bytes();
 
         if let Some(range) = range_for(address, EWRAM_START, self.ewram.len(), 2) {
@@ -596,12 +789,26 @@ impl System {
             return Ok(());
         }
 
+        if let Some(range) = palette_range(address, 2) {
+            self.palette[range].copy_from_slice(&bytes);
+            return Ok(());
+        }
+
         if let Some(range) = range_for(address, VRAM_START, self.vram.len(), 2) {
             self.vram[range].copy_from_slice(&bytes);
             return Ok(());
         }
 
         Err(CoreError::UnmappedAddress { address, width: 2 })
+    }
+
+    fn write32_impl(&mut self, address: u32, value: u32, access: Access) -> Result<(), CoreError> {
+        if address & 3 != 0 {
+            return Err(CoreError::InvalidAccessAlignment { address, width: 4 });
+        }
+        self.charge(address, 4, access);
+        self.write_halfword(address, value as u16)?;
+        self.write_halfword(address.wrapping_add(2), (value >> 16) as u16)
     }
 
     fn read_bytes(&self, address: u32, width: usize) -> Result<&[u8], CoreError> {
@@ -616,6 +823,9 @@ impl System {
         }
         if let Some(range) = range_for(address, IO_START, self.io.len(), width) {
             return Ok(&self.io[range]);
+        }
+        if let Some(range) = palette_range(address, width) {
+            return Ok(&self.palette[range]);
         }
         if let Some(range) = range_for(address, VRAM_START, self.vram.len(), width) {
             return Ok(&self.vram[range]);
@@ -656,7 +866,8 @@ impl System {
             let event = self.inputs.pop_front().expect("front was present");
             self.buttons.set(event.button, event.pressed);
         }
-        self.display.synchronize_to(target, &self.vram);
+        self.display
+            .synchronize_to(target, &self.vram, &self.palette);
         self.cycles = target;
         self.refresh_status();
     }
@@ -672,6 +883,10 @@ impl CpuBus for System {
 
     fn write16(&mut self, address: u32, value: u16, access: Access) -> Result<(), CoreError> {
         self.write16_impl(address, value, access)
+    }
+
+    fn write32(&mut self, address: u32, value: u32, access: Access) -> Result<(), CoreError> {
+        self.write32_impl(address, value, access)
     }
 
     fn idle(&mut self, cycles: u64) {
@@ -711,19 +926,32 @@ impl Display {
 
     /// Renders each visible scanline at its drawing boundary and publishes at VBlank.
     /// Within-line register effects remain the documented scanline approximation.
-    fn synchronize_to(&mut self, target: u64, vram: &[u8]) {
+    fn synchronize_to(&mut self, target: u64, vram: &[u8], palette: &[u8]) {
         while self.next_event <= target {
             if self.line < SCREEN_HEIGHT {
-                let enabled = self.control & 7 == 3 && self.control & (1 << 10) != 0;
+                let mode = self.control & 7;
+                let enabled = matches!(mode, 3 | 4) && self.control & (1 << 10) != 0;
+                // Mode 4 pages are separated by 40 KiB, although only 38,400
+                // bytes in each page are visible. Mode 3 ignores page selection.
+                let page = if self.control & (1 << 4) != 0 {
+                    0xa000
+                } else {
+                    0
+                };
                 let forced_blank = self.control & (1 << 7) != 0;
                 let start = self.line * SCREEN_WIDTH;
                 for index in start..start + SCREEN_WIDTH {
                     self.drawing[index] = if forced_blank {
                         0x7FFF
-                    } else if enabled {
+                    } else if enabled && mode == 3 {
                         u16::from_le_bytes([vram[index * 2], vram[index * 2 + 1]]) & 0x7FFF
+                    } else if enabled {
+                        let color = usize::from(vram[page + index]) * 2;
+                        // Index zero resolves to the backdrop color in BG palette
+                        // entry zero; it must not become a hard-coded black pixel.
+                        u16::from_le_bytes([palette[color], palette[color + 1]]) & 0x7FFF
                     } else {
-                        0
+                        u16::from_le_bytes([palette[0], palette[1]]) & 0x7FFF
                     };
                 }
                 self.line += 1;
@@ -931,6 +1159,16 @@ impl Default for Machine {
             executed_instructions: 0,
         }
     }
+}
+
+/// Palette RAM repeats throughout its 16 MiB bus region. Access widths and
+/// alignment are checked by the caller before applying the physical RAM mask.
+fn palette_range(address: u32, width: usize) -> Option<Range<usize>> {
+    if address >> 24 != PALETTE_START >> 24 {
+        return None;
+    }
+    let start = address as usize & (PALETTE_BYTES - 1);
+    (start + width <= PALETTE_BYTES).then_some(start..start + width)
 }
 
 fn range_for(address: u32, start: u32, length: usize, width: usize) -> Option<Range<usize>> {
