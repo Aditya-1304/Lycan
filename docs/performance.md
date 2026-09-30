@@ -1103,3 +1103,191 @@ host/device details and counter reset history were not recorded. Native and Chro
 show nonzero host overflow; its cause and recurrence cannot be determined from
 these readouts. This does not change the observed backup-selection results.
 The fixtures do not exercise save protocols, persistence or audible PCM behavior.
+
+## Slice 13 — SRAM score recovery (2026-09-30)
+
+Implemented only the SRAM score slice. Cartridge selection still comes from the
+central Slice 12B detector/override. The core now owns a 32 KiB, initially `0xff`
+SRAM chip mirrored through `0x0e000000..0x10000000`, with an eight-bit bus and
+revision-tagged snapshots. CPU reset retains both bytes and dirty state. Guest
+stores advance the revision only when a byte changes; imports always create a
+newer revision. A completed older write cannot acknowledge a newer import.
+
+The shared app loads SRAM before permitting guest execution. Saves use SHA-256
+of the original ROM bytes, independent of filenames/titles. Native storage uses
+`GBA_SAVE_DIR`, then `$XDG_DATA_HOME/gba-rs/saves`, then
+`$HOME/.local/share/gba-rs/saves`. Browser storage uses the `saves` object store
+in IndexedDB database `gba-rs-saves`, scoped to the page's origin.
+
+One storage operation is in flight at a time. The latest dirty machine image is
+captured for the next write, coalescing changes made during the previous write.
+Completions carry identity, session generation and revision. Native success
+requires fsync, verified staging bytes, rename, parent-directory sync and final
+readback. IndexedDB success is reported only after transaction completion,
+following [the transaction completion contract](https://developer.mozilla.org/en-US/docs/Web/API/IDBTransaction/complete_event).
+
+Pause continues flushing dirty data. ROM replacement retains the old machine
+until its save barrier completes. Ordinary native window close also waits for
+storage; a failed write keeps the window open. Failed data remains dirty and
+available through Retry/Export. Imports are disabled while storage is busy,
+validate identity/size, create a newer dirty revision and restart the guest
+paused so old CPU registers cannot overwrite the imported score. Export does
+not acknowledge an autosave revision.
+
+Portable `.gbasav` files contain `GBASRAM1`, the 32-byte ROM digest and exactly
+32768 SRAM bytes (32808 bytes total). Raw/unidentified saves and exports for a
+different ROM are rejected. Browser export requests a download; JavaScript
+cannot acknowledge that the user has finished saving the downloaded file.
+Browser shutdown cannot guarantee an asynchronous save completes: pause and
+wait for **Saved revision** before closing, and retain an export.
+
+### Fixture and automated evidence
+
+The original MIT fixture is `roms/sram/score.s`, assembled using
+`python3 roms/sram/build.py`. Its frozen identity and bounds live in
+`roms/sram/manifest.json`; this separate fixture suite runs with the native
+save probe and `python3 roms/sram/verify.py`. It uses direct ARM startup without
+BIOS/test firmware. **Load SRAM score** uses these exact bytes through the normal
+app loading/storage route. Tap/release **Z (A)** to add one point, up to sixteen.
+Each point fills an eight-by-eight green cell at the top of the guest screen.
+
+| Evidence | Result |
+| --- | --- |
+| ROM SHA-256 | `34ed9eb504ed6aa4da12d2fd29f408665c585afebb4f2dd4bc685f4bec523dfc` |
+| Completion mailbox | `0x03000000 = 0x0073`; score at `0x03000002 = 1` |
+| Bounded run | Three frames, 200000 instructions per frame, at most 842750 cycles |
+| New chip, A held | Checkpoint instruction `0x08000118`; 842693 cycles; 78840 instructions; revision 3, dirty |
+| Restored score, A released | Checkpoint instruction `0x08000110`; 842690 cycles; 78836 instructions; revision 1, clean |
+| Exact scanout | All 38400 pixels checked: first eight columns of first eight rows `0x03e0`, remaining pixels zero |
+| Score bytes | SRAM begins `a5 01`; remaining bytes `ff` |
+| Portable image SHA-256 | `82683ad62321b068132e24d97e0fe4efdecf3ac2501a045918ff13a21beda432` |
+| Native full-process reopen | PASS: separate write/read processes using the same production disk/envelope functions |
+| Native export/import format | PASS: checked export replacement, readback/decode and fresh guest recovery; wrong identity rejected |
+| Failed native replacement | PASS: non-directory destination rejected; probe does not claim UI failure-path acceptance |
+| Revision/image contract | PASS on native/WASM: old acknowledgement leaves newer import dirty; short import rejected without changing bytes |
+| Core RED → GREEN regression | One added test: previously `UnmappedAddress` at SRAM read; now erased-byte read, mirrored store and reset retention pass |
+| Workspace tests | PASS: 23 (13 core unit, one existing backup contract, nine session) |
+| Clippy / format | PASS: workspace/all targets with warnings denied; `cargo fmt --all -- --check` |
+| Native/WASM app compilation | PASS |
+| Existing release fixture runner | PASS: all existing fixture cases/checkpoints |
+| Production WASM execution | PASS: shared session/guest contract in Node; does not exercise browser IndexedDB |
+| Release Trunk build | PASS with Trunk 0.21.14 |
+| Native app window/pickers/close barrier | Not verified visually; user-performed acceptance pending |
+| Chrome / Brave IndexedDB, reopen, download/import, failure UI | PASS: user manually confirmed all browser checks, including close/reopen, import/export and failure paths |
+
+Retained evidence: [native write](verification/sram-native-write.txt),
+[separate-process reopen](verification/sram-native-reopen.txt), and
+[production WASM contract](verification/sram-wasm.txt). Native probe data is in
+`/tmp/gba-sram-final-20260930`; temporary files are not a permanent evidence store.
+Live environment: Linux `7.2.7-arch1-1`, rustc `1.98.1`, cargo `1.98.1`.
+Browser versions, refresh rate and zoom were not refreshed for this slice.
+
+### Slice 13 timing fields
+
+Existing millisecond entries above are unchanged. Chrome and Brave measurements
+below are user-provided readouts for `sram.gba`, with 120 samples per operation.
+Core p95 is below the Section 6 target of 12 ms on both browsers (8.100 ms and
+8.400 ms). These callback measurements do not establish complete-frame/GPU
+presentation timing or sustained emulation speed. Native UI timing, storage
+latency and 30-minute resource trends remain not measured.
+
+| Platform | Core mean / p95 (ms) | Conversion mean / p95 (ms) | Texture submission mean / p95 (ms) | Samples (core / conversion / submission) |
+| --- | --- | --- | --- | --- |
+| Native Linux | Not measured | Not measured | Not measured | Not recorded / Not recorded / Not recorded |
+| Chrome | 6.147 / 8.100 | 0.123 / 0.200 | 0.017 / 0.100 | 120 / 120 / 120 |
+| Brave | 6.485 / 8.400 | 0.121 / 0.200 | 0.027 / 0.100 | 120 / 120 / 120 |
+
+### User-reported browser runtime acceptance
+
+The user explicitly confirmed that all manual browser checks passed, including
+full close/reopen, import/export and failure paths. This is user-performed
+acceptance, separate from the automated/native probe evidence above.
+
+| Readout | Chrome | Brave |
+| --- | --- | --- |
+| ROM / execution | `sram.gba`, Running; status `Reset sram.gba` | `sram.gba`, Running; status `Loaded sram.gba` |
+| Save acknowledgement | Saved revision 19 | Saved revision 13 |
+| Instructions | 29477119 | 19232015 |
+| GBA cycles | 323911002 | 211330848 |
+| Backup | `Some(Sram)` / `Identified(Sram)` / override `None` | `Some(Sram)` / `Identified(Sram)` / override `None` |
+| PCM rate / produced | 32768 Hz / 632638 | 32768 Hz / 412755 |
+| Staging drops / empty FIFO | 0 / 0 | 0 / 0 |
+| Host audio | Off; no audible playback acceptance inferred | Off; no audible playback acceptance inferred |
+| Close/reopen | PASS, user confirmed | PASS, user confirmed |
+| Import/export | PASS, user confirmed | PASS, user confirmed |
+| Failure paths | PASS, user confirmed | PASS, user confirmed |
+
+Save revision numbers are storage revisions, not score values. Exact score,
+browser versions, refresh rate, zoom and test duration were not recorded.
+The supplied browser evidence does not establish native GUI acceptance.
+
+### Manual commands and acceptance
+
+Native app:
+
+```bash
+cd /home/aditya/Projects/GBA/gba-rs
+cargo run --locked --release -p gba-app
+```
+
+Browser app, opened manually at `http://127.0.0.1:8080` in Chrome and Brave:
+
+```bash
+cd /home/aditya/Projects/GBA/gba-rs
+env -u NO_COLOR trunk --config web/Trunk.toml serve --release --address 127.0.0.1 --port 8080
+```
+
+1. Click **Load SRAM score**, tap/release **Z** several times, then **Pause**.
+   Count the green cells and wait for **Saved revision** with no pending revision.
+2. Fully close/reopen the native app or browser. Click **Load SRAM score** again.
+   The same number of cells must return. Use the same browser profile and origin.
+3. **Export SRAM**, add another point and save it, then **Import SRAM** using the
+   earlier export. Wait for storage acknowledgement, click **Resume**, and check
+   that the earlier score returns. Close/reopen and check that score again.
+4. Import that export into a different ROM forced to **SRAM**, or import a short
+   file. Expect an explicit rejection and unchanged cartridge bytes.
+5. While saving, request another ROM. It must wait for the save barrier. Native
+   close must also wait; if storage fails, its window must remain open for retry.
+
+Browser failed-write acceptance can be exercised after loading the score by
+running this temporary DevTools Console hook. It rejects only read/write
+transactions, leaving reads available; it does not alter emulator code or saves.
+
+```javascript
+// Retain the platform method so the injected storage failure can be reversed.
+const originalSaveTransaction = IDBDatabase.prototype.transaction;
+IDBDatabase.prototype.transaction = function (...args) {
+  if (args[1] === "readwrite") {
+    throw new Error("Manual SRAM acceptance: storage write rejected");
+  }
+  return originalSaveTransaction.apply(this, args);
+};
+```
+
+Tap/release **Z**. Expect **Save failed** and a pending revision, with no **Saved**
+claim for that revision. **Export SRAM** must still prepare the latest score.
+Restore the platform method, click **Retry save storage**, wait for **Saved
+revision**, and close/reopen to confirm recovery:
+
+```javascript
+// Restore normal IndexedDB transactions before retrying the pending revision.
+IDBDatabase.prototype.transaction = originalSaveTransaction;
+```
+
+### Plan comparison
+
+- [x] SRAM bytes/protocol and dirty revisions added to cartridge state.
+- [x] Native disk and browser IndexedDB routes, ROM identity, initial save loading,
+      identity-validated import/export implemented.
+- [x] Serialized operations and identity/generation/revision-tagged storage
+      acknowledgement implemented; failed writes retain dirty bytes.
+- [x] Native process reopen, guest framebuffer and portable image contracts pass.
+- [x] Chrome and Brave IndexedDB reopen, download/import and failure paths
+      manually accepted by the user.
+- [ ] Native GUI/pickers/close/failure status manually accepted; native headless
+      process reopen and storage contracts already pass.
+
+Implementation, automated evidence and browser manual acceptance are complete.
+The only remaining platform acceptance item is the native GUI/picker/close/failure
+check; the supplied confirmation concerns Chrome and Brave. Slice 14 Flash
+behavior was not started.

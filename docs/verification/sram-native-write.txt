@@ -1,0 +1,7 @@
+   Compiling gba-app v0.1.0 (/home/aditya/Projects/GBA/gba-rs/crates/gba-app)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 1.47s
+     Running `target/debug/gba-app --save-probe write`
+SRAM guest PASS: PC=0x08000118, cycles=842693, instructions=78840, revision=3, dirty=true
+SRAM guest PASS: PC=0x08000110, cycles=842690, instructions=78836, revision=1, dirty=false
+SRAM guest PASS: PC=0x08000118, cycles=842693, instructions=78840, revision=3, dirty=true
+Native SRAM write PASS: ROM=34ed9eb504ed6aa4da12d2fd29f408665c585afebb4f2dd4bc685f4bec523dfc, save=/tmp/gba-sram-final-20260930/34ed9eb504ed6aa4da12d2fd29f408665c585afebb4f2dd4bc685f4bec523dfc.gbasav, export/import validated, failed replacement rejected

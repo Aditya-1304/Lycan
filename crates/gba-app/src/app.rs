@@ -12,6 +12,9 @@ struct RomRead {
     result: Option<(String, Result<Vec<u8>, String>)>,
 }
 
+/// Original SRAM score uses the same loader and persistence as picked cartridges.
+const SRAM_ROM: &[u8] = include_bytes!("../../../roms/sram.gba");
+
 const WIDTH: usize = SCREEN_WIDTH;
 const HEIGHT: usize = SCREEN_HEIGHT;
 const WAKE_SECONDS: f64 = CYCLES_PER_FRAME as f64 / GBA_CLOCK_HZ as f64;
@@ -97,6 +100,15 @@ const KEY_BINDINGS: [(Button, egui::Key); 10] = [
 /// Shared native/browser application displaying pixels produced by guest execution.
 pub struct GbaApp {
     session: Session,
+    storage: crate::saves::Storage,
+    save_identity: Option<crate::saves::Identity>,
+    save_generation: u64,
+    restoring_save: bool,
+    save_import_open: bool,
+    #[cfg(not(target_arch = "wasm32"))]
+    close_when_saved: bool,
+    pending_rom: Option<(String, Vec<u8>)>,
+
     audio: Audio,
     rom_name: String,
     // Typed choices prevent invalid overrides; each choice applies to the next load.
@@ -132,6 +144,15 @@ impl GbaApp {
         let (rom_sender, rom_receiver) = std::sync::mpsc::channel();
         let mut app = Self {
             session: Session::new(),
+            storage: crate::saves::Storage::default(),
+            save_identity: None,
+            save_generation: 0,
+            restoring_save: false,
+            save_import_open: false,
+            #[cfg(not(target_arch = "wasm32"))]
+            close_when_saved: false,
+            pending_rom: None,
+
             audio: Audio::default(),
             rom_name: String::new(),
             backup_override: None,
@@ -204,6 +225,23 @@ impl GbaApp {
 
     /// Accepts bytes from built-in scenes, picked files and dropped files.
     fn load_rom_bytes(&mut self, name: &str, bytes: &[u8]) {
+        // Replacement is a save barrier. Retain the old machine until its last
+        // dirty revision is durable; a failed write remains retryable/exportable.
+        if self.storage.busy
+            || self.restoring_save
+            || self.session.save_image().is_some_and(|image| image.dirty)
+        {
+            self.pending_rom = Some((name.to_owned(), bytes.to_vec()));
+            if !self.session.paused() {
+                self.session.toggle_pause();
+            }
+            return;
+        }
+        self.install_rom(name, bytes);
+    }
+
+    /// Installs a cartridge only after the preceding session's save barrier.
+    fn install_rom(&mut self, name: &str, bytes: &[u8]) {
         self.load_generation = self.load_generation.wrapping_add(1);
         self.picker_open = false;
         // The pinned stripes file ends at its idle branch. Two unexecuted words
@@ -221,6 +259,16 @@ impl GbaApp {
             .load_rom_with_backup(bytes_to_load, self.backup_override)
         {
             Ok(()) => {
+                self.save_generation = self.save_generation.wrapping_add(1);
+                self.save_identity = self
+                    .session
+                    .save_image()
+                    .map(|_| crate::saves::Identity::of(bytes));
+                self.restoring_save = self.save_identity.is_some();
+                self.storage.failed = false;
+                if self.restoring_save {
+                    self.session.toggle_pause();
+                }
                 if bytes == ARM_DIAGNOSTIC_ROM
                     || bytes == THUMB_DIAGNOSTIC_ROM
                     || bytes == MEMORY_ROM
@@ -247,6 +295,178 @@ impl GbaApp {
                 self.upload_times = Measurements::default();
             }
             Err(error) => self.status = format!("ROM load failed: {error}"),
+        }
+    }
+
+    /// Browser shutdown has no asynchronous completion guarantee; native close
+    /// keeps the viewport alive until the save barrier completes.
+    fn close_pending(&self) -> bool {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.close_when_saved
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            false
+        }
+    }
+
+    /// Processes definitive storage completions before issuing the next operation.
+    /// Generation and identity checks prevent stale work from acknowledging a new
+    /// machine; revision checks in the core preserve edits made during a write.
+    fn poll_save_storage(&mut self, ctx: &egui::Context) {
+        if let Some(completion) = self.storage.poll()
+            && self.save_identity.as_ref() == Some(&completion.identity)
+            && self.save_generation == completion.generation
+        {
+            use crate::saves::Outcome;
+            match completion.outcome {
+                Outcome::Loaded(Ok(bytes)) => {
+                    let result = bytes
+                        .as_deref()
+                        .map_or(Ok(()), |bytes| self.session.load_save(bytes));
+                    match result {
+                        Ok(()) => {
+                            self.restoring_save = false;
+                            self.storage.status = if bytes.is_some() {
+                                "SRAM restored"
+                            } else {
+                                "No stored SRAM; new cartridge"
+                            }
+                            .into();
+                            if self.pending_rom.is_none()
+                                && self.session.paused()
+                                && !self.close_pending()
+                            {
+                                self.session.toggle_pause();
+                            }
+                        }
+                        Err(error) => {
+                            self.storage.failed = true;
+                            self.storage.status = error.into();
+                        }
+                    }
+                }
+                Outcome::Loaded(Err(error)) => {
+                    self.storage.failed = true;
+                    self.storage.status =
+                        format!("Initial SRAM load failed: {error}; guest remains paused");
+                }
+                Outcome::Written(Ok(())) => {
+                    self.session.acknowledge_save(completion.revision);
+                    self.storage.failed = false;
+                    self.storage.status =
+                        if self.session.save_image().is_some_and(|image| image.dirty) {
+                            "Stored snapshot; newer SRAM changes remain pending".into()
+                        } else {
+                            format!("Saved revision {}", completion.revision)
+                        };
+                }
+                Outcome::Written(Err(error)) => {
+                    self.storage.failed = true;
+                    self.storage.status =
+                        format!("Save failed: {error}; bytes pending — Retry or Export");
+                }
+                Outcome::Imported(Ok(Some(bytes))) => {
+                    self.save_import_open = false;
+                    match self.session.import_save(&bytes) {
+                        Ok(()) => {
+                            self.storage.failed = false;
+                            self.restoring_save = false;
+                            // Restart guest registers so the imported score is read
+                            // from cartridge bytes rather than overwritten by the old
+                            // score still held in CPU registers. Keep execution paused.
+                            self.reset_demo();
+                            self.session.toggle_pause();
+                            self.storage.status =
+                                "Imported; persistence pending — Resume to display".into();
+                        }
+                        Err(error) => self.storage.status = format!("Import rejected: {error}"),
+                    }
+                }
+                Outcome::Imported(Ok(None)) => {
+                    self.save_import_open = false;
+                    self.storage.status = "Import cancelled".into();
+                }
+                Outcome::Imported(Err(error)) => {
+                    self.save_import_open = false;
+                    self.storage.status = format!("Import rejected: {error}")
+                }
+                Outcome::Exported(Ok(true)) => {
+                    self.storage.status =
+                        "Export prepared; storage acknowledgement unchanged".into()
+                }
+                Outcome::Exported(Ok(false)) => self.storage.status = "Export cancelled".into(),
+                Outcome::Exported(Err(error)) => {
+                    self.storage.status = format!("Export failed: {error}")
+                }
+            }
+        }
+        if !self.storage.busy && !self.storage.failed {
+            if self.restoring_save {
+                if let Some(identity) = self.save_identity.clone() {
+                    self.storage.load(ctx, identity, self.save_generation);
+                }
+            } else if let Some(image) = self.session.save_image().filter(|image| image.dirty) {
+                if let Some(identity) = self.save_identity.clone() {
+                    self.storage
+                        .write(ctx, identity, self.save_generation, image);
+                }
+            } else if let Some((name, bytes)) = self.pending_rom.take() {
+                self.install_rom(&name, &bytes);
+            }
+        }
+        if self.storage.busy || self.pending_rom.is_some() || self.restoring_save {
+            ctx.request_repaint_after(Duration::from_millis(20));
+        }
+    }
+
+    /// Imports run with the guest paused and after any outstanding write. Exports
+    /// include identity and the latest bytes, including data from a failed write.
+    fn draw_save_controls(&mut self, ui: &mut egui::Ui) {
+        let Some(identity) = self.save_identity.clone() else {
+            return;
+        };
+        ui.label(format!("SRAM: {}", self.storage.status));
+        if let Some(image) = self.session.save_image().filter(|image| image.dirty) {
+            ui.label(format!(
+                "Revision {} is pending storage acknowledgement",
+                image.revision
+            ));
+        }
+        ui.horizontal(|ui| {
+            if ui
+                .add_enabled(!self.storage.busy, egui::Button::new("Retry save storage"))
+                .clicked()
+            {
+                self.storage.failed = false;
+                ui.ctx().request_repaint();
+            }
+            if ui
+                .add_enabled(
+                    !self.storage.busy && self.pending_rom.is_none(),
+                    egui::Button::new("Import SRAM"),
+                )
+                .clicked()
+            {
+                if !self.session.paused() {
+                    self.session.toggle_pause();
+                }
+                self.storage
+                    .import(ui.ctx(), identity.clone(), self.save_generation);
+                self.save_import_open = self.storage.busy;
+            }
+            if ui
+                .add_enabled(!self.storage.busy, egui::Button::new("Export SRAM"))
+                .clicked()
+                && let Some(image) = self.session.save_image()
+            {
+                self.storage
+                    .export(ui.ctx(), identity, self.save_generation, image);
+            }
+        });
+        if self.pending_rom.is_some() {
+            ui.label("ROM replacement awaits the pending save");
         }
     }
 
@@ -299,6 +519,9 @@ impl GbaApp {
 
     /// Resets guest execution while preserving the loaded ROM and resuming wake requests.
     fn reset_demo(&mut self) {
+        if self.restoring_save || self.storage.busy || self.pending_rom.is_some() {
+            return;
+        }
         self.audio.clear();
         self.session.reset();
         self.host_origin = Instant::now();
@@ -320,6 +543,7 @@ impl GbaApp {
         }
 
         ui.heading("gba-rs");
+        self.draw_save_controls(ui);
         ui.horizontal_wrapped(|ui| {
             if ui.add_enabled(!self.picker_open, egui::Button::new("Load ROM")).clicked() {
                 self.pick_rom(ui.ctx());
@@ -330,7 +554,7 @@ impl GbaApp {
                 "Pause"
             };
 
-            if ui.button(pause_label).clicked() {
+            if ui.add_enabled(!self.restoring_save && self.pending_rom.is_none() && !self.save_import_open && !self.close_pending(), egui::Button::new(pause_label)).clicked() {
                 self.replay_deadline = None;
                 self.session.toggle_pause();
                 self.audio.set_playing(!self.session.paused());
@@ -339,6 +563,10 @@ impl GbaApp {
             }
             if ui.button("Reset").clicked() {
                 self.reset_demo();
+                ui.ctx().request_repaint();
+            }
+            if ui.button("Load SRAM score").clicked() {
+                self.load_rom_bytes("sram.gba", SRAM_ROM);
                 ui.ctx().request_repaint();
             }
             if ui.button("Load PCM scene").clicked() {
@@ -617,6 +845,21 @@ impl eframe::App for GbaApp {
     /// Executes bounded guest work while running and schedules the next host wake.
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         #[cfg(not(target_arch = "wasm32"))]
+        if ctx.input(|input| input.viewport().close_requested())
+            && (self.storage.busy
+                || self.restoring_save
+                || self.session.save_image().is_some_and(|image| image.dirty))
+        {
+            // Ordinary native close is a save barrier. Failure keeps the window
+            // open with pending bytes available for retry or export.
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            self.close_when_saved = true;
+            if !self.session.paused() {
+                self.session.toggle_pause();
+            }
+        }
+
+        #[cfg(not(target_arch = "wasm32"))]
         if self.capture_requested {
             let image = ctx.input(|input| {
                 input.events.iter().find_map(|event| {
@@ -689,6 +932,15 @@ impl eframe::App for GbaApp {
                     Err(error) => self.status = format!("ROM read failed: {error}"),
                 }
             }
+        }
+        self.poll_save_storage(ctx);
+        #[cfg(not(target_arch = "wasm32"))]
+        if self.close_when_saved
+            && !self.storage.busy
+            && !self.restoring_save
+            && !self.session.save_image().is_some_and(|image| image.dirty)
+        {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
         let focused = ctx.input(|input| input.focused);
         // Browser visibility is distinct from keyboard focus. A hidden tab must

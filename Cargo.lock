@@ -847,6 +847,7 @@ dependencies = [
  "pollster",
  "rfd",
  "rtrb",
+ "sha2",
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",

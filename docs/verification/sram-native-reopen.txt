@@ -1,0 +1,7 @@
+    Blocking waiting for file lock on build directory
+    Finished `dev` profile [optimized + debuginfo] target(s) in 0.24s
+     Running `target/debug/gba-app --save-probe read`
+SRAM guest PASS: PC=0x08000118, cycles=842693, instructions=78840, revision=3, dirty=true
+SRAM guest PASS: PC=0x08000110, cycles=842690, instructions=78836, revision=1, dirty=false
+SRAM guest PASS: PC=0x08000110, cycles=842690, instructions=78836, revision=1, dirty=false
+Native SRAM read PASS: ROM=34ed9eb504ed6aa4da12d2fd29f408665c585afebb4f2dd4bc685f4bec523dfc, save=/tmp/gba-sram-final-20260930/34ed9eb504ed6aa4da12d2fd29f408665c585afebb4f2dd4bc685f4bec523dfc.gbasav, export/import validated, failed replacement rejected

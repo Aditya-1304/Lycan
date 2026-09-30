@@ -9,6 +9,7 @@ use std::time::Duration;
 pub use gba_core::{CYCLES_PER_FRAME, Cycle, GBA_CLOCK_HZ, PCM_RATE, SCREEN_HEIGHT, SCREEN_WIDTH};
 
 pub use gba_core::{BackupSelection, BackupType, Button, ButtonState};
+pub use gba_core::{SRAM_BYTES, SaveImage};
 
 pub const BUTTONS: [Button; 10] = [
     Button::A,
@@ -54,6 +55,26 @@ impl Default for Session {
 }
 
 impl Session {
+    /// Captures cartridge bytes without advancing guest execution.
+    pub fn save_image(&self) -> Option<SaveImage> {
+        self.machine.save_image()
+    }
+
+    /// Installs initial storage bytes before the first guest instruction.
+    pub fn load_save(&mut self, bytes: &[u8]) -> Result<(), &'static str> {
+        self.machine.load_save(bytes)
+    }
+
+    /// Applies an ordered import as a newer dirty cartridge revision.
+    pub fn import_save(&mut self, bytes: &[u8]) -> Result<(), &'static str> {
+        self.machine.import_save(bytes)
+    }
+
+    /// Completes a host write for exactly the snapshot revision it stored.
+    pub fn acknowledge_save(&mut self, revision: u64) {
+        self.machine.acknowledge_save(revision);
+    }
+
     /// Drains core PCM for the frontend's streaming resampler without running CPU work.
     pub fn drain_pcm(&mut self, output: &mut Vec<f32>) {
         self.machine.drain_pcm(output);

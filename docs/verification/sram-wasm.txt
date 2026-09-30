@@ -1,0 +1,3 @@
+   Compiling gba-session v0.1.0 (/home/aditya/Projects/GBA/gba-rs/crates/gba-session)
+    Finished `release` profile [optimized] target(s) in 0.09s
+WASM sram contract PASS: guest score, restore, revisions and image validation
