@@ -83,10 +83,6 @@ bounded pause/focus recovery passed. The moving-square headless fixture verified
 all five declared positions and complete framebuffers. Native and WASM compilation
 passed. See [button movement evidence and manual acceptance](button_movement.md).
 
-Live Linux, Chrome, and Brave movement/timing measurements remain pending manual
-verification. Slice 1 measurements above are historical and do not measure the new
-elapsed-time pacing path.
-
 ### Headless
 
 - Fixture: `buttons.gba`
@@ -133,3 +129,76 @@ Texture submission: mean 0.031 ms | p95 0.100 ms | samples 120
 Core execution: mean 2.463 ms | p95 3.100 ms | samples 120
 Pixel conversion: mean 0.243 ms | p95 0.300 ms | samples 120
 Texture submission: mean 0.031 ms | p95 0.100 ms | samples 120
+
+
+## Slice 3 verification status
+
+Mode 4 palette lookup, bitmap page selection, palette-only updates, and the
+pinned gba-tests `hello.gba` fixture passed headlessly. The original palette
+fixture verifies complete 240×160 framebuffers for both bitmap pages and a
+palette-only change without rewriting VRAM.
+
+### Headless
+
+- Fixture: `palette.gba`
+- SHA-256: `88806d5738b0d298918b3b59ce67bb08504584f948312614ba8a2977927efc3b`
+- Palette RAM access: passed
+- Mode 4 indexed lookup: passed
+- Page 0 framebuffer: passed
+- Page 1 framebuffer: passed
+- Palette-only framebuffer change: passed
+- Full 38,400-pixel comparisons: passed
+- Frame 4: page 0, red/green columns
+- Frame 6: page 1, blue/white columns
+- Frame 8: page 1 with palette change, blue/red columns
+
+### gba-tests hello
+
+- Fixture: `hello.gba`
+- SHA-256: `38aed48b67bc0f701e8aa222b0c3334bd306bd29888707bb7224d81f5576c264`
+- Source revision: `a7113b67e63f83a9b321696ddd7042ccfad6c881`
+- Terminal PC: `0x08000160`
+- Expected framebuffer SHA-256: `56cd131fb3915fe7e410be228a8c09e99132064799f148583636ca75745bedf7`
+- Headless framebuffer verification: passed
+- `Hello world!` output: passed
+
+### Native Linux
+
+- Palette page 0 visually verified: yes
+- Palette page 1 visually verified: yes
+- Palette-only update visually verified: yes
+- `hello.gba` visually verified: yes
+- Pause/reset/focus behavior verified: yes
+- Earlier Slice 1/2 scenes regression checked: yes
+Core execution: mean 2.142 ms | p95 3.190 ms | samples 120
+Pixel conversion: mean 0.122 ms | p95 0.176 ms | samples 120
+Texture submission: mean 0.027 ms | p95 0.039 ms | samples 120
+
+### Google Chrome
+
+- Palette page 0 visually verified: yes
+- Palette page 1 visually verified: yes
+- Palette-only update visu- Core execution mean: TODO ms
+- Core execution p95: TODO ms
+- Pixel conversion mean: TODO ms
+- Pixel conversion p95: TODO ms
+- Texture submission mean: TODO ms
+- Texture submission p95: TODO msally verified: yes
+- `hello.gba` visually verified: yes
+- Pause/reset/focus behavior verified: yes
+- Earlier Slice 1/2 scenes regression checked: yes
+Core execution: mean 2.938 ms | p95 3.800 ms | samples 120
+Pixel conversion: mean 0.234 ms | p95 0.300 ms | samples 120
+Texture submission: mean 0.032 ms | p95 0.100 ms | samples 120
+
+### Brave
+
+- Palette page 0 visually verified: yes
+- Palette page 1 visually verified: yes
+- Palette-only update visually verified: yes
+- `hello.gba` visually verified: yes
+- Pause/reset/focus behavior verified: yes
+- Earlier Slice 1/2 scenes regression checked: yes
+Core execution: mean 2.262 ms | p95 3.400 ms | samples 120
+Pixel conversion: mean 0.188 ms | p95 0.300 ms | samples 120
+Texture submission: mean 0.028 ms | p95 0.100 ms | samples 120
