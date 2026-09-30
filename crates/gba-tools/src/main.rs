@@ -59,6 +59,22 @@ enum Verification {
     Hello(Hello),
     Counter(Counter),
     Timing(Timing),
+    Diagnostic(Diagnostic),
+}
+
+/// Frozen diagnostic success requires a specific opcode, status, result, and
+/// original firmware identity. An unrelated self-branch never satisfies it.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Diagnostic {
+    terminal_pc: u32,
+    terminal_instruction: u32,
+    cpsr_mask: u32,
+    cpsr_value: u32,
+    result_register: usize,
+    result: u32,
+    firmware_sha256: String,
+    framebuffer_sha256: Option<String>,
 }
 
 /// Independently derived timing intervals are measured after both marker
@@ -213,7 +229,8 @@ fn manifest(path: &Path) -> Result<Manifest> {
     }
     for fixture in &manifest.fixture {
         if fixture.startup != "cartridge-direct-arm"
-            || fixture.bios_required
+            || (fixture.bios_required
+                != matches!(fixture.verification, Verification::Diagnostic(_)))
             || fixture.max_instructions == 0
             || fixture.max_cycles == 0
             || fixture.origin.is_empty()
@@ -224,6 +241,22 @@ fn manifest(path: &Path) -> Result<Manifest> {
             )));
         }
         match &fixture.verification {
+            Verification::Diagnostic(expected) => {
+                if expected.terminal_pc & 3 != 0
+                    || expected.terminal_instruction != 0xeafffffe
+                    || expected.result_register >= 15
+                    || expected.cpsr_mask & 0x3f != 0x3f
+                    || expected.cpsr_value & 0x20 != 0
+                    || expected.cpsr_value & !expected.cpsr_mask != 0
+                    || expected.firmware_sha256.len() != 64
+                    || expected
+                        .framebuffer_sha256
+                        .as_ref()
+                        .is_some_and(|hash| hash.len() != 64)
+                {
+                    return Err(fail("invalid diagnostic completion contract"));
+                }
+            }
             Verification::Timing(expected) => {
                 if expected.checkpoints.len() != 24
                     || expected.terminal_pc & 3 != 0
@@ -364,8 +397,58 @@ fn build_fixtures(path: &Path) -> Result<()> {
     let directory = path.parent().unwrap();
     let build = std::env::temp_dir().join(format!("gba-fixtures-{}", std::process::id()));
     fs::create_dir_all(&build)?;
+    if manifest
+        .fixture
+        .iter()
+        .any(|fixture| matches!(fixture.verification, Verification::Diagnostic(_)))
+    {
+        let object = build.join("division.o");
+        let elf = build.join("division.elf");
+        let binary = build.join("division.bin");
+        tool(
+            "arm-none-eabi-as",
+            &[
+                "-mcpu=arm7tdmi".as_ref(),
+                "-o".as_ref(),
+                object.as_os_str(),
+                root().join("roms/test-firmware/division.s").as_os_str(),
+            ],
+        )?;
+        tool(
+            "arm-none-eabi-ld",
+            &[
+                "-T".as_ref(),
+                root().join("roms/test-firmware/linker.ld").as_os_str(),
+                "-o".as_ref(),
+                elf.as_os_str(),
+                object.as_os_str(),
+            ],
+        )?;
+        tool(
+            "arm-none-eabi-objcopy",
+            &[
+                "-O".as_ref(),
+                "binary".as_ref(),
+                elf.as_os_str(),
+                binary.as_os_str(),
+            ],
+        )?;
+        let bytes = fs::read(binary)?;
+        for fixture in &manifest.fixture {
+            if let Verification::Diagnostic(expected) = &fixture.verification
+                && hash(&bytes) != expected.firmware_sha256
+            {
+                return Err(fail("rebuilt test firmware differs from frozen SHA-256"));
+            }
+        }
+        fs::write(root().join("roms/test-firmware/division.bin"), bytes)?;
+        println!("BUILT original test firmware (SWI 0x06 only)");
+    }
     for fixture in &manifest.fixture {
-        if matches!(fixture.verification, Verification::Hello(_)) {
+        if matches!(fixture.verification, Verification::Hello(_))
+            || (matches!(fixture.verification, Verification::Diagnostic(_))
+                && fixture.source.ends_with(".asm"))
+        {
             // Upstream distributes a FASMARM binary. Verify its identity rather
             // than attempting to assemble its source with GNU Arm binutils.
             load(fixture, directory)?;
@@ -448,7 +531,8 @@ fn pixels(fixture: &Fixture) -> Result<&Pixels> {
         | Verification::Palette(_)
         | Verification::Hello(_)
         | Verification::Counter(_)
-        | Verification::Timing(_) => Err(fail("expected a terminal pixels fixture")),
+        | Verification::Timing(_)
+        | Verification::Diagnostic(_) => Err(fail("expected a terminal pixels fixture")),
     }
 }
 
@@ -881,6 +965,91 @@ fn verify_timing(fixture: &Fixture, bytes: &[u8], expected: &Timing) -> Result<(
     Ok(())
 }
 
+/// Runs the pinned guest to its source-defined completion, then verifies the
+/// rendered success text after scanout. Failure results are reported by number.
+fn run_diagnostic(
+    fixture: &Fixture,
+    bytes: &[u8],
+    expected: &Diagnostic,
+    capture_path: Option<&str>,
+) -> Result<()> {
+    if hash(gba_core::TEST_FIRMWARE) != expected.firmware_sha256 {
+        return Err(fail("test firmware differs from frozen identity"));
+    }
+    let offset = expected
+        .terminal_pc
+        .checked_sub(0x08000000)
+        .ok_or_else(|| fail("terminal outside ROM"))? as usize;
+    let opcode = bytes
+        .get(offset..offset + 4)
+        .ok_or_else(|| fail("terminal outside ROM"))?;
+    if opcode != expected.terminal_instruction.to_le_bytes() {
+        return Err(fail("terminal opcode mismatch"));
+    }
+    let start = Instant::now();
+    let mut machine = Machine::new();
+    machine.load_rom(bytes)?;
+    machine.enable_test_firmware();
+    let report = machine.run_until_pc(
+        expected.terminal_pc,
+        fixture.max_instructions,
+        Cycle(fixture.max_cycles),
+    )?;
+    let completion_ms = start.elapsed().as_secs_f64() * 1000.0;
+    let result = machine.registers()[expected.result_register];
+    let successful =
+        result == expected.result && machine.cpsr() & expected.cpsr_mask == expected.cpsr_value;
+    if let Some(digest) = &expected.framebuffer_sha256 {
+        let target = Cycle((machine.cycles().0 / CYCLES_PER_FRAME + 2) * CYCLES_PER_FRAME);
+        if target.0 > fixture.max_cycles {
+            return Err(fail("diagnostic cycle limit leaves no scanout budget"));
+        }
+        machine.advance_to(
+            target,
+            fixture.max_instructions.saturating_sub(report.instructions),
+        )?;
+        let pixels: Vec<u8> = machine
+            .framebuffer()
+            .iter()
+            .flat_map(|p| p.to_le_bytes())
+            .collect();
+        if let Some(path) = capture_path {
+            capture(
+                Path::new(&format!("{path}.{}.ppm", fixture.name)),
+                machine.framebuffer(),
+            )?;
+        }
+        if successful && hash(&pixels) != *digest {
+            return Err(fail(format!(
+                "{} success framebuffer differs: {}",
+                fixture.name,
+                hash(&pixels)
+            )));
+        }
+    }
+    if !successful {
+        return Err(fail(format!(
+            "{} terminal={:#010x} failed case={} CPSR={:#010x}",
+            fixture.name,
+            expected.terminal_pc,
+            result,
+            machine.cpsr()
+        )));
+    }
+    println!(
+        "PASS {} terminal={:#010x} r{}={} cpsr={:#010x} cycles={} instructions={} completion_ms={:.3}",
+        fixture.name,
+        expected.terminal_pc,
+        expected.result_register,
+        result,
+        machine.cpsr(),
+        report.cycles.0,
+        report.instructions,
+        completion_ms
+    );
+    Ok(())
+}
+
 fn option(args: &[String], key: &str) -> Result<Option<String>> {
     match args.iter().position(|arg| arg == key) {
         Some(index) => args
@@ -916,6 +1085,17 @@ fn run() -> Result<()> {
     let manifest = manifest(&path)?;
     for fixture in &manifest.fixture {
         let bytes = load(fixture, path.parent().unwrap())?;
+        if let Verification::Diagnostic(expected) = &fixture.verification {
+            if !bench {
+                run_diagnostic(
+                    fixture,
+                    &bytes,
+                    expected,
+                    option(&args, "--capture")?.as_deref(),
+                )?;
+            }
+            continue;
+        }
         if let Verification::Timing(expected) = &fixture.verification {
             verify_timing(fixture, &bytes, expected)?;
             continue;

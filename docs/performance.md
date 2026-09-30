@@ -312,6 +312,109 @@ Pixel conversion: mean 0.239 ms | p95 0.300 ms | samples 120
 Texture submission: mean 0.037 ms | p95 0.100 ms | samples 120
 
 
+## Cartridge WAITCNT and Prefetch Timing
+
+### Fixture identity
+
+- Fixture: `cartridge.gba`
+- SHA-256: `5b4fc59af58129cad68743df97fde3fa37fd48e206c415455b16486728f9cf2c`
+- Source: `roms/cartridge/cartridge.s`
+- Total timing checkpoints: 24
+- Terminal PC: `0x08002018`
+- Completion mailbox ID: `0x0060`
+- Expected completion result: `1`
+- Maximum instructions: 2,000
+- Maximum cycles: 20,000
+
+### Expected emulated timing
+
+Values represent exact expected emulated cycles per checkpoint.
+
+| WAITCNT | Prefetch | Window | ARM (32-bit) | Thumb (16-bit) |
+|---|---|---|---:|---:|
+| 0x0000 | Disabled | WS0 | 121 | 88 |
+| 0x0000 | Disabled | WS1 | 155 | 100 |
+| 0x0000 | Disabled | WS2 | 223 | 124 |
+| 0x06DA | Disabled | WS0 | 88 | 66 |
+| 0x06DA | Disabled | WS1 | 88 | 66 |
+| 0x06DA | Disabled | WS2 | 88 | 66 |
+| 0x4000 | Enabled | WS0 | 85 | 64 |
+| 0x4000 | Enabled | WS1 | 127 | 72 |
+| 0x4000 | Enabled | WS2 | 211 | 112 |
+| 0x46DA | Enabled | WS0 | 60 | 54 |
+| 0x46DA | Enabled | WS1 | 60 | 54 |
+| 0x46DA | Enabled | WS2 | 60 | 54 |
+
+Expected values are independently derived from the documented access sequences. Physical GBA measurements have not been performed.
+
+### Verification results
+
+Complete after executing the tests:
+
+PASS counter frame=1 count=1 image_count=0 return=ARM pixels=38400
+PASS counter frame=3 count=3 image_count=2 return=ARM pixels=38400
+PASS counter frame=5 count=3 image_count=3 return=ARM pixels=38400
+PASS counter frame=7 count=5 image_count=4 return=ARM pixels=38400
+PASS counter frame=8 count=5 image_count=5 return=ARM pixels=38400
+PASS counter frame=24 count=16 image_count=16 return=ARM pixels=38400
+PASS counter cycles=6741508 instructions=668215
+PASS pixels pixels=38400 terminal=0x08000200 cycles=1905956 generation=7 execution_ms=5.335
+PASS pixels guest-store mutation changed the first band
+PASS buttons frame=1 guest=(113,72) scanout=(112,72) pixels=38400
+PASS buttons frame=3 guest=(115,72) scanout=(114,72) pixels=38400
+PASS buttons frame=5 guest=(115,74) scanout=(115,73) pixels=38400
+PASS buttons frame=8 guest=(114,73) scanout=(114,74) pixels=38400
+PASS buttons frame=9 guest=(114,73) scanout=(114,73) pixels=38400
+PASS palette frame=4 page=0 palette_changed=0 pixels=38400
+PASS palette frame=6 page=1 palette_changed=0 pixels=38400
+PASS palette frame=8 page=1 palette_changed=1 pixels=38400
+PASS hello terminal=0x08000160 cycles=561807 framebuffer_sha256=56cd131fb3915fe7e410be228a8c09e99132064799f148583636ca75745bedf7
+PASS calculations mailbox id=0x005d result=1 first_failing_case=0
+PASS calculations pixels=38400 terminal=0x08001000 cycles=1907495 generation=7 execution_ms=5.267
+PASS copy pixels=38400 terminal=0x0800a000 cycles=1687892 generation=6 execution_ms=4.626
+PASS timing WS0 width=32 WAITCNT=0x0000 cycles=121
+PASS timing WS0 width=16 WAITCNT=0x0000 cycles=88
+PASS timing WS1 width=32 WAITCNT=0x0000 cycles=155
+PASS timing WS1 width=16 WAITCNT=0x0000 cycles=100
+PASS timing WS2 width=32 WAITCNT=0x0000 cycles=223
+PASS timing WS2 width=16 WAITCNT=0x0000 cycles=124
+PASS timing WS0 width=32 WAITCNT=0x06da cycles=88
+PASS timing WS0 width=16 WAITCNT=0x06da cycles=66
+PASS timing WS1 width=32 WAITCNT=0x06da cycles=88
+PASS timing WS1 width=16 WAITCNT=0x06da cycles=66
+PASS timing WS2 width=32 WAITCNT=0x06da cycles=88
+PASS timing WS2 width=16 WAITCNT=0x06da cycles=66
+PASS timing WS0 width=32 WAITCNT=0x4000 cycles=85
+PASS timing WS0 width=16 WAITCNT=0x4000 cycles=64
+PASS timing WS1 width=32 WAITCNT=0x4000 cycles=127
+PASS timing WS1 width=16 WAITCNT=0x4000 cycles=72
+PASS timing WS2 width=32 WAITCNT=0x4000 cycles=211
+PASS timing WS2 width=16 WAITCNT=0x4000 cycles=112
+PASS timing WS0 width=32 WAITCNT=0x46da cycles=60
+PASS timing WS0 width=16 WAITCNT=0x46da cycles=54
+PASS timing WS1 width=32 WAITCNT=0x46da cycles=60
+PASS timing WS1 width=16 WAITCNT=0x46da cycles=54
+PASS timing WS2 width=32 WAITCNT=0x46da cycles=60
+PASS timing WS2 width=16 WAITCNT=0x46da cycles=54
+
+### Regression coverage
+
+Verify that the earlier pixels, calculations, bitmap-copy, and ARM/Thumb counter fixtures retain their declared functional results.
+
+### Known limitations
+
+The timing implementation is validated against the declared access sequences. This fixture does not establish correctness for every undocumented prefetch interaction or video-bus contention rule.
+
+### Reproduction
+
+```sh
+cargo run --locked -p gba-tools -- build-fixtures
+
+cargo run --locked -p gba-tools --release -- \
+    fixtures run --manifest fixtures/manifest.toml
+```
+
+
 ## update a counter through ARM and Thumb status
 
 The original bitmap-copy fixture copies a 38,400-byte indexed image through an
@@ -364,3 +467,187 @@ Texture submission: mean 0.036 ms | p95 0.100 ms | samples 120
 Core execution: mean 3.421 ms | p95 4.000 ms | samples 120
 Pixel conversion: mean 0.258 ms | p95 0.400 ms | samples 120
 Texture submission: mean 0.027 ms | p95 0.100 ms | samples 120
+
+## ARM and Thumb diagnostic programs
+
+Slice 7 verification results and user-entered measurements. The assistant fills
+all non-timing fields; only millisecond timings are reserved for manual entry.
+Existing timing values supplied by the user are preserved. Reproduction commands
+and the plan acceptance checklist are in [cpu_diagnostics.md](cpu_diagnostics.md).
+
+### Measurement conditions
+
+- Verification record updated: 2026-09-30 (Asia/Kolkata); measurement timestamps were not recorded.
+- Reference device: the Intel Core i7-13620H / Arch Linux / Hyprland environment documented above. AC/performance profile was previously recorded; it was not independently rechecked for these measurements.
+- Git baseline: `ec4de485b28b2d1357adf954469e162ba793700e`, with uncommitted Slice 7 implementation and documentation changes.
+- Native release fixture runner: passed.
+- Native application compilation: passed.
+- WASM application compilation and Trunk release browser build: passed.
+- Installed Chrome version: `153.0.8010.47` (checked 2026-09-30).
+- Installed Brave version: `153.1.95.102` (checked 2026-09-30).
+- Reference display: 1920×1080 at 60.001 Hz, scale 1, as previously recorded. Measurement-session refresh rate and browser zoom were not recorded.
+
+### Headless bounded completion
+
+All original guests and the test firmware rebuilt with their frozen hashes;
+pinned upstream binaries passed identity verification. The full release runner
+passed all earlier fixtures and all three diagnostic contracts. Each diagnostic
+is bounded by 400,000 instructions and 3,000,000 emulated cycles.
+
+| Observation | ARM | Thumb | Original services guest |
+|---|---|---|---|
+| Frozen ROM/firmware hashes verified | Passed | Passed | Passed |
+| Declared terminal address reached | `0x08001ec4` | `0x08000aac` | `0x08000400` |
+| Terminal instruction | `0xeafffffe` | `0xeafffffe` | `0xeafffffe` |
+| Failure result register | `r12 = 0` | `r7 = 0` | `r12 = 0` |
+| Full CPSR | `0x6000001f` | `0x600000df` | `0x600000df` |
+| Completion cycles | 244803 | 244771 | 1513 |
+| Instructions | 22887 | 22944 | 529 |
+| Completion host time (ms), entered by user | 1.814 | 1.742 | 0.259 |
+| Exact success framebuffer | Passed, all 38,400 pixels | Passed, all 38,400 pixels | Not applicable; service results checked in registers |
+| Full earlier-fixture regression run | Passed | Passed | Passed |
+
+`completion_ms` measures loading plus execution through the declared terminal;
+subsequent scanout, framebuffer conversion, and host upload are excluded.
+Both upstream success framebuffers have SHA-256
+`59ce42abae9825c2d2579c5cd838e47d88be917e37ea36ff162d46fc5d0991e3`.
+Full ROM and firmware hashes are recorded in `fixtures/manifest.toml` and
+[cpu_diagnostics.md](cpu_diagnostics.md#fixture-identity-and-bounded-completion).
+
+Additional verification: all 14 existing core/session tests passed; workspace
+Clippy passed with warnings denied. Injected ARM and Thumb case-1 failures were
+rejected and their exact `Failed test 001` framebuffers verified. The original
+services guest passed signed ARM division, Thumb division, and exception return.
+
+<details>
+<summary>User-supplied full release fixture output</summary>
+
+```text
+PASS counter frame=1 count=1 image_count=0 return=ARM pixels=38400
+PASS counter frame=3 count=3 image_count=2 return=ARM pixels=38400
+PASS counter frame=5 count=3 image_count=3 return=ARM pixels=38400
+PASS counter frame=7 count=5 image_count=4 return=ARM pixels=38400
+PASS counter frame=8 count=5 image_count=5 return=ARM pixels=38400
+PASS counter frame=24 count=16 image_count=16 return=ARM pixels=38400
+PASS counter cycles=6741508 instructions=668215
+PASS pixels pixels=38400 terminal=0x08000200 cycles=1905956 generation=7 execution_ms=9.748
+PASS pixels guest-store mutation changed the first band
+PASS buttons frame=1 guest=(113,72) scanout=(112,72) pixels=38400
+PASS buttons frame=3 guest=(115,72) scanout=(114,72) pixels=38400
+PASS buttons frame=5 guest=(115,74) scanout=(115,73) pixels=38400
+PASS buttons frame=8 guest=(114,73) scanout=(114,74) pixels=38400
+PASS buttons frame=9 guest=(114,73) scanout=(114,73) pixels=38400
+PASS palette frame=4 page=0 palette_changed=0 pixels=38400
+PASS palette frame=6 page=1 palette_changed=0 pixels=38400
+PASS palette frame=8 page=1 palette_changed=1 pixels=38400
+PASS hello terminal=0x08000160 cycles=561807 framebuffer_sha256=56cd131fb3915fe7e410be228a8c09e99132064799f148583636ca75745bedf7
+PASS calculations mailbox id=0x005d result=1 first_failing_case=0
+PASS calculations pixels=38400 terminal=0x08001000 cycles=1907495 generation=7 execution_ms=9.916
+PASS copy pixels=38400 terminal=0x0800a000 cycles=1687892 generation=6 execution_ms=8.779
+PASS timing WS0 width=32 WAITCNT=0x0000 cycles=121
+PASS timing WS0 width=16 WAITCNT=0x0000 cycles=88
+PASS timing WS1 width=32 WAITCNT=0x0000 cycles=155
+PASS timing WS1 width=16 WAITCNT=0x0000 cycles=100
+PASS timing WS2 width=32 WAITCNT=0x0000 cycles=223
+PASS timing WS2 width=16 WAITCNT=0x0000 cycles=124
+PASS timing WS0 width=32 WAITCNT=0x06da cycles=88
+PASS timing WS0 width=16 WAITCNT=0x06da cycles=66
+PASS timing WS1 width=32 WAITCNT=0x06da cycles=88
+PASS timing WS1 width=16 WAITCNT=0x06da cycles=66
+PASS timing WS2 width=32 WAITCNT=0x06da cycles=88
+PASS timing WS2 width=16 WAITCNT=0x06da cycles=66
+PASS timing WS0 width=32 WAITCNT=0x4000 cycles=85
+PASS timing WS0 width=16 WAITCNT=0x4000 cycles=64
+PASS timing WS1 width=32 WAITCNT=0x4000 cycles=127
+PASS timing WS1 width=16 WAITCNT=0x4000 cycles=72
+PASS timing WS2 width=32 WAITCNT=0x4000 cycles=211
+PASS timing WS2 width=16 WAITCNT=0x4000 cycles=112
+PASS timing WS0 width=32 WAITCNT=0x46da cycles=60
+PASS timing WS0 width=16 WAITCNT=0x46da cycles=54
+PASS timing WS1 width=32 WAITCNT=0x46da cycles=60
+PASS timing WS1 width=16 WAITCNT=0x46da cycles=54
+PASS timing WS2 width=32 WAITCNT=0x46da cycles=60
+PASS timing WS2 width=16 WAITCNT=0x46da cycles=54
+PASS arm terminal=0x08001ec4 r12=0 cpsr=0x6000001f cycles=244803 instructions=22887 completion_ms=1.814
+PASS thumb terminal=0x08000aac r7=0 cpsr=0x600000df cycles=244771 instructions=22944 completion_ms=1.742
+PASS services terminal=0x08000400 r12=0 cpsr=0x600000df cycles=1513 instructions=529 completion_ms=0.259
+```
+
+</details>
+
+### Native Linux
+
+| Observation | ARM | Thumb |
+|---|---|---|
+| `All tests passed` visually verified | Pending; no observation supplied | Pending; no observation supplied |
+| Reset reruns successfully | Pending; no observation supplied | Pending; no observation supplied |
+| Pause/resume and resize verified | Pending; no observation supplied | Pending; no observation supplied |
+| Earlier scenes regression checked in this application | Pending; no observation supplied | Pending; no observation supplied |
+
+User-entered timing record (the diagnostic was not identified in the supplied
+record; these values are not assigned to both ROMs):
+
+```text
+Core execution: mean 2.811 ms | p95 3.575 ms | samples 120
+Pixel conversion: mean 0.149 ms | p95 0.204 ms | samples 120
+Texture submission: mean 0.032 ms | p95 0.047 ms | samples 120
+```
+
+- Recorded sample counts (core / conversion / upload): `120 / 120 / 120`.
+
+### Google Chrome
+
+| Observation | ARM | Thumb |
+|---|---|---|
+| `All tests passed` visually verified | Pending; no observation supplied | Pending; no observation supplied |
+| Reset reruns successfully | Pending; no observation supplied | Pending; no observation supplied |
+| Pause/resume and resize verified | Pending; no observation supplied | Pending; no observation supplied |
+| Focus loss / hidden-tab restore verified | Pending; no observation supplied | Pending; no observation supplied |
+| Earlier scenes regression checked in this application | Pending; no observation supplied | Pending; no observation supplied |
+
+User-entered timing record (the diagnostic was not identified in the supplied
+record; these values are not assigned to both ROMs):
+
+```text
+Core execution: mean 4.252 ms | p95 5.100 ms | samples 120
+Pixel conversion: mean 0.273 ms | p95 0.400 ms | samples 120
+Texture submission: mean 0.043 ms | p95 0.100 ms | samples 120
+```
+
+- Recorded sample counts (core / conversion / upload): `120 / 120 / 120`.
+
+### Brave
+
+| Observation | ARM | Thumb |
+|---|---|---|
+| `All tests passed` visually verified | Pending; no observation supplied | Pending; no observation supplied |
+| Reset reruns successfully | Pending; no observation supplied | Pending; no observation supplied |
+| Pause/resume and resize verified | Pending; no observation supplied | Pending; no observation supplied |
+| Focus loss / hidden-tab restore verified | Pending; no observation supplied | Pending; no observation supplied |
+| Earlier scenes regression checked in this application | Pending; no observation supplied | Pending; no observation supplied |
+
+User-entered timing record (the diagnostic was not identified in the supplied
+record; these values are not assigned to both ROMs):
+
+```text
+Core execution: mean 4.207 ms | p95 4.700 ms | samples 120
+Pixel conversion: mean 0.253 ms | p95 0.300 ms | samples 120
+Texture submission: mean 0.045 ms | p95 0.100 ms | samples 120
+```
+
+- Recorded sample counts (core / conversion / upload): `120 / 120 / 120`.
+
+### Evidence limits and captures
+
+- Automated Slice 7 completion and earlier-fixture regressions: passed.
+- Linux, Chrome, and Brave visual acceptance: pending. Timing records do not independently confirm successful diagnostic screens, Reset, focus handling, or earlier-scene checks.
+- Known limits: original firmware supports only test SWI 0x06; unsupported services and divide-by-zero trap. No retail BIOS compatibility or physical-hardware timing equivalence is claimed.
+- Native/browser screenshots: none supplied.
+- Headless success captures: `/tmp/gba-diagnostic-results/frame.arm.ppm` and `/tmp/gba-diagnostic-results/frame.thumb.ppm` (files present when this record was updated).
+- Full runner transcript: `/tmp/gba-diagnostic-results/headless.txt`.
+- These `/tmp` artifacts are temporary; the fixture commands reproduce them.
+
+Collect each Performance panel after selecting that diagnostic and reaching 120
+samples. These are steady result-screen callback costs; the guest is already
+looping at its terminal. Keep them distinct from headless completion cost.
+Future entries should identify ARM or Thumb alongside each timing record.

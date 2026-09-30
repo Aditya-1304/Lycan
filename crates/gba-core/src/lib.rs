@@ -66,6 +66,9 @@ pub const SCREEN_HEIGHT: usize = 160;
 /// Number of 16-bit pixels in one GBA framebuffer.
 pub const FRAMEBUFFER_PIXELS: usize = SCREEN_WIDTH * SCREEN_HEIGHT;
 
+/// Original division firmware, never a replacement for the retail BIOS.
+pub const TEST_FIRMWARE: &[u8] = include_bytes!("../../../roms/test-firmware/division.bin");
+
 const ROM_START: u32 = 0x0800_0000;
 const MAX_ROM_BYTES: usize = 32 * 1024 * 1024;
 const EWRAM_START: u32 = 0x0200_0000;
@@ -145,7 +148,7 @@ impl fmt::Display for CoreError {
                 instruction,
             } => write!(
                 formatter,
-                "unsupported ARM instruction {instruction:#010x} at {address:#010x}"
+                "unsupported CPU instruction {instruction:#010x} at {address:#010x}"
             ),
         }
     }
@@ -251,6 +254,12 @@ struct Cpu {
     pipeline_valid: bool,
     next_fetch_is_sequential: bool,
     cpsr: u32,
+    /// User/system and FIQ banks hold r8-r14 across mode changes.
+    user_bank: [u32; 7],
+    fiq_bank: [u32; 7],
+    /// IRQ, supervisor, abort, and undefined modes bank SP/LR and SPSR.
+    exception_banks: [[u32; 2]; 4],
+    saved_status: [u32; 5],
 }
 
 impl Cpu {
@@ -266,7 +275,105 @@ impl Cpu {
             pipeline_valid: false,
             next_fetch_is_sequential: true,
             cpsr: CONTROLLED_START_CPSR,
+            user_bank: [0; 7],
+            fiq_bank: [0; 7],
+            exception_banks: [[0; 2]; 4],
+            saved_status: [0; 5],
         }
+    }
+
+    /// Returns the privileged bank index; user and system share one bank.
+    fn status_bank(mode: u32) -> Option<usize> {
+        match mode & 31 {
+            0x11 => Some(0),
+            0x12 => Some(1),
+            0x13 => Some(2),
+            0x17 => Some(3),
+            0x1b => Some(4),
+            _ => None,
+        }
+    }
+
+    /// Saves outgoing banked registers before exposing the incoming mode.
+    fn set_status(&mut self, value: u32) {
+        let old = Self::status_bank(self.cpsr);
+        let new = Self::status_bank(value);
+        if old != new {
+            if old == Some(0) {
+                self.fiq_bank.copy_from_slice(&self.registers[8..15]);
+                self.registers[8..15].copy_from_slice(&self.user_bank);
+            } else {
+                self.user_bank[..5].copy_from_slice(&self.registers[8..13]);
+                if let Some(bank) = old {
+                    self.exception_banks[bank - 1].copy_from_slice(&self.registers[13..15]);
+                } else {
+                    self.user_bank[5..].copy_from_slice(&self.registers[13..15]);
+                }
+            }
+            if new == Some(0) {
+                self.registers[8..15].copy_from_slice(&self.fiq_bank);
+            } else if let Some(bank) = new {
+                self.registers[13..15].copy_from_slice(&self.exception_banks[bank - 1]);
+            } else {
+                self.registers[13..15].copy_from_slice(&self.user_bank[5..]);
+            }
+        }
+        self.cpsr = value;
+    }
+
+    /// MRS/MSR apply byte-field masks and privilege rules before ALU decoding.
+    fn execute_status_transfer(&mut self, instruction: u32) -> bool {
+        let saved = instruction & (1 << 22) != 0;
+        if instruction & 0x0fbf_0fff == 0x010f_0000 {
+            let rd = ((instruction >> 12) & 15) as usize;
+            self.registers[rd] = if saved {
+                Self::status_bank(self.cpsr).map_or(self.cpsr, |b| self.saved_status[b])
+            } else {
+                self.cpsr
+            };
+            return true;
+        }
+        if instruction & 0x0db0_f000 != 0x0120_f000 {
+            return false;
+        }
+        let value = if instruction & (1 << 25) != 0 {
+            (instruction & 255).rotate_right(((instruction >> 8) & 15) * 2)
+        } else {
+            self.registers[(instruction & 15) as usize]
+        };
+        let mut mask = 0;
+        for byte in 0..4 {
+            if instruction & (1 << (16 + byte)) != 0 {
+                mask |= 255 << (byte * 8);
+            }
+        }
+        if saved {
+            if let Some(bank) = Self::status_bank(self.cpsr) {
+                self.saved_status[bank] = (self.saved_status[bank] & !mask) | (value & mask);
+            }
+        } else {
+            if self.cpsr & 31 == 0x10 {
+                mask &= 0xff00_0000;
+            }
+            // ARMv4 MSR cannot switch instruction sets; exception return can.
+            mask &= !CPSR_T;
+            self.set_status((self.cpsr & !mask) | (value & mask));
+        }
+        true
+    }
+
+    /// SWI enters supervisor ARM state, banks LR/SP, and maps the return
+    /// state through SPSR. Service execution remains ordinary guest code.
+    fn software_interrupt<B: CpuBus>(
+        &mut self,
+        bus: &mut B,
+        return_address: u32,
+    ) -> Result<(), CoreError> {
+        let status = self.cpsr;
+        self.set_status((status & !(31 | CPSR_T)) | 0x13 | CPSR_I);
+        self.saved_status[2] = status;
+        self.registers[14] = return_address;
+        self.branch(bus, 8, false)
     }
 
     /// Fills the two-stage instruction pipeline after reset or a taken branch.
@@ -354,7 +461,9 @@ impl Cpu {
         if !self.condition_passes(instruction >> 28) {
             return Ok(StepOutcome { address });
         }
-        if instruction & 0x0fff_fff0 == 0x012f_ff10 {
+        if instruction & 0x0f00_0000 == 0x0f00_0000 {
+            self.software_interrupt(bus, address.wrapping_add(4))?;
+        } else if instruction & 0x0fff_fff0 == 0x012f_ff10 {
             let source = (instruction & 15) as usize;
             let target = if source == 15 {
                 address.wrapping_add(8)
@@ -370,17 +479,28 @@ impl Cpu {
             let target = address.wrapping_add(8).wrapping_add(offset as u32);
             self.registers[15] = target;
             self.refill(bus)?;
+        } else if self.execute_status_transfer(instruction) {
+            // Status transfers update the selected register bank atomically.
         } else if self.execute_multiply(instruction, bus) {
             // Multiply timing adds internal cycles to the already charged fetch.
         } else if self.execute_data_processing(address, instruction) {
-            // The immediate shifts used here require no additional idle cycle.
-        } else if self.execute_word_transfer(address, instruction, bus)?
+            if instruction & (1 << 25) == 0 && instruction & (1 << 4) != 0 {
+                bus.idle(1);
+            }
+            if (instruction >> 12) & 15 == 15 && !matches!((instruction >> 21) & 15, 8..=11) {
+                self.branch(bus, self.registers[15], false)?;
+            }
+        } else if self.execute_swap(instruction, bus)?
+            || self.execute_word_transfer(address, instruction, bus)?
             || self.execute_block_transfer(address, instruction, bus)?
             || self.execute_halfword(address, instruction, bus)?
         {
             // A data access breaks fetch sequentiality, except when an LDM
             // return already refilled the pipeline at its new instruction PC.
-            let loaded_pc = instruction & 0x0E10_8000 == 0x0810_8000;
+            let loaded_pc = instruction & (1 << 20) != 0
+                && ((instruction & 0x0e00_0000 == 0x0800_0000 && instruction & 0x8000 != 0)
+                    || (instruction & 0x0c00_0000 == 0x0400_0000
+                        && (instruction >> 12) & 15 == 15));
             self.next_fetch_is_sequential = loaded_pc;
         } else {
             return Err(CoreError::UnsupportedInstruction {
@@ -391,9 +511,8 @@ impl Cpu {
         Ok(StepOutcome { address })
     }
 
-    /// Implements the counter's Thumb bridge using the same ALU flag rules and
-    /// timed bus as ARM. Unsupported families remain explicit errors until a
-    /// later diagnostic reproduces their need; no host-side counter is used.
+    /// Decodes ARMv4T Thumb forms into the shared ALU, transfer, and pipeline
+    /// paths. Unsupported encodings remain explicit execution errors.
     fn execute_thumb<B: CpuBus>(
         &mut self,
         address: u32,
@@ -416,6 +535,15 @@ impl Cpu {
                 | (((op >> 6) & 31) << 7)
                 | rn as u32;
             self.execute_data_processing(address, arm);
+        } else if op & 0xf800 == 0x1800 {
+            let operand = (op >> 6) & 7;
+            let arm = (if op & 0x0400 != 0 { 1 << 25 } else { 0 })
+                | ((if op & 0x0200 != 0 { 2 } else { 4 }) << 21)
+                | (1 << 20)
+                | ((rn as u32) << 16)
+                | ((rd as u32) << 12)
+                | operand;
+            self.execute_data_processing(address, arm);
         } else if op & 0xe000 == 0x2000 {
             let destination = (op >> 8) & 7;
             let opcode = [13, 10, 4, 2][((op >> 11) & 3) as usize];
@@ -426,6 +554,37 @@ impl Cpu {
                 | (destination << 12)
                 | (op & 255);
             self.execute_data_processing(address, arm);
+        } else if op & 0xfc00 == 0x4000 {
+            let operation = (op >> 6) & 15;
+            if matches!(operation, 2..=4 | 7) {
+                let kind = if operation == 7 { 3 } else { operation - 2 };
+                let arm = (13 << 21)
+                    | (1 << 20)
+                    | ((rd as u32) << 12)
+                    | ((rn as u32) << 8)
+                    | (kind << 5)
+                    | (1 << 4)
+                    | rd as u32;
+                self.execute_data_processing(address, arm);
+                bus.idle(1);
+            } else if operation == 13 {
+                let arm = (1 << 20) | ((rd as u32) << 16) | ((rn as u32) << 8) | 0x90 | rd as u32;
+                self.execute_multiply(arm, bus);
+            } else {
+                let opcode =
+                    [0, 1, 0, 0, 0, 5, 6, 0, 8, 3, 10, 11, 12, 0, 14, 15][operation as usize];
+                let arm = (opcode << 21)
+                    | (1 << 20)
+                    | rn as u32
+                    | ((rd as u32) << 16)
+                    | ((rd as u32) << 12);
+                let arm = if operation == 9 {
+                    (arm & !0x000f_000f) | (1 << 25) | ((rn as u32) << 16)
+                } else {
+                    arm
+                };
+                self.execute_data_processing(address, arm);
+            }
         } else if op & 0xfc00 == 0x4400 {
             let destination = ((op & 7) | ((op >> 4) & 8)) as usize;
             let source = ((op >> 3) & 15) as usize;
@@ -469,22 +628,67 @@ impl Cpu {
             self.registers[((op >> 8) & 7) as usize] = bus.read32(target, access)?;
             bus.idle(1);
             self.next_fetch_is_sequential = false;
-        } else if op & 0xf000 == 0x6000 || op & 0xf000 == 0x8000 {
+        } else if op & 0xf000 == 0x5000 {
+            let target = self.registers[rn].wrapping_add(self.registers[((op >> 6) & 7) as usize]);
+            match (op >> 9) & 7 {
+                0 => bus.write32(target & !3, self.registers[rd], access)?,
+                1 => bus.write16(target & !1, self.registers[rd] as u16, access)?,
+                2 => bus.write8(target, self.registers[rd] as u8, access)?,
+                3 => self.registers[rd] = self.load_halfword_signed(bus, target, 2, access)?,
+                4 => {
+                    self.registers[rd] = bus
+                        .read32(target & !3, access)?
+                        .rotate_right((target & 3) * 8)
+                }
+                5 => self.registers[rd] = self.load_halfword_signed(bus, target, 1, access)?,
+                6 => self.registers[rd] = u32::from(bus.read8(target, access)?),
+                7 => self.registers[rd] = self.load_halfword_signed(bus, target, 3, access)?,
+                _ => unreachable!("three-bit transfer kind"),
+            }
+            if op & 0x0800 != 0 || op & 0x0e00 == 0x0600 {
+                bus.idle(1);
+            }
+            self.next_fetch_is_sequential = false;
+        } else if op & 0xe000 == 0x6000 || op & 0xf000 == 0x8000 {
             let halfword = op & 0xf000 == 0x8000;
-            let offset = ((op >> 6) & 31) * if halfword { 2 } else { 4 };
+            let byte = !halfword && op & 0x1000 != 0;
+            let offset = ((op >> 6) & 31)
+                * if halfword {
+                    2
+                } else if byte {
+                    1
+                } else {
+                    4
+                };
             let target = self.registers[rn].wrapping_add(offset);
             if op & 0x0800 != 0 {
                 self.registers[rd] = if halfword {
-                    u32::from(bus.read16(target, access)?)
+                    self.load_halfword_signed(bus, target, 1, access)?
+                } else if byte {
+                    u32::from(bus.read8(target, access)?)
                 } else {
                     bus.read32(target & !3, access)?
                         .rotate_right((target & 3) * 8)
                 };
                 bus.idle(1);
             } else if halfword {
-                bus.write16(target, self.registers[rd] as u16, access)?;
+                bus.write16(target & !1, self.registers[rd] as u16, access)?;
+            } else if byte {
+                bus.write8(target, self.registers[rd] as u8, access)?;
             } else {
                 bus.write32(target & !3, self.registers[rd], access)?;
+            }
+            self.next_fetch_is_sequential = false;
+        } else if op & 0xf000 == 0x9000 {
+            let target = self.registers[13].wrapping_add((op & 255) * 4);
+            let register = ((op >> 8) & 7) as usize;
+            if op & 0x0800 != 0 {
+                self.registers[register] = bus
+                    .read32(target & !3, access)?
+                    .rotate_right((target & 3) * 8);
+                bus.idle(1);
+            } else {
+                bus.write32(target & !3, self.registers[register], access)?;
             }
             self.next_fetch_is_sequential = false;
         } else if op & 0xf000 == 0xa000 {
@@ -494,6 +698,36 @@ impl Cpu {
                 self.registers[13]
             };
             self.registers[((op >> 8) & 7) as usize] = base.wrapping_add((op & 255) * 4);
+        } else if op & 0xf600 == 0xb400 {
+            let load = op & 0x0800 != 0;
+            let list = (op & 255)
+                | if op & 0x0100 != 0 {
+                    1 << if load { 15 } else { 14 }
+                } else {
+                    0
+                };
+            let arm = 0x0800_0000
+                | (13 << 16)
+                | (1 << 21)
+                | list
+                | if load { (1 << 23) | (1 << 20) } else { 1 << 24 };
+            self.execute_block_transfer(address, arm, bus)?;
+            self.next_fetch_is_sequential = load && list & (1 << 15) != 0;
+        } else if op & 0xf000 == 0xc000 {
+            let list = op & 255;
+            let load = op & 0x0800 != 0;
+            let arm = 0x08a0_0000 | (((op >> 8) & 7) << 16) | list | if load { 1 << 20 } else { 0 };
+            self.execute_block_transfer(address, arm, bus)?;
+            self.next_fetch_is_sequential = load && list == 0;
+        } else if op & 0xff00 == 0xb000 {
+            let offset = (op & 127) * 4;
+            self.registers[13] = if op & 128 == 0 {
+                self.registers[13].wrapping_add(offset)
+            } else {
+                self.registers[13].wrapping_sub(offset)
+            };
+        } else if op & 0xff00 == 0xdf00 {
+            self.software_interrupt(bus, address.wrapping_add(2))?;
         } else if op & 0xf000 == 0xd000 && (op >> 8) & 15 < 14 {
             if self.condition_passes((op >> 8) & 15) {
                 let offset = (instruction as u8 as i8 as i32) * 2;
@@ -554,13 +788,13 @@ impl Cpu {
         }
     }
 
-    /// Executes immediate and immediate-shifted ARM ALU operations. Arithmetic
-    /// uses one wide addition rule for carry and signed overflow; logical
-    /// operations preserve V and take C from the barrel shifter. Register-
-    /// controlled shifts and PC writes remain outside the current guest scope.
+    /// Executes ARM ALU operations with immediate or register-controlled shifts.
+    /// Arithmetic shares carry/overflow rules; logical operations preserve V.
+    /// S-bit PC destinations restore SPSR, including legacy comparison forms;
+    /// only operations writing PC redirect execution and refill the pipeline.
     fn execute_data_processing(&mut self, address: u32, instruction: u32) -> bool {
         if instruction & 0x0C00_0000 != 0
-            || (instruction & (1 << 25) == 0 && instruction & (1 << 4) != 0)
+            || (instruction & (1 << 25) == 0 && instruction & 0x90 == 0x90)
         {
             return false;
         }
@@ -570,12 +804,13 @@ impl Cpu {
             return false;
         }
         let destination = ((instruction >> 12) & 15) as usize;
-        if destination == 15 {
-            return false;
-        }
         let source = ((instruction >> 16) & 15) as usize;
         let lhs = if source == 15 {
-            address.wrapping_add(8)
+            address.wrapping_add(if instruction & 0x0200_0010 == 0x10 {
+                12
+            } else {
+                8
+            })
         } else {
             self.registers[source]
         };
@@ -597,7 +832,22 @@ impl Cpu {
             } else {
                 self.registers[source]
             };
-            self.shift_immediate(value, (instruction >> 5) & 3, (instruction >> 7) & 31)
+            if instruction & (1 << 4) != 0 {
+                let value = if source == 15 {
+                    address.wrapping_add(12)
+                } else {
+                    value
+                };
+                let rs = ((instruction >> 8) & 15) as usize;
+                let amount = if rs == 15 {
+                    address.wrapping_add(8)
+                } else {
+                    self.registers[rs]
+                } & 255;
+                self.shift_register(value, (instruction >> 5) & 3, amount)
+            } else {
+                self.shift_immediate(value, (instruction >> 5) & 3, (instruction >> 7) & 31)
+            }
         };
         let carry_in = u32::from(self.cpsr & CPSR_C != 0);
         let arithmetic = match opcode {
@@ -631,7 +881,11 @@ impl Cpu {
             };
             (result, shifter_carry, false)
         };
-        if set_flags {
+        if set_flags && destination == 15 {
+            if let Some(bank) = Self::status_bank(self.cpsr) {
+                self.set_status(self.saved_status[bank]);
+            }
+        } else if set_flags {
             self.cpsr &= !(CPSR_N | CPSR_Z);
             if result & 0x8000_0000 != 0 {
                 self.cpsr |= CPSR_N;
@@ -657,6 +911,29 @@ impl Cpu {
         true
     }
 
+    /// Register shifts use an eight-bit count, preserving carry at zero and
+    /// handling counts at or beyond the word width without host overshifts.
+    fn shift_register(&self, value: u32, kind: u32, amount: u32) -> (u32, bool) {
+        if amount == 0 {
+            return (value, self.cpsr & CPSR_C != 0);
+        }
+        match kind {
+            0 if amount < 32 => (value << amount, value & (1 << (32 - amount)) != 0),
+            0 => (0, amount == 32 && value & 1 != 0),
+            1 if amount < 32 => (value >> amount, value & (1 << (amount - 1)) != 0),
+            1 => (0, amount == 32 && value >> 31 != 0),
+            2 => (
+                ((value as i32) >> amount.min(31)) as u32,
+                value & (1 << (amount.min(32) - 1)) != 0,
+            ),
+            3 => {
+                let result = value.rotate_right(amount);
+                (result, result >> 31 != 0)
+            }
+            _ => unreachable!("two-bit shift kind"),
+        }
+    }
+
     /// Decodes ARM immediate shifts, including the zero encodings for shifts
     /// by 32 and RRX. The carry result is used only when the ALU updates flags.
     fn shift_immediate(&self, value: u32, kind: u32, amount: u32) -> (u32, bool) {
@@ -674,9 +951,44 @@ impl Cpu {
         }
     }
 
-    /// MUL/MLA supply the text routine's row offset through ordinary CPU
-    /// arithmetic. Timing follows ARM7 early termination of the multiplier.
+    /// Executes short and signed/unsigned long multiplies, including accumulate
+    /// forms. Internal timing follows ARM7 multiplier early termination.
     fn execute_multiply<B: CpuBus>(&mut self, instruction: u32, bus: &mut B) -> bool {
+        if instruction & 0x0f80_00f0 == 0x0080_0090 {
+            let hi = ((instruction >> 16) & 15) as usize;
+            let lo = ((instruction >> 12) & 15) as usize;
+            let rs = ((instruction >> 8) & 15) as usize;
+            let rm = (instruction & 15) as usize;
+            let signed = instruction & (1 << 22) != 0;
+            let accumulate = instruction & (1 << 21) != 0;
+            let multiplier = self.registers[rs];
+            let mut result = if signed {
+                (i64::from(self.registers[rm] as i32) * i64::from(multiplier as i32)) as u64
+            } else {
+                u64::from(self.registers[rm]) * u64::from(multiplier)
+            };
+            if accumulate {
+                result = result.wrapping_add(
+                    (u64::from(self.registers[hi]) << 32) | u64::from(self.registers[lo]),
+                );
+            }
+            self.registers[lo] = result as u32;
+            self.registers[hi] = (result >> 32) as u32;
+            if instruction & (1 << 20) != 0 {
+                self.cpsr = (self.cpsr & !(CPSR_N | CPSR_Z))
+                    | if result >> 63 != 0 { CPSR_N } else { 0 }
+                    | if result == 0 { CPSR_Z } else { 0 };
+            }
+            let iterations = [8_u32, 16, 24]
+                .into_iter()
+                .find(|bits| {
+                    let upper = multiplier >> bits;
+                    upper == 0 || (signed && (multiplier as i32) >> bits == -1)
+                })
+                .map_or(4, |bits| bits / 8);
+            bus.idle(u64::from(iterations) + 1 + u64::from(accumulate));
+            return true;
+        }
         if instruction & 0x0FC0_00F0 != 0x0000_0090 {
             return false;
         }
@@ -710,16 +1022,48 @@ impl Cpu {
         true
     }
 
-    /// Handles immediate-offset byte and word transfers through the timed bus.
-    /// Word loads rotate unaligned data; stores discard the low address bits.
-    /// Shifted register offsets and privileged transfers remain deferred.
+    /// SWP snapshots the source before the read so overlapping operands retain
+    /// the stored value. The word read rotates; the write aligns down.
+    fn execute_swap<B: CpuBus>(
+        &mut self,
+        instruction: u32,
+        bus: &mut B,
+    ) -> Result<bool, CoreError> {
+        if instruction & 0x0fb0_0ff0 != 0x0100_0090 {
+            return Ok(false);
+        }
+        let target = self.registers[((instruction >> 16) & 15) as usize];
+        let source = self.registers[(instruction & 15) as usize];
+        let rd = ((instruction >> 12) & 15) as usize;
+        let access = Access {
+            kind: AccessKind::Data,
+            sequential: false,
+        };
+        self.registers[rd] = if instruction & (1 << 22) != 0 {
+            let value = bus.read8(target, access)?;
+            bus.write8(target, source as u8, access)?;
+            u32::from(value)
+        } else {
+            let value = bus
+                .read32(target & !3, access)?
+                .rotate_right((target & 3) * 8);
+            bus.write32(target & !3, source, access)?;
+            value
+        };
+        bus.idle(1);
+        Ok(true)
+    }
+
+    /// Handles immediate and shifted-register byte/word transfers. Word loads
+    /// rotate unaligned data; stores align down. Load/base overlap suppresses
+    /// writeback, and a loaded PC retains state while refilling the pipeline.
     fn execute_word_transfer<B: CpuBus>(
         &mut self,
         address: u32,
         instruction: u32,
         bus: &mut B,
     ) -> Result<bool, CoreError> {
-        if instruction & 0x0E00_0000 != 0x0400_0000 {
+        if instruction & 0x0C00_0000 != 0x0400_0000 {
             return Ok(false);
         }
         let byte = instruction & (1 << 22) != 0;
@@ -728,10 +1072,7 @@ impl Cpu {
         let pre = instruction & (1 << 24) != 0;
         let writeback = instruction & (1 << 21) != 0 || !pre;
         let load = instruction & (1 << 20) != 0;
-        if rd == 15
-            || (writeback && (rn == 15 || (load && rn == rd)))
-            || (!pre && instruction & (1 << 21) != 0)
-        {
+        if writeback && rn == 15 {
             return Ok(false);
         }
         let base = if rn == 15 {
@@ -739,7 +1080,21 @@ impl Cpu {
         } else {
             self.registers[rn]
         };
-        let offset = instruction & 0xfff;
+        let offset = if instruction & (1 << 25) != 0 {
+            if instruction & (1 << 4) != 0 {
+                return Ok(false);
+            }
+            let rm = (instruction & 15) as usize;
+            let value = if rm == 15 {
+                address.wrapping_add(8)
+            } else {
+                self.registers[rm]
+            };
+            self.shift_immediate(value, (instruction >> 5) & 3, (instruction >> 7) & 31)
+                .0
+        } else {
+            instruction & 0xfff
+        };
         let updated = if instruction & (1 << 23) != 0 {
             base.wrapping_add(offset)
         } else {
@@ -759,38 +1114,76 @@ impl Cpu {
             };
             bus.idle(1);
         } else {
-            if byte {
-                bus.write8(target, self.registers[rd] as u8, access)?;
+            let value = if rd == 15 {
+                address.wrapping_add(12)
             } else {
-                bus.write32(target & !3, self.registers[rd], access)?;
+                self.registers[rd]
+            };
+            if byte {
+                bus.write8(target, value as u8, access)?;
+            } else {
+                bus.write32(target & !3, value, access)?;
             }
         }
-        if writeback {
+        if writeback && !(load && rn == rd) {
             self.registers[rn] = updated;
+        }
+        if load && rd == 15 {
+            self.branch(bus, self.registers[15], false)?;
         }
         Ok(true)
     }
 
-    /// Transfers ascending register numbers to ascending addresses for ARM
-    /// stack and glyph-data operations. A loaded PC refills the ARM pipeline;
-    /// exception-return/user-bank and unpredictable forms are deferred.
+    /// User-bank transfers bypass only registers banked by the active mode.
+    fn read_user_register(&self, register: usize) -> u32 {
+        if (8..15).contains(&register)
+            && (Self::status_bank(self.cpsr) == Some(0)
+                || (register >= 13 && Self::status_bank(self.cpsr).is_some()))
+        {
+            self.user_bank[register - 8]
+        } else {
+            self.registers[register]
+        }
+    }
+
+    /// Writes the user bank without changing CPSR or the currently visible bank.
+    fn write_user_register(&mut self, register: usize, value: u32) {
+        if (8..15).contains(&register)
+            && (Self::status_bank(self.cpsr) == Some(0)
+                || (register >= 13 && Self::status_bank(self.cpsr).is_some()))
+        {
+            self.user_bank[register - 8] = value;
+        } else {
+            self.registers[register] = value;
+        }
+    }
+
+    /// Shares ARM/Thumb block-transfer semantics: ascending register order,
+    /// aligned bus beats with unaligned base writeback, ARM7 empty-list behavior,
+    /// and user-bank transfers or SPSR restoration when the S bit is present.
     fn execute_block_transfer<B: CpuBus>(
         &mut self,
         address: u32,
         instruction: u32,
         bus: &mut B,
     ) -> Result<bool, CoreError> {
-        if instruction & 0x0E40_0000 != 0x0800_0000 {
+        if instruction & 0x0E00_0000 != 0x0800_0000 {
             return Ok(false);
         }
         let rn = ((instruction >> 16) & 15) as usize;
-        let list = instruction & 0xffff;
+        let raw_list = instruction & 0xffff;
+        let list = if raw_list == 0 { 1 << 15 } else { raw_list };
+        let user = instruction & (1 << 22) != 0;
         let load = instruction & (1 << 20) != 0;
         let writeback = instruction & (1 << 21) != 0;
-        if rn == 15 || list == 0 || (writeback && list & (1 << rn) != 0) {
+        if rn == 15 {
             return Ok(false);
         }
-        let bytes = list.count_ones() * 4;
+        let bytes = if raw_list == 0 {
+            64
+        } else {
+            list.count_ones() * 4
+        };
         let base = self.registers[rn];
         let up = instruction & (1 << 23) != 0;
         let pre = instruction & (1 << 24) != 0;
@@ -814,26 +1207,37 @@ impl Cpu {
                 sequential,
             };
             if load {
-                self.registers[register] = bus.read32(target, access)?;
+                let value = bus.read32(target & !3, access)?;
+                if user && list & (1 << 15) == 0 {
+                    self.write_user_register(register, value);
+                } else {
+                    self.registers[register] = value;
+                }
             } else {
                 let value = if register == 15 {
-                    address.wrapping_add(12)
+                    address.wrapping_add(if self.cpsr & CPSR_T != 0 { 6 } else { 12 })
+                } else if register == rn && writeback && list.trailing_zeros() as usize != rn {
+                    updated
+                } else if user {
+                    self.read_user_register(register)
                 } else {
                     self.registers[register]
                 };
-                bus.write32(target, value, access)?;
+                bus.write32(target & !3, value, access)?;
             }
             target = target.wrapping_add(4);
             sequential = true;
         }
-        if writeback {
+        if writeback && !(load && list & (1 << rn) != 0) {
             self.registers[rn] = updated;
         }
         if load {
             bus.idle(1);
             if list & (1 << 15) != 0 {
-                self.registers[15] &= !3;
-                self.refill(bus)?;
+                if user && let Some(bank) = Self::status_bank(self.cpsr) {
+                    self.set_status(self.saved_status[bank]);
+                }
+                self.branch(bus, self.registers[15], false)?;
             }
         }
         Ok(true)
@@ -847,7 +1251,7 @@ impl Cpu {
         instruction: u32,
         bus: &mut B,
     ) -> Result<bool, CoreError> {
-        if instruction & 0x0E00_00F0 != 0x0000_00B0 {
+        if instruction & 0x0e00_0090 != 0x0000_0090 || instruction & 0x60 == 0 {
             return Ok(false);
         }
         let pre = instruction & (1 << 24) != 0;
@@ -881,18 +1285,34 @@ impl Cpu {
         };
         let target = if pre { updated } else { base };
         if instruction & (1 << 20) != 0 {
-            if (!pre || writeback) && base_register == source {
-                return Ok(false);
-            }
-            self.registers[source] = bus.read16(target, access)? as u32;
+            self.registers[source] =
+                self.load_halfword_signed(bus, target, (instruction >> 5) & 3, access)?;
             bus.idle(1);
         } else {
-            bus.write16(target, self.registers[source] as u16, access)?;
+            bus.write16(target & !1, self.registers[source] as u16, access)?;
         }
-        if !pre || writeback {
+        if (!pre || writeback) && !(instruction & (1 << 20) != 0 && base_register == source) {
             self.registers[base_register] = updated;
         }
         Ok(true)
+    }
+
+    /// ARM7 odd LDRH rotates the zero-extended halfword; odd LDRSH becomes
+    /// LDRSB. Both instruction sets share these data-bus semantics.
+    fn load_halfword_signed<B: CpuBus>(
+        &self,
+        bus: &mut B,
+        target: u32,
+        kind: u32,
+        access: Access,
+    ) -> Result<u32, CoreError> {
+        match kind {
+            1 => Ok(u32::from(bus.read16(target & !1, access)?).rotate_right((target & 1) * 8)),
+            2 => Ok(bus.read8(target, access)? as i8 as i32 as u32),
+            3 if target & 1 != 0 => Ok(bus.read8(target, access)? as i8 as i32 as u32),
+            3 => Ok(bus.read16(target, access)? as i16 as i32 as u32),
+            _ => unreachable!("halfword transfer kind"),
+        }
     }
 }
 
@@ -1003,6 +1423,8 @@ struct System {
     buttons: ButtonState,
     inputs: VecDeque<InputEvent>,
     rom: Vec<u8>,
+    /// Explicitly mapped original test firmware; absent for normal ROM loads.
+    test_firmware: bool,
     ewram: Vec<u8>,
     iwram: Vec<u8>,
     io: Vec<u8>,
@@ -1012,6 +1434,8 @@ struct System {
     display: Display,
     cycles: u64,
     gamepak: GamePak,
+    /// Last driven word supplies otherwise unmapped data reads.
+    open_bus: u32,
 }
 
 impl System {
@@ -1020,6 +1444,7 @@ impl System {
             buttons: ButtonState::default(),
             inputs: VecDeque::new(),
             rom: Vec::new(),
+            test_firmware: false,
             ewram: vec![0; 256 * 1024],
             iwram: vec![0; 32 * 1024],
             io: vec![0; IO_BYTES],
@@ -1028,6 +1453,7 @@ impl System {
             display: Display::new(),
             cycles: 0,
             gamepak: GamePak::default(),
+            open_bus: 0,
         };
         system.refresh_status();
         system
@@ -1051,8 +1477,15 @@ impl System {
             return Err(CoreError::InvalidAccessAlignment { address, width: 2 });
         }
         self.charge(address, 2, access);
-        let bytes = self.read_bytes(address, 2)?;
-        Ok(u16::from_le_bytes([bytes[0], bytes[1]]))
+        let value = match self.read_bytes(address, 2) {
+            Ok(bytes) => u16::from_le_bytes([bytes[0], bytes[1]]),
+            Err(_) if matches!(access.kind, AccessKind::Data) => {
+                (self.open_bus >> ((address & 2) * 8)) as u16
+            }
+            Err(error) => return Err(error),
+        };
+        self.open_bus = u32::from(value) * 0x0001_0001;
+        Ok(value)
     }
 
     fn read32_impl(&mut self, address: u32, access: Access) -> Result<u32, CoreError> {
@@ -1060,8 +1493,13 @@ impl System {
             return Err(CoreError::InvalidAccessAlignment { address, width: 4 });
         }
         self.charge(address, 4, access);
-        let bytes = self.read_bytes(address, 4)?;
-        Ok(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+        let value = match self.read_bytes(address, 4) {
+            Ok(bytes) => u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]),
+            Err(_) if matches!(access.kind, AccessKind::Data) => self.open_bus,
+            Err(error) => return Err(error),
+        };
+        self.open_bus = value;
+        Ok(value)
     }
 
     fn write16_impl(&mut self, address: u32, value: u16, access: Access) -> Result<(), CoreError> {
@@ -1136,6 +1574,11 @@ impl System {
     }
 
     fn read_bytes(&self, address: u32, width: usize) -> Result<&[u8], CoreError> {
+        if self.test_firmware
+            && let Some(range) = range_for(address, 0, TEST_FIRMWARE.len(), width)
+        {
+            return Ok(&TEST_FIRMWARE[range]);
+        }
         if (0x08000000..0x0e000000).contains(&address)
             && let Some(range) = range_for(address & 0x01ffffff, 0, self.rom.len(), width)
         {
@@ -1414,6 +1857,13 @@ impl Machine {
         Ok(())
     }
 
+    /// Enables the original SWI-division firmware for a controlled diagnostic
+    /// session. Normal cartridge loading leaves the low firmware region unmapped.
+    pub fn enable_test_firmware(&mut self) {
+        self.system.test_firmware = true;
+        self.cpu.exception_banks[1][0] = 0x0300_7fe0;
+    }
+
     /// Executes one instruction and returns its guest instruction address.
     pub fn step(&mut self) -> Result<u32, CoreError> {
         let outcome = self.cpu.step(&mut self.system)?;
@@ -1505,6 +1955,16 @@ impl Machine {
         Cycle(self.system.cycles)
     }
 
+    /// Exposes architectural registers for manifest-bound diagnostic results.
+    pub fn registers(&self) -> &[u32; 16] {
+        &self.cpu.registers
+    }
+
+    /// Exposes status for diagnostic completion and exception-return checks.
+    pub fn cpsr(&self) -> u32 {
+        self.cpu.cpsr
+    }
+
     /// Reports the active instruction set for bounded guest-return diagnostics.
     pub fn is_thumb(&self) -> bool {
         self.cpu.cpsr & CPSR_T != 0
@@ -1518,8 +1978,12 @@ impl Machine {
     /// Resets CPU, memory, and display state while retaining the loaded ROM bytes.
     pub fn reset(&mut self) {
         let rom = std::mem::take(&mut self.system.rom);
+        let firmware = self.system.test_firmware;
         *self = Self::new();
         self.system.rom = rom;
+        if firmware {
+            self.enable_test_firmware();
+        }
     }
 }
 

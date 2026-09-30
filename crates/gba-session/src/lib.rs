@@ -67,6 +67,12 @@ impl Session {
         Ok(())
     }
 
+    /// Enables controlled diagnostic services after loading a test ROM. Reset
+    /// retains this mapping; a subsequent cartridge load clears it.
+    pub fn enable_test_firmware(&mut self) {
+        self.machine.enable_test_firmware();
+    }
+
     /// Advances one emulated frame toward an absolute deadline with bounded work.
     /// Used by deterministic headless checks; live frontends use `advance_host_time`.
     pub fn advance_frame(&mut self) -> Result<Option<RunReport>, RunError> {

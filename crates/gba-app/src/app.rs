@@ -41,6 +41,11 @@ const COUNTER_ROM: &[u8] = include_bytes!(concat!(
     "/../../roms/counter.gba"
 ));
 
+/// Pinned upstream diagnostic bytes also identify the explicit test-firmware
+/// loading route, including when the same ROM is opened from a file dialog.
+const ARM_DIAGNOSTIC_ROM: &[u8] = include_bytes!("../../../roms/gba-tests/arm/arm.gba");
+const THUMB_DIAGNOSTIC_ROM: &[u8] = include_bytes!("../../../roms/gba-tests/thumb/thumb.gba");
+
 /// The replay uses the same ordered cycle transitions verified by gba-tools.
 const DEMO_INPUT: &[(Cycle, Button, bool)] = &include!(concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -123,6 +128,9 @@ impl GbaApp {
     fn load_rom_bytes(&mut self, name: &str, bytes: &[u8]) {
         match self.session.load_rom(bytes) {
             Ok(()) => {
+                if bytes == ARM_DIAGNOSTIC_ROM || bytes == THUMB_DIAGNOSTIC_ROM {
+                    self.session.enable_test_firmware();
+                }
                 self.rom_name = name.to_owned();
                 self.loaded = true;
                 self.status = format!("Loaded {name}");
@@ -208,7 +216,7 @@ impl GbaApp {
         }
 
         ui.heading("gba-rs");
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             let pause_label = if self.session.paused() {
                 "Resume"
             } else {
@@ -233,6 +241,16 @@ impl GbaApp {
             if ui.button("Load counter demo").clicked() {
                 self.load_rom_bytes("counter.gba", COUNTER_ROM);
                 self.status = "Counter demo: hold Z (A) to fill 16 green cells; Reset clears the counter".to_owned();
+                ui.ctx().request_repaint();
+            }
+            if ui.button("Load ARM tests").clicked() {
+                self.load_rom_bytes("arm.gba", ARM_DIAGNOSTIC_ROM);
+                self.status = "ARM tests: expect All tests passed; a failure screen gives the first case".to_owned();
+                ui.ctx().request_repaint();
+            }
+            if ui.button("Load Thumb tests").clicked() {
+                self.load_rom_bytes("thumb.gba", THUMB_DIAGNOSTIC_ROM);
+                self.status = "Thumb tests: expect All tests passed; a failure screen gives the first case".to_owned();
                 ui.ctx().request_repaint();
             }
             if ui.button("Load CPU diagnostic").clicked() {
