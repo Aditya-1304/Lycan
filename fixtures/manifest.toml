@@ -59,3 +59,50 @@ checkpoints = [
     { frame = 8, x = 114, y = 73, image_x = 114, image_y = 74 },
     { frame = 9, x = 114, y = 73, image_x = 114, image_y = 73 },
 ]
+
+[[fixture]]
+name = "palette"
+rom = "../roms/palette.gba"
+source = "../roms/palette/palette.s"
+linker = "../roms/pixels/linker.ld"
+sha256 = "88806d5738b0d298918b3b59ce67bb08504584f948312614ba8a2977927efc3b"
+origin = "Original MIT guest assembly in roms/palette/palette.s"
+startup = "cartridge-direct-arm"
+bios_required = false
+mailbox_address = 0x03000000
+completion_id = 0x005c
+max_instructions = 150000
+max_cycles = 2600000
+[fixture.verification]
+kind = "palette"
+input_events = [
+    { cycle = 1123584, button = "A", pressed = true },
+    { cycle = 1685376, button = "B", pressed = true },
+]
+# Inputs are applied two frames before each sample: the first VBlank changes
+# guest state and the following visible frame scans out the selected image.
+checkpoints = [
+    { frame = 4, page = 0, palette_changed = 0, colors = [0x001f, 0x03e0] },
+    { frame = 6, page = 1, palette_changed = 0, colors = [0x7c00, 0x7fff] },
+    { frame = 8, page = 1, palette_changed = 1, colors = [0x7c00, 0x001f] },
+]
+
+[[fixture]]
+name = "hello"
+rom = "../roms/gba-tests/hello.gba"
+source = "../roms/gba-tests/hello.asm"
+linker = "../roms/pixels/linker.ld"
+sha256 = "38aed48b67bc0f701e8aa222b0c3334bd306bd29888707bb7224d81f5576c264"
+origin = "jsmolka/gba-tests ppu/hello.gba at a7113b67e63f83a9b321696ddd7042ccfad6c881; MIT notice in roms/gba-tests/LICENSE"
+startup = "cartridge-direct-arm"
+bios_required = false
+# Upstream has no mailbox; completion uses the source-defined idle instruction
+# and an independent full-frame digest, never an arbitrary infinite loop.
+mailbox_address = 0
+completion_id = 0
+max_instructions = 150000
+max_cycles = 1000000
+[fixture.verification]
+kind = "hello"
+terminal_pc = 0x08000160
+framebuffer_sha256 = "56cd131fb3915fe7e410be228a8c09e99132064799f148583636ca75745bedf7"
