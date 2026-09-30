@@ -45,7 +45,7 @@ jobs:
           node-version: '26.10.0'
 
       - name: WASM timing runtime
-        run: python3 roms/cartridge/verify_wasm.py --diagnostics
+        run: python3 roms/cartridge/verify_wasm.py --diagnostics --vblank
 
       - name: Formatting
         run: |

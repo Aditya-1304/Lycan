@@ -1422,6 +1422,8 @@ impl GamePak {
 }
 
 struct System {
+    /// HALT stops instruction retirement while hardware time continues.
+    halted: bool,
     buttons: ButtonState,
     inputs: VecDeque<InputEvent>,
     rom: Vec<u8>,
@@ -1445,6 +1447,7 @@ struct System {
 impl System {
     fn new() -> Self {
         let mut system = Self {
+            halted: false,
             buttons: ButtonState::default(),
             inputs: VecDeque::new(),
             rom: Vec::new(),
@@ -1464,8 +1467,25 @@ impl System {
         system
     }
 
+    /// HALT observes enabled pending sources independently of IME and CPSR.I.
+    fn pending_interrupts(&self) -> u16 {
+        u16::from_le_bytes([self.io[0x200], self.io[0x201]])
+            & u16::from_le_bytes([self.io[0x202], self.io[0x203]])
+    }
+
+    /// Absolute next VBlank edge; sleeping callers clip it to their own deadline.
+    fn next_vblank(&self) -> u64 {
+        let edge = self.cycles / CYCLES_PER_FRAME * CYCLES_PER_FRAME
+            + SCREEN_HEIGHT as u64 * CYCLES_PER_SCANLINE;
+        if edge > self.cycles {
+            edge
+        } else {
+            edge + CYCLES_PER_FRAME
+        }
+    }
+
     /// Refreshes read-only register bits from hardware time, even during blank lines.
-    /// Scanline rendering remains separate; IRQ delivery is a later slice.
+    /// Interrupt requests are latched at event crossings, not status reads.
     fn refresh_status(&mut self) {
         let line = (self.cycles / CYCLES_PER_SCANLINE % SCANLINES_PER_FRAME) as u16;
         let control = u16::from_le_bytes([self.io[4], self.io[5]]) & 0xff38;
@@ -1535,6 +1555,21 @@ impl System {
         if let Some(range) = range_for(address, IO_START, self.io.len(), 2) {
             let offset = range.start;
             if matches!(offset, 6 | 0x130) {
+                return Ok(());
+            }
+            if matches!(offset, 0x200 | 0x202 | 0x208) {
+                let old = u16::from_le_bytes([self.io[offset], self.io[offset + 1]]);
+                let value = match offset {
+                    0x202 => old & !(value & 0x3fff),
+                    0x208 => value & 1,
+                    _ => value & 0x3fff,
+                };
+                self.io[range].copy_from_slice(&value.to_le_bytes());
+                return Ok(());
+            }
+            if offset == 0x300 {
+                self.io[0x300] = value as u8;
+                self.halted = value & 0x8000 == 0;
                 return Ok(());
             }
             if offset == 0x204 {
@@ -1645,6 +1680,12 @@ impl System {
     /// Advances display events before any access changes the state observed by scanout.
     fn advance_time(&mut self, cycles: u64) {
         let target = self.cycles.saturating_add(cycles);
+        // Latch VBlank at line 160 even when an access crosses the boundary.
+        // Repeated reads in VBlank must not regenerate an acknowledged request.
+        let next = self.next_vblank();
+        if next <= target && self.io[4] & 8 != 0 {
+            self.io[0x202] |= 1;
+        }
         while self
             .inputs
             .front()
@@ -1678,6 +1719,24 @@ impl CpuBus for System {
             self.ewram[range.start] = value;
         } else if let Some(range) = ram_range(address, IWRAM_START, self.iwram.len(), 1) {
             self.iwram[range.start] = value;
+        } else if let Some(range) = range_for(address, IO_START, self.io.len(), 1) {
+            let offset = range.start;
+            if offset == 0x301 {
+                // STOP remains outside this fixture; HALT uses bit 7 clear.
+                self.halted = value & 0x80 == 0;
+            } else if offset == 0x300 {
+                self.io[offset] = value;
+            } else {
+                let aligned = offset & !1;
+                let shift = (offset & 1) * 8;
+                let old = u16::from_le_bytes([self.io[aligned], self.io[aligned + 1]]);
+                let merged = if aligned == 0x202 {
+                    u16::from(value) << shift
+                } else {
+                    (old & !(0xff << shift)) | (u16::from(value) << shift)
+                };
+                self.write_halfword(address & !1, merged)?;
+            }
         } else if palette_range(address, 1).is_some() {
             self.write_halfword(address & !1, u16::from(value) * 0x0101)?;
         } else if let Some(range) = vram_range(address, 1) {
@@ -2090,15 +2149,38 @@ impl Machine {
         Ok(())
     }
 
-    /// Enables the original SWI-division firmware for a controlled diagnostic
+    /// Enables the original SWI-division and IRQ-vector firmware for a controlled diagnostic
     /// session. Normal cartridge loading leaves the low firmware region unmapped.
     pub fn enable_test_firmware(&mut self) {
         self.system.test_firmware = true;
         self.cpu.exception_banks[1][0] = 0x0300_7fe0;
     }
 
-    /// Executes one instruction and returns its guest instruction address.
+    /// Executes one instruction, or advances a halted CPU to the next display edge.
+    /// Sleeping steps return the resume PC without incrementing instruction count.
     pub fn step(&mut self) -> Result<u32, CoreError> {
+        let pending = self.system.pending_interrupts();
+        if pending != 0 {
+            self.system.halted = false;
+            if self.system.io[0x208] & 1 != 0 && self.cpu.cpsr & CPSR_I == 0 {
+                let status = self.cpu.cpsr;
+                let resume = self.cpu.registers[15];
+                self.cpu
+                    .set_status((status & !(31 | CPSR_T)) | 0x12 | CPSR_I);
+                self.cpu.saved_status[1] = status;
+                self.cpu.registers[14] = resume.wrapping_add(4);
+                // Delivery always fetches the mapped vector; no host callback shortcut.
+                self.system.idle(1);
+                self.cpu.branch(&mut self.system, 0x18, false)?;
+            }
+        }
+        if self.system.halted {
+            // Bound a public step to the next display edge. advance_to additionally
+            // clips sleeping time to its caller's absolute deadline.
+            let next = self.system.next_vblank();
+            self.system.advance_time(next - self.system.cycles);
+            return Ok(self.cpu.registers[15]);
+        }
         let outcome = self.cpu.step(&mut self.system)?;
         self.executed_instructions = self.executed_instructions.saturating_add(1);
         Ok(outcome.address)
@@ -2121,6 +2203,12 @@ impl Machine {
                     cycles: self.cycles(),
                 });
             }
+            if self.system.halted && self.system.pending_interrupts() == 0 {
+                let next = self.system.next_vblank();
+                let deadline = next.min(target.0);
+                self.system.advance_time(deadline - self.system.cycles);
+                continue;
+            }
             last_pc = self.step()?;
         }
         Ok(RunReport {
@@ -2139,6 +2227,7 @@ impl Machine {
     ) -> Result<RunReport, RunError> {
         let initial = self.executed_instructions;
         for _ in 0..instruction_limit {
+            let before = self.executed_instructions;
             let pc = self.step()?;
             if self.cycles() > cycle_limit {
                 return Err(RunError::CycleLimitExceeded {
@@ -2147,7 +2236,7 @@ impl Machine {
                     last_pc: pc,
                 });
             }
-            if pc == terminal_pc {
+            if pc == terminal_pc && self.executed_instructions != before {
                 return Ok(RunReport {
                     instructions: self.executed_instructions - initial,
                     instruction_address: pc,
@@ -2171,6 +2260,11 @@ impl Machine {
         let bytes = self.system.read_bytes(address, 2)?;
 
         Ok(u16::from_le_bytes([bytes[0], bytes[1]]))
+    }
+
+    /// Reports hardware sleep for bounded fixture stall checks and application status.
+    pub fn halted(&self) -> bool {
+        self.system.halted
     }
 
     /// Generation of the last completed frame, independent of UI redraws.
@@ -2271,6 +2365,53 @@ fn range_for(address: u32, start: u32, length: usize, width: usize) -> Option<Ra
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Exercises sleep, firmware dispatch, W1C and masked wake through guest code.
+    #[test]
+    fn vblank_guest_sleeps_dispatches_and_acknowledges() {
+        let rom = include_bytes!("../../../roms/vblank.gba");
+        let mut machine = Machine::new();
+        machine.load_rom(rom).unwrap();
+        machine.enable_test_firmware();
+        machine
+            .advance_to(Cycle(4 * CYCLES_PER_FRAME), 20_000)
+            .unwrap();
+        assert_eq!(machine.inspect16(IWRAM_START + 2).unwrap(), 4);
+        assert_eq!(machine.inspect16(IWRAM_START + 4).unwrap(), 1);
+        assert_eq!(machine.inspect16(IWRAM_START + 6).unwrap(), 0);
+        assert_eq!(machine.inspect16(IWRAM_START + 8).unwrap(), 4);
+        assert_eq!(machine.cpsr() & 0xff, 0x5f);
+        assert!(machine.executed_instructions() < 1000);
+        let mut thumb = rom.to_vec();
+        thumb[0x300..0x304].copy_from_slice(&15u32.to_le_bytes());
+        machine.load_rom(&thumb).unwrap();
+        machine.enable_test_firmware();
+        machine
+            .advance_to(Cycle(4 * CYCLES_PER_FRAME), 20_000)
+            .unwrap();
+        assert_eq!(machine.inspect16(IWRAM_START + 2).unwrap(), 4);
+        assert!(machine.is_thumb());
+        for (configuration, wakes) in [(6u32, 0), (5, 2), (3, 2)] {
+            let mut bytes = rom.to_vec();
+            bytes[0x300..0x304].copy_from_slice(&configuration.to_le_bytes());
+            machine.load_rom(&bytes).unwrap();
+            machine.enable_test_firmware();
+            machine
+                .advance_to(Cycle(2 * CYCLES_PER_FRAME), 20_000)
+                .unwrap();
+            assert_eq!(machine.inspect16(IWRAM_START + 2).unwrap(), 0);
+            assert_eq!(machine.inspect16(IWRAM_START + 8).unwrap(), wakes);
+        }
+        machine.load_rom(rom).unwrap();
+        assert!(matches!(
+            machine.advance_to(Cycle(CYCLES_PER_FRAME), 20_000),
+            Err(RunError::Core(CoreError::UnmappedAddress {
+                address: 0x18,
+                width: 4
+            }))
+        ));
+        assert_eq!(machine.inspect16(IWRAM_START + 2).unwrap(), 0);
+    }
 
     // Catches ignored WAITCNT writes and ROM aliases charged as ordinary memory.
     // Existing fixtures use default WS0 timing exclusively.
