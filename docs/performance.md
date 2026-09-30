@@ -310,3 +310,57 @@ Texture submission: mean 0.025 ms | p95 0.100 ms | samples 120
 Core execution: mean 2.132 ms | p95 2.800 ms | samples 120
 Pixel conversion: mean 0.239 ms | p95 0.300 ms | samples 120
 Texture submission: mean 0.037 ms | p95 0.100 ms | samples 120
+
+
+## update a counter through ARM and Thumb status
+
+The original bitmap-copy fixture copies a 38,400-byte indexed image through an
+EWRAM mirror and redraws it from canonical EWRAM through a called ARM routine.
+The routine saves registers and LR on a mirrored IWRAM stack and returns by
+loading PC through LDM. The guest verifies stack restoration before publishing
+completion.
+
+### Headless
+
+- Fixture: `copy.gba`
+- SHA-256: `70ae32d6d49cfbbe8d05f66da4fa22a1076838b0753cab0a9827f304cb695306`
+- Terminal PC: `0x0800a000`
+- Completion mailbox ID: `0x005e`
+- Completion result: `1`
+- Full 38,400-byte copied-image verification: passed
+- Full 240×160 framebuffer verification: passed
+- EWRAM mirror verification: passed
+- IWRAM/stack mirror verification: passed
+- BL/routine return verification: passed
+- SP restoration verification: passed
+- Unaligned STR align-down verification: passed
+- Unaligned LDR rotation verification: passed
+- Palette byte-write duplication: passed
+- BG VRAM byte-write duplication: passed
+- OBJ VRAM byte-write ignore behavior: passed
+- Guest execution cycles: `1687892`
+- Copy/redraw completion host time: TODO ms
+
+### Native Linux
+
+- Copied image visually verified: yes
+- Earlier Slice 1–4 scenes regression checked: yes
+Core execution: mean 2.099 ms | p95 3.338 ms | samples 120
+Pixel conversion: mean 0.099 ms | p95 0.155 ms | samples 119
+Texture submission: mean 0.023 ms | p95 0.036 ms | samples 120
+
+### Google Chrome
+
+- Copied image visually verified: yes
+- Earlier Slice 1–4 scenes regression checked: yes
+Core execution: mean 3.390 ms | p95 4.200 ms | samples 120
+Pixel conversion: mean 0.248 ms | p95 0.400 ms | samples 120
+Texture submission: mean 0.036 ms | p95 0.100 ms | samples 120
+
+### Brave
+
+- Copied image visually verified: yes
+- Earlier Slice 1–4 scenes regression checked: yes
+Core execution: mean 3.421 ms | p95 4.000 ms | samples 120
+Pixel conversion: mean 0.258 ms | p95 0.400 ms | samples 120
+Texture submission: mean 0.027 ms | p95 0.100 ms | samples 120
