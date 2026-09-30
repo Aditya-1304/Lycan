@@ -556,19 +556,19 @@ name = "pcm"
 rom = "../roms/pcm.gba"
 source = "../roms/pcm/sound.s"
 linker = "../roms/pixels/linker.ld"
-sha256 = "80dfae4f8694e6349c624969d1991677780be31eee22387c1b9cdb0538e2b5d7"
+sha256 = "89b13fc1aa5f4d397324f7ded22f5830fc8cb3bf305b01bab8e276bcde78e5cb"
 origin = "Original MIT timer/FIFO/DMA1 synchronized square scene"
 startup = "cartridge-direct-arm"
 bios_required = true
 mailbox_address = 0x03000000
 completion_id = 0x0066
 max_instructions = 100000
-max_cycles = 4000000
+max_cycles = 9000000
 [fixture.verification]
 # Stable active windows: signed +/-32, eight core samples per level.
 # Frozen phase is (global sample index + 10) modulo 16; silence hashes are zero bytes.
 kind = "pcm"
-ready_pc = 0x080000dc
+ready_pc = 0x080000f4
 firmware_sha256 = "044a1305b3e47fcd568e77fcd792f251cd2cb85b359949931654ebb399a37498"
 input_events = [
     { cycle = 1123584, button = "A", pressed = true },
@@ -581,3 +581,37 @@ checkpoints = [
     { frame = 9, color = 31, pressed = 0, transitions = 2, samples = 548, pcm_sha256 = "73f10e16a57e80fcd212b6629685e2e19a1d19bf13d34dda6c866b528b098684" },
     { frame = 10, color = 31, pressed = 0, transitions = 2, samples = 549, pcm_sha256 = "c936ab1da7ef4314182c8edabaeae90f8d51ed45bc48848d35670adf5b470d31" },
 ]
+
+# Stereo captures retain signed DAC units, interleaved left then right.
+# Before reset, zero-based sample phase is +11 modulo 16. At 6-bit PWM,
+# transition samples average equal halves to +64 DAC units. Reset frame 26
+# contains four zero samples; frame 28 resumes eight-sample runs at phase +7.
+mixer_input_events = [
+    { cycle = 2808960, button = "A", pressed = true },
+    { cycle = 3370752, button = "Left", pressed = true },
+    { cycle = 3932544, button = "Left", pressed = false },
+    { cycle = 3932544, button = "Right", pressed = true },
+    { cycle = 4494336, button = "Right", pressed = false },
+    { cycle = 4494336, button = "Down", pressed = true },
+    { cycle = 5056128, button = "Down", pressed = false },
+    { cycle = 5617920, button = "Select", pressed = true },
+    { cycle = 6179712, button = "Select", pressed = false },
+    { cycle = 6179712, button = "Up", pressed = true },
+    { cycle = 6741504, button = "Up", pressed = false },
+    { cycle = 6741504, button = "B", pressed = true },
+    { cycle = 7303296, button = "B", pressed = false },
+]
+mixer_checkpoints = [
+    { frame = 12, control_h = 772, master = 128, bias = 512, levels = [[128, 128], [-128, -128]], pcm_sha256 = "ab1bdbaa250b0b0c29cab6ee05dd485bbb32ace3d2f5c55805b4e0ec03984ed3" },
+    { frame = 14, control_h = 516, master = 128, bias = 512, levels = [[128, 0], [-128, 0]], pcm_sha256 = "1d17b23de2b859038d0d24e3dd859b6a0afd792bc2f73afd4d45f772fae0962c" },
+    { frame = 16, control_h = 260, master = 128, bias = 512, levels = [[0, 128], [0, -128]], pcm_sha256 = "71fe9a2898b6a75976b5145c66dcd3b328c7f589b6f1104d32f2cc3319b64ac2" },
+    { frame = 18, control_h = 772, master = 0, bias = 512, levels = [[0, 0]], pcm_sha256 = "47585db1c41fc8970c838bf60827198974f8bed7ae1958e222b6debe66d5e0c1" },
+    { frame = 20, control_h = 772, master = 128, bias = 512, levels = [[128, 128], [-128, -128]], pcm_sha256 = "2e971d144fc028d3666c10feb864519037b0fc70f63e2d87709985f0712bcc17" },
+    { frame = 22, control_h = 768, master = 128, bias = 512, levels = [[64, 64], [-64, -64]], pcm_sha256 = "4f105a8df78053e4e1f3aeee86b394a7a6e960a830f4196f4cac02569e975522" },
+    { frame = 24, control_h = 772, master = 128, bias = 49728, levels = [[192, 192], [-64, -64], [64, 64]], pcm_sha256 = "7b69d7c4a448056bcb524d0f5d97ced61765138c94d568d23577652f52925ae4" },
+    { frame = 26, control_h = 772, master = 128, bias = 512, levels = [[128, 128], [-128, -128], [0, 0]], pcm_sha256 = "11db43986e80ab2e5852966aecc7c995227c258bca10c142fd9d8a8f1a83ca4a" },
+    { frame = 28, control_h = 772, master = 128, bias = 512, levels = [[128, 128], [-128, -128]], pcm_sha256 = "216050410791b4138eb80335b20c2903c4eae779253bed66b99f1b216ad904fa" },
+]
+
+# One empty pop after each of the two intentional FIFO reset strobes.
+mixer_fifo_underruns = 2

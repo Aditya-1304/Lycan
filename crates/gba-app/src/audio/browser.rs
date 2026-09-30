@@ -31,8 +31,8 @@ impl Output {
     pub fn rate(&self) -> u32 {
         audio_rate()
     }
-    pub fn submit(&mut self, samples: &[f32]) {
-        submit_audio(samples);
+    pub fn submit(&mut self, samples: &[[f32; 2]]) {
+        submit_audio(samples.as_flattened());
     }
     pub fn clear(&mut self) {
         clear_audio();

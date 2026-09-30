@@ -462,6 +462,9 @@ impl GbaApp {
         ui.label(self.audio.status());
         let (produced, dropped, empty) = self.session.pcm_counters();
         ui.label(format!("Core PCM: 32768 Hz | produced {produced} | staging drops {dropped} | empty FIFO {empty}"));
+        if self.rom_name == "pcm.gba" {
+            ui.label("Mixer while holding Z: Left/Right = route, Down = sound off, Backspace = half volume, Up = bias/PWM, X = FIFO reset");
+        }
         ui.label(&self.status);
         if self.rom_name == "calculations.gba" {
             match (
