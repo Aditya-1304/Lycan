@@ -44,7 +44,8 @@ jobs:
             roms/pixels.gba \
             roms/buttons.gba \
             roms/palette.gba \
-            roms/calculations.gba
+            roms/calculations.gba \
+            roms/copy.gba
 
       - name: Formatting
         run: |

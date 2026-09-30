@@ -41,7 +41,7 @@ This document records the reference environment for repeatable native and browse
 - Pause stops animation and does not busy-spin.
 - Reset restores initial Slice 0 state.
 
-## Slice 1 verification status
+## Display pixel written by ROM status
 
 ### Headless
 
@@ -76,7 +76,7 @@ Core execution: mean 1.085 ms | p95 1.300 ms | samples 120
 Pixel conversion: mean 0.211 ms | p95 0.300 ms | samples 120
 Texture submission: mean 0.032 ms | p95 0.100 ms | samples 120
 
-## Slice 2 verification status
+## moving square with button status
 
 Integer master-clock pacing, deterministic 60/144 Hz host-schedule checks, and
 bounded pause/focus recovery passed. The moving-square headless fixture verified
@@ -131,7 +131,7 @@ Pixel conversion: mean 0.243 ms | p95 0.300 ms | samples 120
 Texture submission: mean 0.031 ms | p95 0.100 ms | samples 120
 
 
-## Slice 3 verification status
+## switch palette colors and bitmap pages status
 
 Mode 4 palette lookup, bitmap page selection, palette-only updates, and the
 pinned gba-tests `hello.gba` fixture passed headlessly. The original palette
@@ -203,7 +203,7 @@ Core execution: mean 2.262 ms | p95 3.400 ms | samples 120
 Pixel conversion: mean 0.188 ms | p95 0.300 ms | samples 120
 Texture submission: mean 0.028 ms | p95 0.100 ms | samples 120
 
-## Slice 4 verification status
+## cpu calculation status
 
 The original CPU calculation fixture executes selected ARM arithmetic, logical,
 comparison, barrel-shifter, carry, and multiplication cases entirely as guest
@@ -257,3 +257,56 @@ Texture submission: mean 0.029 ms | p95 0.100 ms | samples 120
 Core execution: mean 2.125 ms | p95 2.800 ms | samples 120
 Pixel conversion: mean 0.227 ms | p95 0.300 ms | samples 120
 Texture submission: mean 0.028 ms | p95 0.100 ms | samples 120
+
+## copy and redraw an image status
+
+The original bitmap-copy fixture copies a 38,400-byte indexed image through an
+EWRAM mirror and redraws it from canonical EWRAM through a called ARM routine.
+The routine saves registers and LR on a mirrored IWRAM stack and returns by
+loading PC through LDM. The guest verifies stack restoration before publishing
+completion.
+
+### Headless
+
+- Fixture: `copy.gba`
+- SHA-256: `70ae32d6d49cfbbe8d05f66da4fa22a1076838b0753cab0a9827f304cb695306`
+- Terminal PC: `0x0800a000`
+- Completion mailbox ID: `0x005e`
+- Completion result: `1`
+- Full 38,400-byte copied-image verification: passed
+- Full 240×160 framebuffer verification: passed
+- EWRAM mirror verification: passed
+- IWRAM/stack mirror verification: passed
+- BL/routine return verification: passed
+- SP restoration verification: passed
+- Unaligned STR align-down verification: passed
+- Unaligned LDR rotation verification: passed
+- Palette byte-write duplication: passed
+- BG VRAM byte-write duplication: passed
+- OBJ VRAM byte-write ignore behavior: passed
+- Guest execution cycles: `1687892`
+- Copy/redraw completion host time: TODO ms
+
+### Native Linux
+
+- Copied image visually verified: yes
+- Earlier Slice 1–4 scenes regression checked: yes
+Core execution: mean 2.202 ms | p95 3.093 ms | samples 120
+Pixel conversion: mean 0.125 ms | p95 0.157 ms | samples 120
+Texture submission: mean 0.027 ms | p95 0.045 ms | samples 120
+
+### Google Chrome
+
+- Copied image visually verified: yes
+- Earlier Slice 1–4 scenes regression checked: yes
+Core execution: mean 1.809 ms | p95 2.700 ms | samples 120
+Pixel conversion: mean 0.196 ms | p95 0.300 ms | samples 120
+Texture submission: mean 0.025 ms | p95 0.100 ms | samples 120
+
+### Brave
+
+- Copied image visually verified: yes
+- Earlier Slice 1–4 scenes regression checked: yes
+Core execution: mean 2.132 ms | p95 2.800 ms | samples 120
+Pixel conversion: mean 0.239 ms | p95 0.300 ms | samples 120
+Texture submission: mean 0.037 ms | p95 0.100 ms | samples 120
