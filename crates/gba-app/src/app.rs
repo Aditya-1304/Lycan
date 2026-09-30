@@ -51,6 +51,11 @@ const TILED_ROM: &[u8] = include_bytes!("../../../roms/tiled.gba");
 const STRIPES_ROM: &[u8] = include_bytes!("../../../roms/gba-tests/stripes.gba");
 const TILED_INPUT: &[(Cycle, Button, bool)] = &include!("../../../roms/tiled/input.rs");
 
+/// Original guest-owned sprite scene and its independently verified replay.
+const SPRITES_ROM: &[u8] = include_bytes!("../../../roms/sprites.gba");
+const SPRITE_INPUT: &[(Cycle, Button, bool)] = &include!("../../../roms/sprites/input.rs");
+const MEMORY_ROM: &[u8] = include_bytes!("../../../roms/gba-tests/memory/memory.gba");
+
 /// The replay uses the same ordered cycle transitions verified by gba-tools.
 const DEMO_INPUT: &[(Cycle, Button, bool)] = &include!(concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -115,7 +120,7 @@ impl GbaApp {
             texture: None,
             image_generation: 0,
             uploaded_generation: None,
-            status: "Loading tiled.gba".to_owned(),
+            status: "Loading sprites.gba".to_owned(),
             #[cfg(not(target_arch = "wasm32"))]
             capture_path: std::env::var_os("GBA_CAPTURE_PATH").map(Into::into),
             #[cfg(not(target_arch = "wasm32"))]
@@ -125,7 +130,7 @@ impl GbaApp {
             #[cfg(target_arch = "wasm32")]
             load_generation: Default::default(),
         };
-        app.load_rom_bytes("tiled.gba", TILED_ROM);
+        app.load_rom_bytes("sprites.gba", SPRITES_ROM);
         app
     }
 
@@ -143,7 +148,10 @@ impl GbaApp {
         };
         match self.session.load_rom(bytes_to_load) {
             Ok(()) => {
-                if bytes == ARM_DIAGNOSTIC_ROM || bytes == THUMB_DIAGNOSTIC_ROM {
+                if bytes == ARM_DIAGNOSTIC_ROM
+                    || bytes == THUMB_DIAGNOSTIC_ROM
+                    || bytes == MEMORY_ROM
+                {
                     self.session.enable_test_firmware();
                 }
                 self.rom_name = name.to_owned();
@@ -246,6 +254,29 @@ impl GbaApp {
             }
             if ui.button("Reset").clicked() {
                 self.reset_demo();
+                ui.ctx().request_repaint();
+            }
+            if ui.button("Load sprite demo").clicked() {
+                self.load_rom_bytes("sprites.gba", SPRITES_ROM);
+                self.status = "Sprite scene: arrows move; Z puts the player behind BG; X selects 2D tiles".to_owned();
+                ui.ctx().request_repaint();
+            }
+            if ui.button("Replay sprite input").clicked() {
+                self.load_rom_bytes("sprites.gba", SPRITES_ROM);
+                for &(cycle, button, pressed) in SPRITE_INPUT {
+                    if let Err(error) = self.session.set_button_at(cycle, button, pressed) {
+                        self.status = format!("Replay input failed: {error}");
+                        self.session.toggle_pause();
+                        return;
+                    }
+                }
+                self.replay_deadline = Some(Cycle(20 * CYCLES_PER_FRAME));
+                self.status = "Replaying sprite overlap and layouts; final player (116, 74)".to_owned();
+                ui.ctx().request_repaint();
+            }
+            if ui.button("Load memory diagnostic").clicked() {
+                self.load_rom_bytes("memory.gba", MEMORY_ROM);
+                self.status = "Memory diagnostic: expected All tests passed".to_owned();
                 ui.ctx().request_repaint();
             }
             if ui.button("Load tiled demo").clicked() {
@@ -513,6 +544,17 @@ impl eframe::App for GbaApp {
                 self.session.inspect16(0x03000002),
                 self.session.inspect16(0x03000004),
             ) {
+                (Ok(x), Ok(y)) if self.rom_name == "sprites.gba" => {
+                    match (
+                        self.session.inspect16(0x03000008),
+                        self.session.inspect16(0x0300000a),
+                    ) {
+                        (Ok(player_x), Ok(player_y)) => format!(
+                            "Replay complete: player ({player_x}, {player_y}), scroll ({x}, {y}); expected (116, 74), (2, 0)"
+                        ),
+                        _ => "Replay complete; player position unavailable".to_owned(),
+                    }
+                }
                 (Ok(x), Ok(y)) if self.rom_name == "tiled.gba" => {
                     format!("Replay complete: scroll ({x}, {y}); expected (2, 0)")
                 }

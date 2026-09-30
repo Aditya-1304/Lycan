@@ -79,6 +79,8 @@ const PALETTE_START: u32 = 0x0500_0000;
 const PALETTE_BYTES: usize = 1024;
 const VRAM_START: u32 = 0x0600_0000;
 const VRAM_BYTES: usize = 96 * 1024;
+const OAM_START: u32 = 0x0700_0000;
+const OAM_BYTES: usize = 1024;
 // The scanline renderer samples at 960 cycles, but the DISPSTAT HBlank flag
 // follows the 1008-cycle mGBA timing model. IRQ edge timing is a later slice.
 const HBLANK_FLAG_CYCLE: u64 = 1_008;
@@ -1431,6 +1433,8 @@ struct System {
     /// Shared BG/OBJ color RAM; mode 4 indexes the first 256 entries.
     palette: Vec<u8>,
     vram: Vec<u8>,
+    /// 128 eight-byte object entries; the fourth halfword also stores affine data.
+    oam: Vec<u8>,
     display: Display,
     cycles: u64,
     gamepak: GamePak,
@@ -1450,6 +1454,7 @@ impl System {
             io: vec![0; IO_BYTES],
             palette: vec![0; PALETTE_BYTES],
             vram: vec![0; VRAM_BYTES],
+            oam: vec![0; OAM_BYTES],
             display: Display::new(),
             cycles: 0,
             gamepak: GamePak::default(),
@@ -1556,11 +1561,15 @@ impl System {
             return Ok(());
         }
 
-        if let Some(range) = range_for(address, VRAM_START, self.vram.len(), 2) {
+        if let Some(range) = vram_range(address, 2) {
             self.vram[range].copy_from_slice(&bytes);
             return Ok(());
         }
 
+        if let Some(range) = ram_range(address, OAM_START, OAM_BYTES, 2) {
+            self.oam[range].copy_from_slice(&bytes);
+            return Ok(());
+        }
         Err(CoreError::UnmappedAddress { address, width: 2 })
     }
 
@@ -1596,10 +1605,13 @@ impl System {
         if let Some(range) = palette_range(address, width) {
             return Ok(&self.palette[range]);
         }
-        if let Some(range) = range_for(address, VRAM_START, self.vram.len(), width) {
+        if let Some(range) = vram_range(address, width) {
             return Ok(&self.vram[range]);
         }
 
+        if let Some(range) = ram_range(address, OAM_START, OAM_BYTES, width) {
+            return Ok(&self.oam[range]);
+        }
         Err(CoreError::UnmappedAddress { address, width })
     }
 
@@ -1618,6 +1630,7 @@ impl System {
             3 * beats
         } else if ram_range(address, IWRAM_START, 32 * 1024, 1).is_some()
             || range_for(address, IO_START, IO_BYTES, 1).is_some()
+            || ram_range(address, OAM_START, OAM_BYTES, 1).is_some()
         {
             1
         } else {
@@ -1641,7 +1654,7 @@ impl System {
             self.buttons.set(event.button, event.pressed);
         }
         self.display
-            .synchronize_to(target, &self.vram, &self.palette, &self.io);
+            .synchronize_to(target, &self.vram, &self.palette, &self.io, &self.oam);
         self.cycles = target;
         self.refresh_status();
     }
@@ -1658,7 +1671,7 @@ impl CpuBus for System {
     }
 
     /// Video memory has a 16-bit write bus: palette and BG bytes are duplicated,
-    /// while OBJ VRAM ignores byte stores. RAM bytes retain ordinary semantics.
+    /// while OBJ VRAM and OAM ignore byte stores. RAM bytes retain ordinary semantics.
     fn write8(&mut self, address: u32, value: u8, access: Access) -> Result<(), CoreError> {
         self.charge(address, 1, access);
         if let Some(range) = ram_range(address, EWRAM_START, self.ewram.len(), 1) {
@@ -1667,7 +1680,7 @@ impl CpuBus for System {
             self.iwram[range.start] = value;
         } else if palette_range(address, 1).is_some() {
             self.write_halfword(address & !1, u16::from(value) * 0x0101)?;
-        } else if let Some(range) = range_for(address, VRAM_START, self.vram.len(), 1) {
+        } else if let Some(range) = vram_range(address, 1) {
             let object_start = if self.display.control & 7 >= 3 {
                 0x14000
             } else {
@@ -1676,9 +1689,11 @@ impl CpuBus for System {
             if range.start < object_start {
                 self.write_halfword(address & !1, u16::from(value) * 0x0101)?;
             }
-        } else {
+        } else if ram_range(address, OAM_START, OAM_BYTES, 1).is_none() {
             return Err(CoreError::UnmappedAddress { address, width: 1 });
         }
+        // OAM has a 32-bit bus but no byte-write enables: STRB is ignored,
+        // including mirrors. Halfword and word accesses retain their values.
         Ok(())
     }
 
@@ -1773,6 +1788,92 @@ impl TextBackground {
     }
 }
 
+/// Snapshot of a normal (non-affine) object at a scanline drawing boundary.
+/// Affine, window and blending behavior belongs to the corresponding later slices.
+struct NormalObject {
+    attr0: u16,
+    attr1: u16,
+    attr2: u16,
+    width: usize,
+    height: usize,
+}
+
+impl NormalObject {
+    fn from_oam(entry: &[u8]) -> Option<Self> {
+        let attr0 = u16::from_le_bytes([entry[0], entry[1]]);
+        let attr1 = u16::from_le_bytes([entry[2], entry[3]]);
+        let attr2 = u16::from_le_bytes([entry[4], entry[5]]);
+        // Bit 9 disables normal objects; bit 8 selects affine interpretation.
+        // Non-normal OBJ modes require blending/window state not implemented here.
+        if attr0 & 0x0f00 != 0 {
+            return None;
+        }
+        let dimensions = match attr0 >> 14 {
+            0 => [(8, 8), (16, 16), (32, 32), (64, 64)],
+            1 => [(16, 8), (32, 8), (32, 16), (64, 32)],
+            2 => [(8, 16), (8, 32), (16, 32), (32, 64)],
+            _ => return None,
+        };
+        let (width, height) = dimensions[usize::from(attr1 >> 14)];
+        Some(Self {
+            attr0,
+            attr1,
+            attr2,
+            width,
+            height,
+        })
+    }
+
+    /// Resolves one local texel through OBJ character memory and OBJ palette RAM.
+    /// Tile numbers count 32-byte units in both color depths and wrap in 32 KiB.
+    fn pixel(
+        &self,
+        mut x: usize,
+        mut y: usize,
+        control: u16,
+        vram: &[u8],
+        palette: &[u8],
+    ) -> Option<u16> {
+        if self.attr1 & (1 << 12) != 0 {
+            x = self.width - 1 - x;
+        }
+        if self.attr1 & (1 << 13) != 0 {
+            y = self.height - 1 - y;
+        }
+        let color_256 = self.attr0 & (1 << 13) != 0;
+        let units = if color_256 { 2 } else { 1 };
+        let mut base = usize::from(self.attr2 & 0x3ff);
+        if color_256 {
+            base &= !1;
+        }
+        let stride = if control & (1 << 6) != 0 {
+            self.width / 8 * units
+        } else {
+            32
+        };
+        let tile = (base + y / 8 * stride + x / 8 * units) & 0x3ff;
+        // Bitmap modes reserve the first half of OBJ character memory for BG data.
+        if control & 7 >= 3 && tile < 512 {
+            return None;
+        }
+        let offset = 0x10000 + tile * 32;
+        let (color, bank) = if color_256 {
+            (usize::from(vram[offset + (y % 8) * 8 + x % 8]), 0)
+        } else {
+            let packed = vram[offset + (y % 8) * 4 + x % 8 / 2];
+            (
+                usize::from((packed >> ((x % 2) * 4)) & 15),
+                usize::from(self.attr2 >> 12) * 16,
+            )
+        };
+        if color == 0 {
+            return None;
+        }
+        let offset = 0x200 + (bank + color) * 2;
+        Some(u16::from_le_bytes([palette[offset], palette[offset + 1]]) & 0x7fff)
+    }
+}
+
 /// Display timing is independent of VRAM writes and frontend presentation.
 struct Display {
     control: u16,
@@ -1797,9 +1898,47 @@ impl Display {
         }
     }
 
+    /// Selects the first opaque OBJ texel in OAM order, then compares that
+    /// winning object's BG priority. A later OBJ cannot bypass a hidden winner.
+    fn render_objects(
+        &mut self,
+        vram: &[u8],
+        palette: &[u8],
+        oam: &[u8],
+        bg_priority: &[u8; SCREEN_WIDTH],
+    ) {
+        let mut objects = [None; SCREEN_WIDTH];
+        for entry in oam.as_chunks::<8>().0 {
+            let Some(object) = NormalObject::from_oam(entry) else {
+                continue;
+            };
+            let y = (self.line + 256 - usize::from(object.attr0 & 255)) & 255;
+            if y >= object.height {
+                continue;
+            }
+            for local_x in 0..object.width {
+                let x = (usize::from(object.attr1 & 511) + local_x) & 511;
+                if x >= SCREEN_WIDTH || objects[x].is_some() {
+                    continue;
+                }
+                if let Some(color) = object.pixel(local_x, y, self.control, vram, palette) {
+                    objects[x] = Some((color, ((object.attr2 >> 10) & 3) as u8));
+                }
+            }
+        }
+        let start = self.line * SCREEN_WIDTH;
+        for (x, pixel) in objects.into_iter().enumerate() {
+            if let Some((color, priority)) = pixel
+                && priority <= bg_priority[x]
+            {
+                self.drawing[start + x] = color;
+            }
+        }
+    }
+
     /// Renders each visible scanline at its drawing boundary and publishes at VBlank.
     /// Within-line register effects remain the documented scanline approximation.
-    fn synchronize_to(&mut self, target: u64, vram: &[u8], palette: &[u8], io: &[u8]) {
+    fn synchronize_to(&mut self, target: u64, vram: &[u8], palette: &[u8], io: &[u8], oam: &[u8]) {
         while self.next_event <= target {
             if self.line < SCREEN_HEIGHT {
                 let mode = self.control & 7;
@@ -1813,13 +1952,19 @@ impl Display {
                 };
                 let forced_blank = self.control & (1 << 7) != 0;
                 let start = self.line * SCREEN_WIDTH;
+                // Priority 4 represents the backdrop rather than a BG layer.
+                let mut bg_priority = [4u8; SCREEN_WIDTH];
                 for index in start..start + SCREEN_WIDTH {
                     self.drawing[index] = if forced_blank {
                         0x7FFF
                     } else if enabled && mode == 3 {
+                        bg_priority[index - start] = io[12] & 3;
                         u16::from_le_bytes([vram[index * 2], vram[index * 2 + 1]]) & 0x7FFF
                     } else if enabled {
                         let color = usize::from(vram[page + index]) * 2;
+                        if color != 0 {
+                            bg_priority[index - start] = io[12] & 3;
+                        }
                         // Index zero resolves to the backdrop color in BG palette
                         // entry zero; it must not become a hard-coded black pixel.
                         u16::from_le_bytes([palette[color], palette[color + 1]]) & 0x7FFF
@@ -1840,13 +1985,17 @@ impl Display {
                             if layer.control & 3 != priority {
                                 continue;
                             }
-                            for x in 0..SCREEN_WIDTH {
+                            for (x, pixel_priority) in bg_priority.iter_mut().enumerate() {
                                 if let Some(color) = layer.pixel(x, self.line, vram, palette) {
                                     self.drawing[start + x] = color;
+                                    *pixel_priority = priority as u8;
                                 }
                             }
                         }
                     }
+                }
+                if !forced_blank && self.control & (1 << 12) != 0 {
+                    self.render_objects(vram, palette, oam, &bg_priority);
                 }
                 self.line += 1;
                 self.next_event = self.frame_start
@@ -2079,6 +2228,19 @@ impl Default for Machine {
             executed_instructions: 0,
         }
     }
+}
+
+/// VRAM repeats every 128 KiB; the last 32 KiB mirrors physical 64..96 KiB.
+/// Decode before byte-store rules so mirrored OBJ addresses are also ignored.
+fn vram_range(address: u32, width: usize) -> Option<Range<usize>> {
+    if address >> 24 != VRAM_START >> 24 {
+        return None;
+    }
+    let mut offset = address as usize & 0x1ffff;
+    if offset >= 0x18000 {
+        offset -= 0x8000;
+    }
+    (offset + width <= VRAM_BYTES).then_some(offset..offset + width)
 }
 
 /// Palette RAM repeats throughout its 16 MiB bus region. Access widths and

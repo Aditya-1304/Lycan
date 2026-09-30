@@ -363,3 +363,65 @@ max_cycles = 1500000
 [fixture.verification]
 kind = "stripes"
 terminal_pc = 0x08000140
+
+[[fixture]]
+name = "memory"
+rom = "../roms/gba-tests/memory/memory.gba"
+source = "../roms/gba-tests/memory/memory.asm"
+linker = "../roms/pixels/linker.ld"
+sha256 = "21024fb6aae6343f5f0466dd54e3149de1fbeb23f78e7d85a015c983684d2f87"
+origin = "jsmolka/gba-tests memory at a7113b67e63f83a9b321696ddd7042ccfad6c881; MIT notice in roms/gba-tests/LICENSE"
+startup = "cartridge-direct-arm"
+bios_required = true
+mailbox_address = 0
+completion_id = 0
+max_instructions = 400000
+max_cycles = 3000000
+[fixture.verification]
+kind = "diagnostic"
+terminal_pc = 0x080004c8
+terminal_instruction = 0xeafffffe
+cpsr_mask = 0xffffffff
+cpsr_value = 0x600000df
+firmware_sha256 = "c7e0ef3c08cded916bc6057f5a2214741508db83cb089ce8993e3c7926fc7732"
+result_register = 12
+result = 0
+framebuffer_sha256 = "59ce42abae9825c2d2579c5cd838e47d88be917e37ea36ff162d46fc5d0991e3"
+
+[[fixture]]
+name = "sprites"
+rom = "../roms/sprites.gba"
+source = "../roms/sprites/sprites.s"
+linker = "../roms/pixels/linker.ld"
+sha256 = "ac62694d6961736a22497b0b478548a7853ba5142e73696e854058b2f1eba1f2"
+origin = "Original MIT guest assembly in roms/sprites/sprites.s"
+startup = "cartridge-direct-arm"
+bios_required = false
+mailbox_address = 0x03000000
+completion_id = 0x0062
+max_instructions = 1500000
+max_cycles = 6000000
+[fixture.verification]
+kind = "sprites"
+ready_pc = 0x08000220
+input_events = [
+    { cycle = 2808960, button = "Right", pressed = true },
+    { cycle = 3651648, button = "Right", pressed = false },
+    { cycle = 3651648, button = "Down", pressed = true },
+    { cycle = 3651648, button = "A", pressed = true },
+    { cycle = 4213440, button = "Down", pressed = false },
+    { cycle = 4213440, button = "A", pressed = false },
+    { cycle = 4494336, button = "Left", pressed = true },
+    { cycle = 4494336, button = "B", pressed = true },
+    { cycle = 4775232, button = "Left", pressed = false },
+    { cycle = 4775232, button = "Up", pressed = true },
+    { cycle = 5056128, button = "Up", pressed = false },
+    { cycle = 5056128, button = "B", pressed = false },
+]
+checkpoints = [
+    { background = { frame = 10, updates = 9, x = 510, y = 510, image_x = 510, image_y = 510 }, x = 112, y = 72, image_x = 112, image_y = 72, priority = 0, image_priority = 0, mapping_1d = true, image_mapping_1d = true },
+    { background = { frame = 13, updates = 12, x = 4, y = 510, image_x = 2, image_y = 510 }, x = 118, y = 72, image_x = 116, image_y = 72, priority = 0, image_priority = 0, mapping_1d = true, image_mapping_1d = true },
+    { background = { frame = 15, updates = 14, x = 4, y = 2, image_x = 4, image_y = 0 }, x = 118, y = 76, image_x = 118, image_y = 74, priority = 1, image_priority = 1, mapping_1d = true, image_mapping_1d = true },
+    { background = { frame = 18, updates = 17, x = 2, y = 0, image_x = 2, image_y = 2 }, x = 116, y = 74, image_x = 116, image_y = 76, priority = 0, image_priority = 0, mapping_1d = false, image_mapping_1d = false },
+    { background = { frame = 20, updates = 19, x = 2, y = 0, image_x = 2, image_y = 0 }, x = 116, y = 74, image_x = 116, image_y = 74, priority = 0, image_priority = 0, mapping_1d = true, image_mapping_1d = true },
+]
