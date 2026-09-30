@@ -11,6 +11,53 @@ assert.deepEqual(WebAssembly.Module.imports(module), [], "unexpected host depend
 const { exports: core } = await WebAssembly.instantiate(module, {});
 const verification = fixture.verification;
 const marker = (pc) => core.marker(pc, fixture.max_instructions, BigInt(fixture.max_cycles));
+if (verification.kind === "keypad") {
+    const mailbox = fixture.mailbox_address;
+    const wake = verification.and_mode ? 30000n : 20000n;
+    const advance = target => core.advance(target, fixture.max_instructions, BigInt(fixture.max_cycles));
+    core.initialize(1);
+    core.queue_keypad_input();
+    advance(wake - 1n);
+    assert.equal(core.inspect16(0x04000202), 0, "unrelated/incomplete keys must not request IF");
+    assert.equal(core.inspect16(mailbox + 2), 0, "no premature callback");
+    assert.equal(core.inspect16(mailbox + 8), 0, "no premature wake");
+    assert.equal(core.halted(), 1);
+    advance(wake);
+    assert.equal(core.cycles(), wake, "HALT must stop at the exact shared input deadline");
+    assert.equal(core.inspect16(0x04000202), 0x1000, "keypad source");
+    assert.equal(core.inspect16(mailbox + 2), 0, "callback runs after request boundary");
+    for (let frame = 1; frame <= 2; frame++) {
+        advance(BigInt(frame) * 280896n);
+        assert.equal(core.generation(), BigInt(frame), "completed frame boundary");
+        assert.equal(core.inspect16(mailbox), fixture.completion_id);
+        assert.equal(core.inspect16(mailbox + 2), 1, "one callback");
+        assert.equal(core.inspect16(mailbox + 8), 1, "one wake");
+        assert.equal(core.inspect16(mailbox + 4), 0x1000, "saved pending IF");
+        assert.equal(core.inspect16(mailbox + 6), 0, "saved W1C result");
+        assert.equal(core.inspect16(0x04000202), 0, "acknowledged IF");
+        assert.equal(core.halted(), 1);
+        // Frame one started before the IRQ. Frame two must be entirely red.
+        if (frame === 2) {
+            for (let index = 0; index < 240 * 160; index++) {
+                assert.equal(core.pixel(index), 0x001f, `bright red guest frame ${frame}, pixel ${index}`);
+            }
+        }
+    }
+    const instructions = core.instructions();
+    core.initialize_variant(0x300, verification.and_mode ? 0x8003 : 3, 1);
+    core.queue_keypad_input();
+    advance(2n * 280896n);
+    assert.equal(core.inspect16(0x04000202), 0, "disabled source IF");
+    assert.equal(core.inspect16(mailbox + 2), 0, "disabled source callback");
+    assert.equal(core.inspect16(mailbox + 8), 0, "disabled source wake");
+    assert.equal(core.halted(), 1);
+    core.initialize(0);
+    core.queue_keypad_input();
+    assert.equal(core.rejects_advance(280896n, fixture.max_instructions), 1);
+    assert.equal(core.inspect16(mailbox + 2), 0, "unmapped vector cannot dispatch callback");
+    console.log(`PASS WASM ${fixture.name} wake_cycle=${wake} frames=2 pixels=38400 instructions=${instructions} IF=0x1000 acknowledgement=0 disabled-stall unmapped-vector-rejected`);
+    process.exit(0);
+}
 if (verification.kind === "vblank") {
     const mailbox = fixture.mailbox_address;
     for (const configuration of [7, 15, 6, 5, 3]) {

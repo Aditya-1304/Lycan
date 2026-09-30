@@ -252,7 +252,7 @@ directories; those paths are historical provenance, not durable artifacts.
 | Audio queue / underruns | Not applicable to Slices 0–9; audio is outside this scope |
 | Routine allocation profile | Not measured: no allocation-count profile recorded |
 
-## Closeout CLI measurements — 2026-09-30
+## Closeout CLI measurements 
 
 Environment checked for this run: Intel Core i7-13620H (10 cores / 16 threads),
 Arch Linux rolling, rustc 1.98.1, release opt-level 3 / thin LTO, tracing disabled.
@@ -362,70 +362,4 @@ The headless p95 meets the core-only target. Total app-frame time, sustained
 Linux/Chrome/Brave cycles per wall second, allocation counts and 30-minute
 resource stability are not measured. Browser visual/runtime acceptance remains
 pending for the user; a WASM core run or build does not establish it. Audio is
-outside Slice 10. Slice 10A evidence is recorded below. Slice 11 DMA remains unimplemented.
-
-
-## Slice 10A: Keypad IRQ / HALT
-
-KEYCNT selects logical keys, enables keypad IRQ and chooses OR/AND mode.
-Requests latch IF bit 12 through the existing IE/IF/IME and firmware exception
-path. HALT now stops at queued input deadlines as well as display events;
-there is no host wake shortcut. Reserved KEYCNT bits read back as zero.
-
-The original one-shot guests initialize IRQ/system stacks and the callback at
-`0x03007FFC`. The callback disables further keypad requests, records IF, performs
-normal write-one-to-clear acknowledgement and returns to HALT. Source and frozen
-ROM/firmware identities are in `fixtures/manifest.toml`. Both ROMs are 780 bytes.
-
-| Fixture | SHA-256 | First request cycle | Final cycles / instructions | Callback / wake count | IF before / after |
-| --- | --- | --- | --- | --- | --- |
-| keypad-or | b50fb8c5348f9fe6ec32a2fe3a29a795318c276e83109a4388c10f93618d4b57 | 20,000 | 40,000 / 55 | 1 / 1 | 0x1000 / 0 |
-| keypad-and | 22fda0f2a33bdb59a474ecaa0de108509cc9424b4bc18a986d6ef730c539b51c | 30,000 | 40,000 / 55 | 1 / 1 | 0x1000 / 0 |
-
-### Plan acceptance
-
-| Requirement | Evidence / status |
-| --- | --- |
-| KEYCNT selection, enable, OR/AND over active-low input | Both bounded original guests passed |
-| Shared IE/IF/IME path | Guest callback reached through mapped firmware; IF source 0x1000, acknowledged to zero; final CPU halted |
-| OR/AND fixtures and negative combinations | Right at cycle 10,000 cannot wake either guest; A at 20,000 cannot wake AND; A+B at 30,000 wakes AND. Zero IF/callbacks checked one cycle before the expected request |
-| Disabled keypad IRQ | Matching scripted input with KEYCNT enable cleared leaves IF, callbacks and wakes zero; CPU stays halted |
-| Same scripted input on all platforms | Headless passed; Linux/Chrome/Brave replay buttons use the same `roms/keypad/input.rs`; manual runtime acceptance pending |
-| Earlier VBlank IRQ/HALT scene unchanged | VBlank eight-frame callback, masked wake, disabled stall, Thumb return and unmapped-vector checks passed; IRQ sprite captures remain identical |
-
-RED: before the core implementation, the bounded OR runner failed because the
-expected keypad request did not appear at cycle 20,000. GREEN: OR and AND now
-reach their declared request deadlines and complete through the firmware handler.
-These fixture checks catch missing or late wake, wrong source, premature IRQ,
-failed acknowledgement and disabled-source wake. No new Rust test files were added.
-
-Validation: all 19 manifest fixtures passed; original fixture rebuilds matched
-frozen hashes; 8 core and 7 session tests passed; native all-target Clippy with
-warnings denied, WASM app check, Trunk release build, formatting and whitespace
-checks passed. Browser execution was not inferred from compilation.
-
-| Platform | Core mean / p95 (ms) | Conversion mean / p95 (ms) | Texture submission mean / p95 (ms) | Samples | Runtime acceptance |
-| --- | --- | --- | --- | --- | --- |
-| Linux | Not measured | Not measured | Not measured | Not recorded | Manual check pending |
-| Chrome | Not measured | Not measured | Not measured | Not recorded | User check pending |
-| Brave | Not measured | Not measured | Not measured | Not recorded | User check pending |
-
-No Slice 10A wall-time benchmark was collected. Emulated cycle counts above are
-execution evidence, not host milliseconds. Existing user timings are preserved.
-
-### Manual replay
-
-```bash
-cd /home/aditya/Projects/GBA/gba-rs
-cargo run --locked -p gba-app --release
-env -u NO_COLOR trunk --config web/Trunk.toml serve --release
-```
-
-Use the native command for Linux, or open the Trunk URL in Chrome and Brave.
-Click **Replay keypad-or.gba**, then **Replay keypad-and.gba**. Each finishes at
-561,792 GBA cycles with 55 instructions, one callback, one wake, IF before
-`0x1000` and IF after `0`. The completed backdrop has red color value 1.
-Both replays release all keys and use the exact headless timeline; rerunning
-must reproduce the result. Recheck **Replay IRQ sprite input** and the VBlank
-demo, plus pause/reset/focus-loss responsiveness. Record platform acceptance and
-millisecond timings manually. Linux visual acceptance also remains unverified.
+outside Slice 10. Slice 10A verification is recorded in [keypad_interrupt.md](keypad_interrupt.md). Slice 11 DMA remains unimplemented.

@@ -599,30 +599,51 @@ impl eframe::App for GbaApp {
         {
             self.replay_deadline = None;
             self.session.toggle_pause();
-            self.status = match (
-                self.session.inspect16(0x03000002),
-                self.session.inspect16(0x03000004),
-            ) {
-                (Ok(x), Ok(y))
-                    if matches!(self.rom_name.as_str(), "sprites.gba" | "irq-sprites.gba") =>
-                {
-                    match (
-                        self.session.inspect16(0x03000008),
-                        self.session.inspect16(0x0300000a),
-                    ) {
-                        (Ok(player_x), Ok(player_y)) => format!(
-                            "Replay complete: player ({player_x}, {player_y}), scroll ({x}, {y}); expected (116, 74), (2, 0)"
-                        ),
-                        _ => "Replay complete; player position unavailable".to_owned(),
+            self.status = if matches!(self.rom_name.as_str(), "keypad-or.gba" | "keypad-and.gba") {
+                // Keypad mailbox fields are IRQ evidence, never square coordinates.
+                // Report success only after validating the complete guest contract.
+                match (
+                    self.session.inspect16(0x03000000),
+                    self.session.inspect16(0x03000002),
+                    self.session.inspect16(0x03000008),
+                    self.session.inspect16(0x03000004),
+                    self.session.inspect16(0x03000006),
+                ) {
+                    (Ok(0x0064), Ok(1), Ok(1), Ok(0x1000), Ok(0)) => format!(
+                        "Keypad replay complete: {} | one callback and wake | IF 0x1000 acknowledged to 0",
+                        self.rom_name
+                    ),
+                    _ => format!(
+                        "Keypad replay failed: {} completion mailbox does not match the expected IRQ result",
+                        self.rom_name
+                    ),
+                }
+            } else {
+                match (
+                    self.session.inspect16(0x03000002),
+                    self.session.inspect16(0x03000004),
+                ) {
+                    (Ok(x), Ok(y))
+                        if matches!(self.rom_name.as_str(), "sprites.gba" | "irq-sprites.gba") =>
+                    {
+                        match (
+                            self.session.inspect16(0x03000008),
+                            self.session.inspect16(0x0300000a),
+                        ) {
+                            (Ok(player_x), Ok(player_y)) => format!(
+                                "Replay complete: player ({player_x}, {player_y}), scroll ({x}, {y}); expected (116, 74), (2, 0)"
+                            ),
+                            _ => "Replay complete; player position unavailable".to_owned(),
+                        }
                     }
+                    (Ok(x), Ok(y)) if self.rom_name == "tiled.gba" => {
+                        format!("Replay complete: scroll ({x}, {y}); expected (2, 0)")
+                    }
+                    (Ok(x), Ok(y)) => {
+                        format!("Replay complete: square at ({x}, {y}); expected (114, 73)")
+                    }
+                    _ => "Replay complete; guest position unavailable".to_owned(),
                 }
-                (Ok(x), Ok(y)) if self.rom_name == "tiled.gba" => {
-                    format!("Replay complete: scroll ({x}, {y}); expected (2, 0)")
-                }
-                (Ok(x), Ok(y)) => {
-                    format!("Replay complete: square at ({x}, {y}); expected (114, 73)")
-                }
-                _ => "Replay complete; guest position unavailable".to_owned(),
             };
         }
         if self.loaded && !self.session.paused() && focused && visible {

@@ -329,7 +329,8 @@ fn manifest(path: &Path) -> Result<Manifest> {
         }
         match &fixture.verification {
             Verification::Keypad(expected) => {
-                if expected.firmware_sha256.len() != 64 || fixture.max_cycles < 40_000 {
+                if expected.firmware_sha256.len() != 64 || fixture.max_cycles < 2 * CYCLES_PER_FRAME
+                {
                     return Err(fail("invalid keypad identity or cycle bound"));
                 }
             }
@@ -1148,6 +1149,24 @@ fn run_keypad(fixture: &Fixture, expected: &Keypad, bytes: &[u8]) -> Result<()> 
         return Err(fail(
             "keypad callback, acknowledgement or bounded sleep mismatch",
         ));
+    }
+    // Mailbox success alone cannot prove that the guest palette store reached
+    // scanout. The first frame began before the IRQ; compare every pixel
+    // once the second frame has completed entirely after the guest store.
+    for frame in 1..=2 {
+        let remaining = fixture
+            .max_instructions
+            .checked_sub(machine.executed_instructions())
+            .ok_or_else(|| fail("keypad total instruction budget exhausted"))?;
+        machine.advance_to(Cycle(frame * CYCLES_PER_FRAME), remaining)?;
+        if machine.framebuffer_generation() != frame
+            || machine.framebuffer().len() != SCREEN_WIDTH * SCREEN_HEIGHT
+            || (frame == 2 && machine.framebuffer().iter().any(|&pixel| pixel != 0x001f))
+        {
+            return Err(fail(format!(
+                "keypad frame {frame}: expected all 38400 pixels bright red (0x001f)"
+            )));
+        }
     }
     // A disabled KEYCNT source must not request IF even with matching keys.
     let mut disabled = bytes.to_vec();

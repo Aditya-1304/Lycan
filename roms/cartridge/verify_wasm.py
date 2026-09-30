@@ -22,6 +22,8 @@ def main():
                         help="also execute ARM, Thumb, services and memory contracts in WASM")
     parser.add_argument("--vblank", action="store_true",
                         help="also execute the VBlank IRQ/HALT guest contract in WASM")
+    parser.add_argument("--keypad", action="store_true",
+                        help="also execute both keypad IRQ/HALT and framebuffer contracts in WASM")
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[2]
     manifest = root / "fixtures/manifest.toml"
@@ -31,6 +33,8 @@ def main():
         names.extend(["arm", "thumb", "services", "memory"])
     if args.vblank:
         names.append("vblank")
+    if args.keypad:
+        names.extend(["keypad-or", "keypad-and"])
     build = subprocess.run(
         ["cargo", "build", "--locked", "-p", "gba-core", "--release",
          "--target", "wasm32-unknown-unknown", "--message-format=json"],
@@ -54,7 +58,7 @@ def main():
             if hashlib.sha256(data).hexdigest() != fixture["sha256"]:
                 raise ValueError(f"{name} ROM differs from frozen SHA-256")
             verification = fixture["verification"]
-            if verification["kind"] in ("diagnostic", "vblank"):
+            if verification["kind"] in ("diagnostic", "vblank", "keypad"):
                 firmware = root / "roms/test-firmware/division.bin"
                 if hashlib.sha256(firmware.read_bytes()).hexdigest() != verification["firmware_sha256"]:
                     raise ValueError("test firmware differs from frozen SHA-256")

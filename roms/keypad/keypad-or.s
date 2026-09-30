@@ -53,7 +53,9 @@ callback:
     ldrh r1, [r2, #2]
     add r1, r1, #1
     strh r1, [r2, #2]
+    @ Publish a conspicuous guest-owned result after recording IRQ completion.
     ldr r0, =0x05000000
+    mov r1, #0x001f           @ Backdrop entry zero: full-intensity red.
     strh r1, [r0]
     bx lr
     .ltorg

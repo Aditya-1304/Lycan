@@ -1,7 +1,7 @@
 //! Minimal runtime bridge to the production core. Expectations are supplied
 //! from the frozen manifest by the Node runner, never copied into this module.
 
-use gba_core::{Cycle, Machine};
+use gba_core::{Button, Cycle, Machine};
 use std::cell::RefCell;
 
 thread_local! {
@@ -107,6 +107,33 @@ pub extern "C" fn halted() -> u32 {
 #[unsafe(no_mangle)]
 pub extern "C" fn rejects_advance(target: u64, instructions: u32) -> u32 {
     MACHINE.with_borrow_mut(|machine| {
-        u32::from(machine.advance_to(Cycle(target), instructions as usize).is_err())
+        u32::from(
+            machine
+                .advance_to(Cycle(target), instructions as usize)
+                .is_err(),
+        )
     })
+}
+
+/// Queue the exact logical transitions shared by the native runner and app.
+/// Scheduling is handled by the production core, including HALT deadlines.
+#[unsafe(no_mangle)]
+pub extern "C" fn queue_keypad_input() {
+    const INPUT: &[(Cycle, Button, bool)] = &include!("../keypad/input.rs");
+    MACHINE.with_borrow_mut(|machine| {
+        for &(cycle, button, pressed) in INPUT {
+            machine.set_button_at(cycle, button, pressed).unwrap();
+        }
+    });
+}
+
+/// Expose hardware time and completed scanout for exact input/frame assertions.
+#[unsafe(no_mangle)]
+pub extern "C" fn cycles() -> u64 {
+    MACHINE.with_borrow(|machine| machine.cycles().0)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn generation() -> u64 {
+    MACHINE.with_borrow(|machine| machine.framebuffer_generation())
 }
