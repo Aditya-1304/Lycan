@@ -853,3 +853,114 @@ BENCH tiled frames=600 core_mean_ms=1.092 core_p95_ms=1.111 upload=not-applicabl
 ```
 
 </details>
+
+
+## Move a sprite over the background status
+
+Slice 9's selected sprite layout, scripted overlaps and full pinned memory
+diagnostic pass headlessly. The assistant fills evidence/status fields; only
+millisecond timings below await manual entry. Platform visual checks remain
+not verified. See [the plan audit, limits and all commands](sprite_scene.md).
+
+### Conditions and sample boundaries
+
+- Evidence date: 2026-09-30
+- Checkout: `e3b7d19` plus Slice 9 working-tree changes
+- Reference environment: the CPU, AC/performance power profile, toolchain and
+  Chrome/Brave versions recorded above; not independently refreshed for this slice
+- Build: release, opt-level 3, thin LTO; tracing disabled; no sprite/tile cache
+- Scene: mode-0 512×512 BG0 plus two normal 16×16 4bpp objects, OBJ bank 3
+- Controls: arrows move player/scroll; A selects BG priority 1; B selects 2D mapping
+- Headless benchmark: 600 complete emulated frame advances after the settled replay;
+  post-benchmark image verification passes
+- App timing window: configured for 120 samples per metric; native/browser
+  measurements have not been collected for this slice
+- Moving/idle app timing classification: not recorded; automatic capture uses idle input
+- Evidence directory: `/tmp/gba-sprite-results` (temporary artifacts)
+
+### Verified correctness
+
+| Check | Evidence / status |
+| --- | --- |
+| Sprite checkpoints | Frames 10,13,15,18,20; all 38,400 pixels per checkpoint pass |
+| Player positions / OAM / mailbox | Passed; final player (116,74) |
+| BG scroll and frame generations | Passed; final guest and image scroll (2,0) |
+| OBJ palette, transparent border, OAM order, BG priority | Passed through independent overlap captures |
+| 1D/2D object addressing | Passed; 2D bottom colors intentionally differ |
+| Scene setup | PC 0x08000220 at 425,827 cycles |
+| Completion mailbox / update counts | 0x0062 / 9,12,14,17,19 |
+| Replay cycles / instructions | 5,617,935 / 491,556 |
+| Replay budgets | 6,000,000 cycles / 1,500,000 instructions; respected |
+| Full memory.gba diagnostic | Passed all 13 cases, including OAM mirror and ignored STRB |
+| Memory terminal result | PC 0x080004c8; R12=0; CPSR=0x600000df |
+| Memory terminal cycles / instructions | 244,787 / 22,539 |
+| Memory success text | Independent full-frame digest passed |
+| Earlier bitmap/background/CPU/timing fixtures | All passed |
+| Existing core/session tests | 14 passed; no new unit tests |
+| Clippy / native / WASM / Trunk release build | Passed |
+| Routine renderer allocations | No new heap allocation per instruction, access or scanline |
+
+### Millisecond timing entries
+
+| Metric | Headless (600 frames) | Native Linux (120 app samples) | Google Chrome (120 app samples) | Brave (120 app samples) |
+| --- | --- | --- | --- | --- |
+| Core execution mean (ms) | TODO | 4.569 ms |  6.213 ms | 3.961 ms |
+| Core execution p95 (ms) | TODO | 6.183 ms | 7.400 ms | 7.700 ms |
+| Pixel conversion mean (ms) | Not applicable | 0.113 ms |  0.183 m | 0.170 ms |
+| Pixel conversion p95 (ms) | Not applicable | 0.150 ms | 0.300 ms | 0.300 ms |
+| Texture submission mean (ms) | Not applicable | 0.028 ms |  0.028 ms |  0.023 ms |
+| Texture submission p95 (ms) | Not applicable | 0.036 ms |  0.100 ms | 0.100 ms |
+
+- Memory diagnostic completion time: TODO ms (from the memory fixture output)
+- Unthrottled speed: awaiting the manually entered headless mean;
+  assistant derives `16.742706 / core_mean_ms` times real time
+- Comparison against core p95 <12 ms: awaiting the timing entries
+- App core samples measure bounded callbacks, not necessarily complete frames
+- Texture submission is CPU work; GPU completion and end-to-end frame latency
+  are not measured
+- Sustained real-time speed / long-session memory or input-delay observations:
+  not measured; cannot be derived from callback milliseconds alone
+
+### Scanline / OBJ profile
+
+- Status: completed on an optimized build with source debug information
+- Window: 60 benchmark frames plus initialization and the 20-frame replay
+- Host instruction references: 2,047,673,889
+- OBJ tile-number calculation: 163,010 host instruction references
+- OBJ palette reads: 279,220 host instruction references
+- OAM winner storage: 111,688 host instruction references
+- OBJ/BG priority comparison: 55,844 host instruction references
+- Profile / source report: `scanline.callgrind` / `scanline-profile.txt` in the evidence directory
+- Interpretation: host instruction counts identify selected object work, not GBA
+  cycles or milliseconds; instrumented timings are excluded from manual timing entries
+- Cache optimization: none introduced
+
+### Platform acceptance
+
+| Check | Native Linux | Google Chrome | Brave |
+| --- | --- | --- | --- |
+| Arrow movement and screen clamps | Not verified visually | Not verified visually | Not verified visually |
+| Transparent edges and overlapping marker | Headless passed; UI not verified | Headless passed; UI not verified | Headless passed; UI not verified |
+| Behind-BG priority and 1D/2D color change | Headless passed; UI not verified | Headless passed; UI not verified | Headless passed; UI not verified |
+| Replay final player (116,74), scroll (2,0) | Headless passed; UI not verified | Headless passed; UI not verified | Headless passed; UI not verified |
+| memory.gba “All tests passed” image | Headless passed; UI not verified | Headless passed; UI not verified | Headless passed; UI not verified |
+| Reset / pause / focus-loss interaction | Existing session checks pass; UI not verified | UI not verified | UI not verified |
+| Hidden-tab restore without catch-up | Not applicable | Not verified | Not verified |
+| Earlier demo UI regressions | Not verified visually | Not verified visually | Not verified visually |
+| End-to-end responsiveness within frame budget | Not measured | Not measured | Not measured |
+
+### Artifacts and remaining limits
+
+- Recorded fixtures: `/tmp/gba-sprite-results/fixtures.txt`
+- Recorded benchmark: `/tmp/gba-sprite-results/headless-benchmark.txt`
+- Captures: `frame.sprites-frame-{10,13,15,18,20}.ppm` and `frame.memory.ppm`
+  in the evidence directory
+- Native manual capture command writes `native.ppm` / `native.txt`; not yet generated
+- Chrome/Brave screenshots and timing records: not yet provided
+- Automated Slice 9 acceptance: passed for the selected normal 16×16 4bpp layout
+- Visual runtime acceptance: not verified on Linux/Chrome/Brave
+- Fixture-tied follow-ups: extend sprites.gba for other normal sizes/shapes/flips
+  and 8bpp captures; affine/double-size and semi-transparent/window modes are
+  currently skipped and belong to later display slices
+- Hardware timing follow-up: memory.gba proves functional access rules, not OBJ
+  fetch budgets or OAM contention timing; see the detailed audit
