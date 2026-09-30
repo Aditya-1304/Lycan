@@ -87,7 +87,6 @@ const CPSR_V: u32 = 1 << 28;
 
 const CPSR_I: u32 = 1 << 7;
 const CPSR_F: u32 = 1 << 6;
-#[cfg(test)]
 const CPSR_T: u32 = 1 << 5;
 
 const CPSR_SYSTEM_MODE: u32 = 0x1F;
@@ -271,15 +270,17 @@ impl Cpu {
     /// Fills the two-stage instruction pipeline after reset or a taken branch.
     fn refill<B: CpuBus>(&mut self, bus: &mut B) -> Result<(), CoreError> {
         let pc = self.registers[15];
-        self.pipeline[0] = bus.read32(
+        self.pipeline[0] = self.fetch(
+            bus,
             pc,
             Access {
                 kind: AccessKind::Fetch,
                 sequential: false,
             },
         )?;
-        self.pipeline[1] = bus.read32(
-            pc.wrapping_add(4),
+        self.pipeline[1] = self.fetch(
+            bus,
+            pc.wrapping_add(self.instruction_width()),
             Access {
                 kind: AccessKind::Fetch,
                 sequential: true,
@@ -290,6 +291,40 @@ impl Cpu {
         Ok(())
     }
 
+    /// Instruction width follows CPSR.T; register 15 stores the next executed
+    /// address, while individual operands expose the architectural pipeline PC.
+    fn instruction_width(&self) -> u32 {
+        if self.cpsr & CPSR_T != 0 { 2 } else { 4 }
+    }
+
+    fn fetch<B: CpuBus>(
+        &self,
+        bus: &mut B,
+        address: u32,
+        access: Access,
+    ) -> Result<u32, CoreError> {
+        if self.cpsr & CPSR_T != 0 {
+            bus.read16(address, access).map(u32::from)
+        } else {
+            bus.read32(address, access)
+        }
+    }
+
+    /// BX alone selects state from bit zero. Ordinary PC writes retain state;
+    /// every taken branch discards the old pipeline before fetching its target.
+    fn branch<B: CpuBus>(
+        &mut self,
+        bus: &mut B,
+        target: u32,
+        exchange: bool,
+    ) -> Result<(), CoreError> {
+        if exchange {
+            self.cpsr = (self.cpsr & !CPSR_T) | if target & 1 != 0 { CPSR_T } else { 0 };
+        }
+        self.registers[15] = target & !(self.instruction_width() - 1);
+        self.refill(bus)
+    }
+
     /// Executes from the pipeline and accounts for fetch, data, and internal cycles once.
     fn step<B: CpuBus>(&mut self, bus: &mut B) -> Result<StepOutcome, CoreError> {
         if !self.pipeline_valid {
@@ -297,20 +332,34 @@ impl Cpu {
         }
         let address = self.registers[15];
         let instruction = self.pipeline[0];
-        let next = bus.read32(
-            address.wrapping_add(8),
+        let width = self.instruction_width();
+        let next = self.fetch(
+            bus,
+            address.wrapping_add(width * 2),
             Access {
                 kind: AccessKind::Fetch,
                 sequential: self.next_fetch_is_sequential,
             },
         )?;
         self.pipeline = [self.pipeline[1], next];
-        self.registers[15] = address.wrapping_add(4);
+        self.registers[15] = address.wrapping_add(width);
         self.next_fetch_is_sequential = true;
+        if self.cpsr & CPSR_T != 0 {
+            self.execute_thumb(address, instruction as u16, bus)?;
+            return Ok(StepOutcome { address });
+        }
         if !self.condition_passes(instruction >> 28) {
             return Ok(StepOutcome { address });
         }
-        if instruction & 0x0E00_0000 == 0x0A00_0000 {
+        if instruction & 0x0fff_fff0 == 0x012f_ff10 {
+            let source = (instruction & 15) as usize;
+            let target = if source == 15 {
+                address.wrapping_add(8)
+            } else {
+                self.registers[source]
+            };
+            self.branch(bus, target, true)?;
+        } else if instruction & 0x0E00_0000 == 0x0A00_0000 {
             if instruction & (1 << 24) != 0 {
                 self.registers[14] = address.wrapping_add(4);
             }
@@ -337,6 +386,143 @@ impl Cpu {
             });
         }
         Ok(StepOutcome { address })
+    }
+
+    /// Implements the counter's Thumb bridge using the same ALU flag rules and
+    /// timed bus as ARM. Unsupported families remain explicit errors until a
+    /// later diagnostic reproduces their need; no host-side counter is used.
+    fn execute_thumb<B: CpuBus>(
+        &mut self,
+        address: u32,
+        instruction: u16,
+        bus: &mut B,
+    ) -> Result<(), CoreError> {
+        let op = u32::from(instruction);
+        let rd = (op & 7) as usize;
+        let rn = ((op >> 3) & 7) as usize;
+        let access = Access {
+            kind: AccessKind::Data,
+            sequential: false,
+        };
+        if op & 0xe000 == 0 && op & 0x1800 != 0x1800 {
+            // Immediate shifts share ARM's zero-shift encodings and carry rules.
+            let arm = (13 << 21)
+                | (1 << 20)
+                | ((rd as u32) << 12)
+                | (((op >> 11) & 3) << 5)
+                | (((op >> 6) & 31) << 7)
+                | rn as u32;
+            self.execute_data_processing(address, arm);
+        } else if op & 0xe000 == 0x2000 {
+            let destination = (op >> 8) & 7;
+            let opcode = [13, 10, 4, 2][((op >> 11) & 3) as usize];
+            let arm = (1 << 25)
+                | (opcode << 21)
+                | (1 << 20)
+                | (destination << 16)
+                | (destination << 12)
+                | (op & 255);
+            self.execute_data_processing(address, arm);
+        } else if op & 0xfc00 == 0x4400 {
+            let destination = ((op & 7) | ((op >> 4) & 8)) as usize;
+            let source = ((op >> 3) & 15) as usize;
+            let operand = if source == 15 {
+                address.wrapping_add(4)
+            } else {
+                self.registers[source]
+            };
+            match (op >> 8) & 3 {
+                0 | 2 => {
+                    let lhs = if destination == 15 {
+                        address.wrapping_add(4)
+                    } else {
+                        self.registers[destination]
+                    };
+                    let value = if op & 0x0200 == 0 {
+                        lhs.wrapping_add(operand)
+                    } else {
+                        operand
+                    };
+                    if destination == 15 {
+                        self.branch(bus, value, false)?;
+                    } else {
+                        self.registers[destination] = value;
+                    }
+                }
+                1 => {
+                    let arm = (10 << 21) | (1 << 20) | ((destination as u32) << 16) | source as u32;
+                    self.execute_data_processing(address.wrapping_sub(4), arm);
+                }
+                3 if op & 0x0087 == 0 => self.branch(bus, operand, true)?,
+                _ => {
+                    return Err(CoreError::UnsupportedInstruction {
+                        address,
+                        instruction: op,
+                    });
+                }
+            }
+        } else if op & 0xf800 == 0x4800 {
+            let target = (address.wrapping_add(4) & !3).wrapping_add((op & 255) * 4);
+            self.registers[((op >> 8) & 7) as usize] = bus.read32(target, access)?;
+            bus.idle(1);
+            self.next_fetch_is_sequential = false;
+        } else if op & 0xf000 == 0x6000 || op & 0xf000 == 0x8000 {
+            let halfword = op & 0xf000 == 0x8000;
+            let offset = ((op >> 6) & 31) * if halfword { 2 } else { 4 };
+            let target = self.registers[rn].wrapping_add(offset);
+            if op & 0x0800 != 0 {
+                self.registers[rd] = if halfword {
+                    u32::from(bus.read16(target, access)?)
+                } else {
+                    bus.read32(target & !3, access)?
+                        .rotate_right((target & 3) * 8)
+                };
+                bus.idle(1);
+            } else if halfword {
+                bus.write16(target, self.registers[rd] as u16, access)?;
+            } else {
+                bus.write32(target & !3, self.registers[rd], access)?;
+            }
+            self.next_fetch_is_sequential = false;
+        } else if op & 0xf000 == 0xa000 {
+            let base = if op & 0x0800 == 0 {
+                address.wrapping_add(4) & !3
+            } else {
+                self.registers[13]
+            };
+            self.registers[((op >> 8) & 7) as usize] = base.wrapping_add((op & 255) * 4);
+        } else if op & 0xf000 == 0xd000 && (op >> 8) & 15 < 14 {
+            if self.condition_passes((op >> 8) & 15) {
+                let offset = (instruction as u8 as i8 as i32) * 2;
+                self.branch(
+                    bus,
+                    address.wrapping_add(4).wrapping_add(offset as u32),
+                    false,
+                )?;
+            }
+        } else if op & 0xf800 == 0xe000 {
+            let offset = ((op & 0x07ff) << 21) as i32 >> 20;
+            self.branch(
+                bus,
+                address.wrapping_add(4).wrapping_add(offset as u32),
+                false,
+            )?;
+        } else if op & 0xf800 == 0xf000 {
+            // ARMv4T BL is two independently executed halfwords. The prefix
+            // places the sign-extended high offset in LR; the suffix tags return.
+            let offset = ((op & 0x07ff) << 21) as i32 >> 9;
+            self.registers[14] = address.wrapping_add(4).wrapping_add(offset as u32);
+        } else if op & 0xf800 == 0xf800 {
+            let target = self.registers[14].wrapping_add((op & 0x07ff) * 2);
+            self.registers[14] = address.wrapping_add(2) | 1;
+            self.branch(bus, target, false)?;
+        } else {
+            return Err(CoreError::UnsupportedInstruction {
+                address,
+                instruction: op,
+            });
+        }
+        Ok(())
     }
 
     fn condition_passes(&self, condition: u32) -> bool {
@@ -1195,6 +1381,11 @@ impl Machine {
         Cycle(self.system.cycles)
     }
 
+    /// Reports the active instruction set for bounded guest-return diagnostics.
+    pub fn is_thumb(&self) -> bool {
+        self.cpu.cpsr & CPSR_T != 0
+    }
+
     /// Returns the number of successfully executed guest instructions since reset.
     pub fn executed_instructions(&self) -> usize {
         self.executed_instructions
@@ -1246,6 +1437,28 @@ fn range_for(address: u32, start: u32, length: usize, width: usize) -> Option<Ra
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Catches stale ARM pipeline words after BX, incorrect Thumb PC alignment,
+    // and a BL return that loses its Thumb tag before the final ARM return.
+    // Earlier guest fixtures execute exclusively in ARM state.
+    #[test]
+    fn counter_returns_from_thumb_with_architectural_pc_values() {
+        let mut machine = Machine::new();
+        machine
+            .load_rom(include_bytes!("../../../roms/counter.gba"))
+            .unwrap();
+        machine.set_button(Button::A, true);
+        let report = machine
+            .run_until_pc(0x08000040, 100_000, Cycle(300_000))
+            .unwrap();
+        assert_eq!(report.instruction_address, 0x08000040);
+        assert_eq!(machine.cpu.cpsr & CPSR_T, 0);
+        assert_eq!(machine.cpu.registers[15], 0x08000044);
+        assert_eq!(machine.cpu.registers[0], 1);
+        assert_eq!(machine.cpu.registers[2], 0x080000d0);
+        assert_eq!(machine.cpu.registers[4], 0x080000b4);
+        assert_eq!(machine.cpu.registers[14], 0x080000bf);
+    }
 
     // Catches a guest seeing pressed keys at reset or writable hardware status.
     // Existing tests exercise VRAM and CPU startup, not hardware input reads.

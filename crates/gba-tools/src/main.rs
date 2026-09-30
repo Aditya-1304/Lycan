@@ -57,6 +57,26 @@ enum Verification {
     Buttons(Movement),
     Palette(Palette),
     Hello(Hello),
+    Counter(Counter),
+}
+
+/// Frozen observations bind input, ARM return, Thumb PC semantics, and scanout.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Counter {
+    return_pc: u32,
+    adr_address: u32,
+    observed_pc: u32,
+    input_events: Vec<InputEvent>,
+    checkpoints: Vec<CounterCheckpoint>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CounterCheckpoint {
+    frame: u16,
+    count: u16,
+    image_count: u16,
 }
 
 /// Pinned upstream hello completion and an independently derived full-frame
@@ -183,6 +203,34 @@ fn manifest(path: &Path) -> Result<Manifest> {
             )));
         }
         match &fixture.verification {
+            Verification::Counter(expected) => {
+                if expected.return_pc & 3 != 0
+                    || expected.adr_address & 3 != 0
+                    || expected.checkpoints.is_empty()
+                    || expected
+                        .checkpoints
+                        .windows(2)
+                        .any(|pair| pair[0].frame >= pair[1].frame)
+                    || expected.checkpoints.iter().any(|point| {
+                        point.frame == 0
+                            || point.count > 16
+                            || point.image_count > 16
+                            || u64::from(point.frame) * CYCLES_PER_FRAME > fixture.max_cycles
+                    })
+                    || expected
+                        .input_events
+                        .windows(2)
+                        .any(|pair| pair[0].cycle > pair[1].cycle)
+                {
+                    return Err(fail("invalid counter expectations"));
+                }
+                for event in &expected.input_events {
+                    button(&event.button)?;
+                    if event.cycle > fixture.max_cycles {
+                        return Err(fail("counter input exceeds cycle limit"));
+                    }
+                }
+            }
             Verification::Hello(expected) => {
                 if expected.terminal_pc & 3 != 0 || expected.framebuffer_sha256.len() != 64 {
                     return Err(fail("invalid hello expectation"));
@@ -355,9 +403,10 @@ fn pixels(fixture: &Fixture) -> Result<&Pixels> {
         Verification::Pixels(expected)
         | Verification::Calculations(expected)
         | Verification::Copy(expected) => Ok(expected),
-        Verification::Buttons(_) | Verification::Palette(_) | Verification::Hello(_) => {
-            Err(fail("expected a terminal pixels fixture"))
-        }
+        Verification::Buttons(_)
+        | Verification::Palette(_)
+        | Verification::Hello(_)
+        | Verification::Counter(_) => Err(fail("expected a terminal pixels fixture")),
     }
 }
 
@@ -638,6 +687,102 @@ fn run_palette(
     Ok(())
 }
 
+/// Executes every declared ARM return before sampling RAM and completed scanout.
+/// The manifest supplies independent expected values; a looping ROM is not success.
+fn run_counter(
+    fixture: &Fixture,
+    expected: &Counter,
+    bytes: &[u8],
+    capture_path: Option<&str>,
+) -> Result<()> {
+    let mut machine = Machine::new();
+    machine.load_rom(bytes)?;
+    for event in &expected.input_events {
+        machine.set_button_at(Cycle(event.cycle), button(&event.button)?, event.pressed)?;
+    }
+    let mut frame = 0;
+    for point in &expected.checkpoints {
+        while frame < point.frame {
+            // A multi-frame fixture has one total instruction budget, shared
+            // by return detection and scanout advancement, rather than a fresh
+            // allowance on every frame or checkpoint.
+            let remaining = fixture
+                .max_instructions
+                .saturating_sub(machine.executed_instructions());
+            machine.run_until_pc(expected.return_pc, remaining, Cycle(fixture.max_cycles))?;
+            if machine.is_thumb() {
+                return Err(fail("counter failed to return in ARM state"));
+            }
+            frame += 1;
+            let remaining = fixture
+                .max_instructions
+                .saturating_sub(machine.executed_instructions());
+            machine.advance_to(Cycle(u64::from(frame) * CYCLES_PER_FRAME), remaining)?;
+            if machine.cycles().0 > fixture.max_cycles {
+                return Err(fail("counter exceeded cycle limit"));
+            }
+        }
+        let actual = [
+            machine.inspect16(fixture.mailbox_address)?,
+            machine.inspect16(fixture.mailbox_address + 2)?,
+            machine.inspect16(fixture.mailbox_address + 4)?,
+        ];
+        if actual != [fixture.completion_id, point.count, point.frame]
+            || machine.framebuffer_generation() != u64::from(point.frame)
+        {
+            return Err(fail(format!(
+                "counter frame {} unexpected mailbox {actual:?}",
+                point.frame
+            )));
+        }
+        for (offset, wanted) in [(8, expected.adr_address), (12, expected.observed_pc)] {
+            let actual = u32::from(machine.inspect16(fixture.mailbox_address + offset)?)
+                | (u32::from(machine.inspect16(fixture.mailbox_address + offset + 2)?) << 16);
+            if actual != wanted {
+                return Err(fail(format!(
+                    "counter PC observation expected {wanted:#010x}, got {actual:#010x}"
+                )));
+            }
+        }
+        for (index, &pixel) in machine.framebuffer().iter().enumerate() {
+            let x = index % SCREEN_WIDTH;
+            let y = index / SCREEN_WIDTH;
+            let wanted = if (72..88).contains(&y)
+                && (56..56 + usize::from(point.image_count) * 8).contains(&x)
+            {
+                0x03e0
+            } else {
+                0
+            };
+            if pixel != wanted {
+                return Err(fail(format!(
+                    "counter frame {} pixel ({x},{y}) expected {wanted:#06x}, got {pixel:#06x}",
+                    point.frame
+                )));
+            }
+        }
+        if let Some(path) = capture_path {
+            capture(
+                Path::new(&format!("{path}.counter-frame-{}.ppm", point.frame)),
+                machine.framebuffer(),
+            )?;
+        }
+        println!(
+            "PASS counter frame={} count={} image_count={} return=ARM pixels={}",
+            point.frame,
+            point.count,
+            point.image_count,
+            SCREEN_WIDTH * SCREEN_HEIGHT
+        );
+    }
+    println!(
+        "PASS counter cycles={} instructions={}",
+        machine.cycles().0,
+        machine.executed_instructions()
+    );
+    Ok(())
+}
+
 fn option(args: &[String], key: &str) -> Result<Option<String>> {
     match args.iter().position(|arg| arg == key) {
         Some(index) => args
@@ -673,6 +818,17 @@ fn run() -> Result<()> {
     let manifest = manifest(&path)?;
     for fixture in &manifest.fixture {
         let bytes = load(fixture, path.parent().unwrap())?;
+        if let Verification::Counter(expected) = &fixture.verification {
+            if !bench {
+                run_counter(
+                    fixture,
+                    expected,
+                    &bytes,
+                    option(&args, "--capture")?.as_deref(),
+                )?;
+            }
+            continue;
+        }
         if let Verification::Buttons(expected) = &fixture.verification {
             if bench {
                 continue;
