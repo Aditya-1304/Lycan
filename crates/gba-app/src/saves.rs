@@ -1,11 +1,12 @@
 //! Platform storage boundary. The app dispatches at most one operation at a time;
 //! every completion carries ROM identity, session generation and snapshot revision.
 
-use gba_session::SRAM_BYTES;
+use gba_session::{FLASH64_BYTES, SRAM_BYTES};
 use sha2::{Digest, Sha256};
 use std::sync::mpsc::{self, Receiver, Sender};
 
 const MAGIC: &[u8; 8] = b"GBASRAM1";
+const FLASH_MAGIC: &[u8; 8] = b"GBAFLS64";
 
 /// SHA-256 of the original cartridge bytes, independent of filenames and titles.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -24,15 +25,25 @@ impl Identity {
 /// Raw saves are deliberately rejected because their cartridge cannot be verified.
 pub fn encode(identity: &Identity, bytes: &[u8]) -> Vec<u8> {
     let mut output = Vec::with_capacity(40 + bytes.len());
-    output.extend_from_slice(MAGIC);
+    // Keep the existing SRAM envelope byte-for-byte compatible. Flash exports
+    // declare their own capacity; the core validates it against the loaded chip.
+    output.extend_from_slice(if bytes.len() == FLASH64_BYTES {
+        FLASH_MAGIC
+    } else {
+        MAGIC
+    });
     output.extend_from_slice(&identity.0);
     output.extend_from_slice(bytes);
     output
 }
 
 pub fn decode(identity: &Identity, bytes: &[u8]) -> Result<Vec<u8>, String> {
-    if bytes.len() != 40 + SRAM_BYTES || &bytes[..8] != MAGIC {
-        return Err("Expected a GBASRAM1 export containing 32768 SRAM bytes".into());
+    let valid_sram = bytes.len() == 40 + SRAM_BYTES && &bytes[..8] == MAGIC;
+    let valid_flash = bytes.len() == 40 + FLASH64_BYTES && &bytes[..8] == FLASH_MAGIC;
+    if !valid_sram && !valid_flash {
+        return Err(
+            "Expected a GBASRAM1 (32768 bytes) or GBAFLS64 (65536 bytes) backup export".into(),
+        );
     }
     if bytes[8..40] != identity.0 {
         return Err("Save belongs to a different ROM identity".into());
@@ -72,7 +83,7 @@ impl Default for Storage {
             receiver,
             busy: false,
             failed: false,
-            status: "No SRAM cartridge loaded".into(),
+            status: "No supported backup cartridge loaded".into(),
         }
     }
 }
@@ -124,7 +135,7 @@ impl Storage {
     }
 
     pub fn load(&mut self, ctx: &eframe::egui::Context, identity: Identity, generation: u64) {
-        self.status = "Loading initial SRAM; guest paused".into();
+        self.status = "Loading initial backup; guest paused".into();
         let key = identity.clone();
         self.dispatch(ctx, identity, generation, 0, async move {
             Outcome::Loaded(read(&key).await)
@@ -150,11 +161,11 @@ impl Storage {
     }
 
     pub fn import(&mut self, ctx: &eframe::egui::Context, identity: Identity, generation: u64) {
-        self.status = "Selecting SRAM import; guest paused".into();
+        self.status = "Selecting backup import; guest paused".into();
         let key = identity.clone();
         // Construct the picker during the click to retain browser user activation.
         let picker = rfd::AsyncFileDialog::new()
-            .add_filter("SRAM export", &["gbasav"])
+            .add_filter("Cartridge backup", &["gbasav"])
             .pick_file();
         self.dispatch(ctx, identity, generation, 0, async move {
             let result = if let Some(file) = picker.await {
@@ -355,23 +366,33 @@ fn download(name: &str, bytes: &[u8]) -> Result<(), String> {
 pub fn probe(mode: &str) -> Result<(), String> {
     #[path = "../../../roms/sram/contract.rs"]
     mod contract;
-    contract::verify();
-    let identity = Identity::of(contract::ROM);
+    #[path = "../../../roms/flash/contract.rs"]
+    mod flash_contract;
+    type GuestRun = fn(Option<&[u8]>, bool, u16) -> gba_session::SaveImage;
+    let (rom, run): (&[u8], GuestRun) = if mode.starts_with("flash-") {
+        flash_contract::verify();
+        (flash_contract::ROM, flash_contract::run)
+    } else {
+        contract::verify();
+        (contract::ROM, contract::run)
+    };
+    let mode = mode.strip_prefix("flash-").unwrap_or(mode);
+    let identity = Identity::of(rom);
     let saved = pollster::block_on(read(&identity))?;
     let image = match mode {
         "write" => {
             if saved.is_some() {
                 return Err("Probe write needs a fresh GBA_SAVE_DIR".into());
             }
-            let image = contract::run(None, true, 1);
+            let image = run(None, true, 1);
             pollster::block_on(write(&identity, &encode(&identity, &image.bytes)))?;
             image
         }
         "read" => {
             let bytes = saved.ok_or("Probe expected an existing saved score")?;
-            contract::run(Some(&bytes), false, 1)
+            run(Some(&bytes), false, 1)
         }
-        _ => return Err("Use --save-probe write or --save-probe read".into()),
+        _ => return Err("Use --save-probe [flash-]write or [flash-]read".into()),
     };
     let portable = encode(&identity, &image.bytes);
     assert_eq!(decode(&identity, &portable)?, image.bytes);
@@ -387,7 +408,7 @@ pub fn probe(mode: &str) -> Result<(), String> {
     );
     assert!(replace(std::path::Path::new("/dev/null/gba-save"), &portable).is_err());
     println!(
-        "Native SRAM {mode} PASS: ROM={}, save={}, export/import validated, failed replacement rejected",
+        "Native backup {mode} PASS: ROM={}, save={}, export/import validated, failed replacement rejected",
         identity.key(),
         path(&identity)?.display()
     );
