@@ -40,7 +40,11 @@ jobs:
 
       - name: Ensure fixture is reproducible
         run: |
-          git diff --exit-code -- roms/pixels.gba roms/buttons.gba
+          git diff --exit-code -- \
+            roms/pixels.gba \
+            roms/buttons.gba \
+            roms/palette.gba \
+            roms/calculations.gba
 
       - name: Formatting
         run: |
