@@ -67,10 +67,21 @@ enum Verification {
     Tiled(Tiled),
     Sprites(Sprites),
     Vblank(Vblank),
+    Keypad(Keypad),
     Stripes(Stripes),
     Timing(Timing),
     Diagnostic(Diagnostic),
 }
+
+/// Frozen keypad mode and mapped firmware identity for bounded guest acceptance.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Keypad {
+    and_mode: bool,
+    firmware_sha256: String,
+}
+
+const KEYPAD_INPUT: &[(Cycle, Button, bool)] = &include!("../../../roms/keypad/input.rs");
 
 /// IRQ guest identity and bounded completion; configuration variants only change
 /// the declared source/master/CPU mask word in the verified original ROM.
@@ -305,7 +316,7 @@ fn manifest(path: &Path) -> Result<Manifest> {
             || (fixture.bios_required
                 != (matches!(
                     fixture.verification,
-                    Verification::Diagnostic(_) | Verification::Vblank(_)
+                    Verification::Diagnostic(_) | Verification::Vblank(_) | Verification::Keypad(_)
                 ) || matches!(&fixture.verification, Verification::Sprites(expected) if expected.firmware_sha256.is_some())))
             || fixture.max_instructions == 0
             || fixture.max_cycles == 0
@@ -317,6 +328,11 @@ fn manifest(path: &Path) -> Result<Manifest> {
             )));
         }
         match &fixture.verification {
+            Verification::Keypad(expected) => {
+                if expected.firmware_sha256.len() != 64 || fixture.max_cycles < 40_000 {
+                    return Err(fail("invalid keypad identity or cycle bound"));
+                }
+            }
             Verification::Vblank(expected) => {
                 if expected.frames < 2
                     || u64::from(expected.frames) * CYCLES_PER_FRAME > fixture.max_cycles
@@ -613,6 +629,7 @@ fn build_fixtures(path: &Path) -> Result<()> {
             let expected = match &fixture.verification {
                 Verification::Diagnostic(expected) => Some(&expected.firmware_sha256),
                 Verification::Vblank(expected) => Some(&expected.firmware_sha256),
+                Verification::Keypad(expected) => Some(&expected.firmware_sha256),
                 Verification::Sprites(expected) => expected.firmware_sha256.as_ref(),
                 _ => None,
             };
@@ -719,6 +736,7 @@ fn pixels(fixture: &Fixture) -> Result<&Pixels> {
         | Verification::Stripes(_)
         | Verification::Timing(_)
         | Verification::Diagnostic(_)
+        | Verification::Keypad(_)
         | Verification::Vblank(_) => Err(fail("expected a terminal pixels fixture")),
     }
 }
@@ -1086,8 +1104,79 @@ fn check_sprite_image(machine: &Machine, point: &SpriteCheckpoint) -> Result<()>
     Ok(())
 }
 
-/// Checks callback results and scanout together; disabled-source success is an
-/// explicit expected stall, never an arbitrary idle PC counted as completion.
+/// Checks negative combinations before the exact input deadline, then guest IRQ
+/// dispatch, W1C acknowledgement and return to HALT under a total work budget.
+fn run_keypad(fixture: &Fixture, expected: &Keypad, bytes: &[u8]) -> Result<()> {
+    if hash(gba_core::TEST_FIRMWARE) != expected.firmware_sha256 {
+        return Err(fail("keypad firmware identity mismatch"));
+    }
+    let mut machine = Machine::new();
+    machine.load_rom(bytes)?;
+    machine.enable_test_firmware();
+    for &(cycle, button, pressed) in KEYPAD_INPUT {
+        machine.set_button_at(cycle, button, pressed)?;
+    }
+    let wake = if expected.and_mode { 30_000 } else { 20_000 };
+    machine.advance_to(Cycle(wake - 1), fixture.max_instructions)?;
+    if machine.inspect16(0x04000202)? != 0
+        || machine.inspect16(fixture.mailbox_address + 2)? != 0
+        || !machine.halted()
+    {
+        return Err(fail("unrelated or incomplete keys woke the guest"));
+    }
+    machine.advance_to(Cycle(wake), fixture.max_instructions)?;
+    if machine.inspect16(0x04000202)? != 0x1000
+        || machine.inspect16(fixture.mailbox_address + 2)? != 0
+        || !machine.halted()
+        || machine.cycles().0 != wake
+    {
+        return Err(fail(
+            "keypad requested early, late, or with incorrect IF source",
+        ));
+    }
+    machine.advance_to(Cycle(40_000), fixture.max_instructions)?;
+    let count = 1;
+    if machine.inspect16(fixture.mailbox_address)? != fixture.completion_id
+        || machine.inspect16(fixture.mailbox_address + 2)? != count
+        || machine.inspect16(fixture.mailbox_address + 4)? != 0x1000
+        || machine.inspect16(fixture.mailbox_address + 6)? != 0
+        || machine.inspect16(fixture.mailbox_address + 8)? != count
+        || machine.inspect16(0x04000202)? != 0
+        || !machine.halted()
+        || machine.executed_instructions() > fixture.max_instructions
+    {
+        return Err(fail(
+            "keypad callback, acknowledgement or bounded sleep mismatch",
+        ));
+    }
+    // A disabled KEYCNT source must not request IF even with matching keys.
+    let mut disabled = bytes.to_vec();
+    let control = if expected.and_mode { 0x8003u32 } else { 3u32 };
+    disabled[0x300..0x304].copy_from_slice(&control.to_le_bytes());
+    let mut probe = Machine::new();
+    probe.load_rom(&disabled)?;
+    probe.enable_test_firmware();
+    for &(cycle, button, pressed) in KEYPAD_INPUT {
+        probe.set_button_at(cycle, button, pressed)?;
+    }
+    probe.advance_to(Cycle(40_000), fixture.max_instructions)?;
+    if probe.inspect16(0x04000202)? != 0
+        || probe.inspect16(fixture.mailbox_address + 2)? != 0
+        || probe.inspect16(fixture.mailbox_address + 8)? != 0
+        || !probe.halted()
+    {
+        return Err(fail("disabled keypad source did not remain asleep"));
+    }
+    println!(
+        "PASS {} wake_cycle={wake} IF=0x1000 callbacks={count} cycles={} instructions={} acknowledgement=0 halted=true",
+        fixture.name,
+        machine.cycles().0,
+        machine.executed_instructions()
+    );
+    Ok(())
+}
+
+/// Checks guest callbacks, scanout, masked wake and disabled-source stall.
 fn run_vblank(
     fixture: &Fixture,
     expected: &Vblank,
@@ -1747,6 +1836,10 @@ fn run() -> Result<()> {
             continue;
         }
         let bytes = load(fixture, path.parent().unwrap())?;
+        if let Verification::Keypad(expected) = &fixture.verification {
+            run_keypad(fixture, expected, &bytes)?;
+            continue;
+        }
         if let Verification::Vblank(expected) = &fixture.verification {
             let mut machine = run_vblank(
                 fixture,

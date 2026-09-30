@@ -483,3 +483,39 @@ checkpoints = [
     { background = { frame = 18, updates = 17, x = 2, y = 0, image_x = 2, image_y = 2 }, x = 116, y = 74, image_x = 116, image_y = 76, priority = 0, image_priority = 0, mapping_1d = false, image_mapping_1d = false },
     { background = { frame = 20, updates = 19, x = 2, y = 0, image_x = 2, image_y = 0 }, x = 116, y = 74, image_x = 116, image_y = 74, priority = 0, image_priority = 0, mapping_1d = true, image_mapping_1d = true },
 ]
+
+[[fixture]]
+name = "keypad-or"
+rom = "../roms/keypad-or.gba"
+source = "../roms/keypad/keypad-or.s"
+linker = "../roms/pixels/linker.ld"
+sha256 = "b50fb8c5348f9fe6ec32a2fe3a29a795318c276e83109a4388c10f93618d4b57"
+origin = "Original MIT keypad HALT guest with normal firmware IRQ dispatch"
+startup = "cartridge-direct-arm"
+bios_required = true
+mailbox_address = 0x03000000
+completion_id = 0x0064
+max_instructions = 2000
+max_cycles = 40000
+[fixture.verification]
+kind = "keypad"
+and_mode = false
+firmware_sha256 = "044a1305b3e47fcd568e77fcd792f251cd2cb85b359949931654ebb399a37498"
+
+[[fixture]]
+name = "keypad-and"
+rom = "../roms/keypad-and.gba"
+source = "../roms/keypad/keypad-and.s"
+linker = "../roms/pixels/linker.ld"
+sha256 = "22fda0f2a33bdb59a474ecaa0de108509cc9424b4bc18a986d6ef730c539b51c"
+origin = "Original MIT keypad HALT guest with normal firmware IRQ dispatch"
+startup = "cartridge-direct-arm"
+bios_required = true
+mailbox_address = 0x03000000
+completion_id = 0x0064
+max_instructions = 2000
+max_cycles = 40000
+[fixture.verification]
+kind = "keypad"
+and_mode = true
+firmware_sha256 = "044a1305b3e47fcd568e77fcd792f251cd2cb85b359949931654ebb399a37498"

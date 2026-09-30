@@ -1473,6 +1473,29 @@ impl System {
             & u16::from_le_bytes([self.io[0x202], self.io[0x203]])
     }
 
+    /// KEYCNT evaluates active-low KEYINPUT as pressed selection bits. Requests
+    /// latch in IF independently of IE/IME; the shared IRQ path decides delivery.
+    fn evaluate_keypad(&mut self) {
+        let control = u16::from_le_bytes([self.io[0x132], self.io[0x133]]);
+        let selected = control & 0x03ff;
+        let pressed = self.buttons.0 & selected;
+        let matched = if control & 0x8000 != 0 {
+            selected != 0 && pressed == selected
+        } else {
+            pressed != 0
+        };
+        if control & 0x4000 != 0 && matched {
+            self.io[0x203] |= 0x10;
+        }
+    }
+
+    /// HALT must stop at input transitions as well as display interrupt edges.
+    fn next_wake_event(&self) -> u64 {
+        self.inputs.front().map_or(self.next_vblank(), |event| {
+            self.next_vblank().min(event.cycle.0)
+        })
+    }
+
     /// Absolute next VBlank edge; sleeping callers clip it to their own deadline.
     fn next_vblank(&self) -> u64 {
         let edge = self.cycles / CYCLES_PER_FRAME * CYCLES_PER_FRAME
@@ -1555,6 +1578,11 @@ impl System {
         if let Some(range) = range_for(address, IO_START, self.io.len(), 2) {
             let offset = range.start;
             if matches!(offset, 6 | 0x130) {
+                return Ok(());
+            }
+            if offset == 0x132 {
+                self.io[range].copy_from_slice(&(value & 0xc3ff).to_le_bytes());
+                self.evaluate_keypad();
                 return Ok(());
             }
             if matches!(offset, 0x200 | 0x202 | 0x208) {
@@ -1693,6 +1721,7 @@ impl System {
         {
             let event = self.inputs.pop_front().expect("front was present");
             self.buttons.set(event.button, event.pressed);
+            self.evaluate_keypad();
         }
         self.display
             .synchronize_to(target, &self.vram, &self.palette, &self.io, &self.oam);
@@ -2082,6 +2111,7 @@ impl Machine {
     /// Applies a live host transition at the current instruction boundary.
     pub fn set_button(&mut self, button: Button, pressed: bool) {
         self.system.buttons.set(button, pressed);
+        self.system.evaluate_keypad();
         self.system.refresh_status();
     }
 
@@ -2156,7 +2186,7 @@ impl Machine {
         self.cpu.exception_banks[1][0] = 0x0300_7fe0;
     }
 
-    /// Executes one instruction, or advances a halted CPU to the next display edge.
+    /// Executes one instruction, or advances HALT to the next input/display event.
     /// Sleeping steps return the resume PC without incrementing instruction count.
     pub fn step(&mut self) -> Result<u32, CoreError> {
         let pending = self.system.pending_interrupts();
@@ -2175,9 +2205,9 @@ impl Machine {
             }
         }
         if self.system.halted {
-            // Bound a public step to the next display edge. advance_to additionally
+            // Bound a public step to the next input/display event. advance_to additionally
             // clips sleeping time to its caller's absolute deadline.
-            let next = self.system.next_vblank();
+            let next = self.system.next_wake_event();
             self.system.advance_time(next - self.system.cycles);
             return Ok(self.cpu.registers[15]);
         }
@@ -2204,7 +2234,7 @@ impl Machine {
                 });
             }
             if self.system.halted && self.system.pending_interrupts() == 0 {
-                let next = self.system.next_vblank();
+                let next = self.system.next_wake_event();
                 let deadline = next.min(target.0);
                 self.system.advance_time(deadline - self.system.cycles);
                 continue;
