@@ -11,6 +11,41 @@ assert.deepEqual(WebAssembly.Module.imports(module), [], "unexpected host depend
 const { exports: core } = await WebAssembly.instantiate(module, {});
 const verification = fixture.verification;
 const marker = (pc) => core.marker(pc, fixture.max_instructions, BigInt(fixture.max_cycles));
+if (verification.kind === "pcm") {
+    core.initialize(1);
+    const setup = marker(verification.ready_pc);
+    assert.equal(core.inspect16(fixture.mailbox_address), fixture.completion_id);
+    core.queue_pcm_input();
+    const last = verification.checkpoints.at(-1).frame;
+    let total = 0;
+    for (let frame = 1; frame <= last; frame++) {
+        core.advance(BigInt(frame) * 280896n, fixture.max_instructions, BigInt(fixture.max_cycles));
+        const count = core.drain_pcm();
+        total += count;
+        const point = verification.checkpoints.find(point => point.frame === frame);
+        if (!point) continue;
+        const pcm = Buffer.alloc(count);
+        for (let i = 0; i < count; i++) pcm[i] = core.pcm_byte(i);
+        assert.equal(count, point.samples);
+        assert.equal(createHash("sha256").update(pcm).digest("hex"), point.pcm_sha256);
+        for (let index = 0; index < 38400; index++) {
+            const x = index % 240, y = Math.floor(index / 240);
+            assert.equal(core.pixel(index), x >= 112 && x < 128 && y >= 72 && y < 88 ? point.color : 0);
+        }
+        assert.equal(core.inspect16(fixture.mailbox_address + 2), frame);
+        assert.equal(core.inspect16(fixture.mailbox_address + 4), point.pressed);
+        assert.equal(core.inspect16(fixture.mailbox_address + 6), point.transitions);
+        assert.equal(core.inspect16(0x04000202), 0);
+        assert.equal(core.halted(), 1);
+        console.log(`PASS WASM pcm frame=${frame} samples=${count} square=${point.color} transitions=${point.transitions} pixels=38400`);
+    }
+    assert.equal(core.pcm_counter(0), BigInt(total));
+    assert.equal(core.pcm_counter(0), core.cycles() / 512n);
+    assert.equal(core.pcm_counter(1), 0n);
+    assert.equal(core.pcm_counter(2), 0n);
+    console.log(`PASS WASM pcm setup_cycles=${setup} cycles=${core.cycles()} instructions=${core.instructions()} produced=${total} rate=32768`);
+    process.exit(0);
+}
 if (verification.kind === "dma") {
     core.initialize(1);
     const setup = marker(verification.ready_pc);

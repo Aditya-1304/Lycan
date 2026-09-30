@@ -149,3 +149,44 @@ pub extern "C" fn queue_dma_input() {
         }
     });
 }
+
+
+thread_local! {
+    /// Owned staging for the Node PCM hash comparison, not a playback adapter.
+    static PCM: RefCell<Vec<f32>> = RefCell::new(Vec::with_capacity(1024));
+}
+
+/// Queues the same PCM-scene input chronology used by the app and native runner.
+#[unsafe(no_mangle)]
+pub extern "C" fn queue_pcm_input() {
+    use gba_core::CYCLES_PER_FRAME;
+    const INPUT: &[(Cycle, Button, bool)] = &include!("../pcm/input.rs");
+    MACHINE.with_borrow_mut(|machine| {
+        for &(cycle, button, pressed) in INPUT {
+            machine.set_button_at(cycle, button, pressed).unwrap();
+        }
+    });
+}
+
+/// Drains real production-core samples for signed-byte fixture hashing.
+#[unsafe(no_mangle)]
+pub extern "C" fn drain_pcm() -> u32 {
+    PCM.with_borrow_mut(|samples| {
+        samples.clear();
+        MACHINE.with_borrow_mut(|machine| machine.drain_pcm(samples));
+        samples.len() as u32
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn pcm_byte(index: u32) -> u32 {
+    PCM.with_borrow(|samples| (samples[index as usize] * 128.0) as i8 as u8 as u32)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn pcm_counter(index: u32) -> u64 {
+    MACHINE.with_borrow(|machine| {
+        let (produced, dropped, empty) = machine.pcm_counters();
+        match index { 0 => produced, 1 => dropped, 2 => empty, _ => panic!("invalid PCM counter") }
+    })
+}

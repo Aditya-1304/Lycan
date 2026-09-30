@@ -1,11 +1,16 @@
 #![forbid(unsafe_code)]
 
 mod app;
+mod audio;
 
 use app::GbaApp;
 
 #[cfg(not(target_arch = "wasm32"))]
 fn main() -> eframe::Result {
+    if std::env::args().any(|argument| argument == "--audio-probe") {
+        return audio::probe()
+            .map_err(|error| eframe::Error::AppCreation(Box::new(std::io::Error::other(error))));
+    }
     // Native platforms use eframe's Glow renderer and the configured winit backend.
     let native_options = eframe::NativeOptions {
         renderer: eframe::Renderer::Glow,

@@ -1,3 +1,4 @@
+use crate::audio::Audio;
 use eframe::egui;
 use gba_session::{
     BUTTONS, Button, CYCLES_PER_FRAME, Cycle, GBA_CLOCK_HZ, SCREEN_HEIGHT, SCREEN_WIDTH, Session,
@@ -58,6 +59,9 @@ const KEYPAD_AND_ROM: &[u8] = include_bytes!("../../../roms/keypad-and.gba");
 const KEYPAD_INPUT: &[(Cycle, Button, bool)] = &include!("../../../roms/keypad/input.rs");
 const VBLANK_ROM: &[u8] = include_bytes!("../../../roms/vblank.gba");
 /// Original DMA tile scene; firmware is mapped only for these recognized bytes.
+const PCM_ROM: &[u8] = include_bytes!("../../../roms/pcm.gba");
+const PCM_INPUT: &[(Cycle, Button, bool)] = &include!("../../../roms/pcm/input.rs");
+
 const DMA_ROM: &[u8] = include_bytes!("../../../roms/dma.gba");
 const DMA_INPUT: &[(Cycle, Button, bool)] = &include!("../../../roms/dma/input.rs");
 /// IRQ variant shares the polling scene assets and scripted logical input.
@@ -90,6 +94,7 @@ const KEY_BINDINGS: [(Button, egui::Key); 10] = [
 /// Shared native/browser application displaying pixels produced by guest execution.
 pub struct GbaApp {
     session: Session,
+    audio: Audio,
     rom_name: String,
     loaded: bool,
     host_origin: Instant,
@@ -119,6 +124,7 @@ impl GbaApp {
     pub fn new(_cc: &eframe::CreationContext<'_>) -> Self {
         let mut app = Self {
             session: Session::new(),
+            audio: Audio::default(),
             rom_name: String::new(),
             loaded: false,
             host_origin: Instant::now(),
@@ -131,7 +137,7 @@ impl GbaApp {
             texture: None,
             image_generation: 0,
             uploaded_generation: None,
-            status: "Loading sprites.gba".to_owned(),
+            status: "Loading pcm.gba".to_owned(),
             #[cfg(not(target_arch = "wasm32"))]
             capture_path: std::env::var_os("GBA_CAPTURE_PATH").map(Into::into),
             #[cfg(not(target_arch = "wasm32"))]
@@ -141,7 +147,7 @@ impl GbaApp {
             #[cfg(target_arch = "wasm32")]
             load_generation: Default::default(),
         };
-        app.load_rom_bytes("irq-sprites.gba", IRQ_SPRITES_ROM);
+        app.load_rom_bytes("pcm.gba", PCM_ROM);
         app
     }
 
@@ -167,9 +173,11 @@ impl GbaApp {
                     || bytes == VBLANK_ROM
                     || bytes == IRQ_SPRITES_ROM
                     || bytes == DMA_ROM
+                    || bytes == PCM_ROM
                 {
                     self.session.enable_test_firmware();
                 }
+                self.audio.clear();
                 self.rom_name = name.to_owned();
                 self.loaded = true;
                 self.status = format!("Loaded {name}");
@@ -235,6 +243,7 @@ impl GbaApp {
 
     /// Resets guest execution while preserving the loaded ROM and resuming wake requests.
     fn reset_demo(&mut self) {
+        self.audio.clear();
         self.session.reset();
         self.host_origin = Instant::now();
         self.replay_deadline = None;
@@ -265,12 +274,28 @@ impl GbaApp {
             if ui.button(pause_label).clicked() {
                 self.replay_deadline = None;
                 self.session.toggle_pause();
+                self.audio.set_playing(!self.session.paused());
                 self.host_origin = Instant::now();
                 ui.ctx().request_repaint();
             }
             if ui.button("Reset").clicked() {
                 self.reset_demo();
                 ui.ctx().request_repaint();
+            }
+            if ui.button("Load PCM scene").clicked() {
+                self.load_rom_bytes("pcm.gba", PCM_ROM);
+                self.status = "PCM: hold Z for a green square and tone; release for red and silence".to_owned();
+            }
+            if ui.button("Replay PCM input").clicked() {
+                self.load_rom_bytes("pcm.gba", PCM_ROM);
+                for &(cycle, button, pressed) in PCM_INPUT {
+                    if let Err(error) = self.session.set_button_at(cycle, button, pressed) {
+                        self.status = format!("PCM replay failed: {error}");
+                        return;
+                    }
+                }
+                self.replay_deadline = Some(Cycle(10 * CYCLES_PER_FRAME));
+                self.status = "PCM replay: red/silent, green/tone, red/silent".to_owned();
             }
             if ui.button("Load DMA tile scene").clicked() {
                 self.load_rom_bytes("dma.gba", DMA_ROM);
@@ -427,6 +452,16 @@ impl GbaApp {
             });
         });
 
+        ui.horizontal(|ui| {
+            if ui.button("Enable audio").clicked() {
+                self.audio.start();
+            }
+            ui.checkbox(&mut self.audio.muted, "Mute");
+            ui.add(egui::Slider::new(&mut self.audio.volume, 0.0..=1.0).text("Volume"));
+        });
+        ui.label(self.audio.status());
+        let (produced, dropped, empty) = self.session.pcm_counters();
+        ui.label(format!("Core PCM: 32768 Hz | produced {produced} | staging drops {dropped} | empty FIFO {empty}"));
         ui.label(&self.status);
         if self.rom_name == "calculations.gba" {
             match (
@@ -587,6 +622,8 @@ impl eframe::App for GbaApp {
         } else if !(focused && visible) {
             self.session.release_all_buttons();
         }
+        self.audio
+            .set_playing(focused && visible && !self.session.paused());
         let start = Instant::now();
         let now = self.host_origin.elapsed();
         let result = if let Some(deadline) = self.replay_deadline {
@@ -609,18 +646,32 @@ impl eframe::App for GbaApp {
             }
             Ok(None) => {}
             Err(error) => {
+                self.audio.set_playing(false);
                 self.status = format!("Guest execution failed: {error}");
                 self.session.toggle_pause();
                 return;
             }
         }
+        self.audio.pump(&mut self.session);
         if self
             .replay_deadline
             .is_some_and(|deadline| self.session.cycles() >= deadline)
         {
             self.replay_deadline = None;
             self.session.toggle_pause();
-            self.status = if matches!(self.rom_name.as_str(), "keypad-or.gba" | "keypad-and.gba") {
+            self.audio.set_playing(false);
+            self.status = if self.rom_name == "pcm.gba" {
+                match (
+                    self.session.inspect16(0x03000000),
+                    self.session.inspect16(0x03000004),
+                    self.session.inspect16(0x03000006),
+                ) {
+                    (Ok(0x66), Ok(0), Ok(2)) => {
+                        "PCM replay complete: two transitions; square red and sound idle".to_owned()
+                    }
+                    _ => "PCM replay failed: mailbox mismatch".to_owned(),
+                }
+            } else if matches!(self.rom_name.as_str(), "keypad-or.gba" | "keypad-and.gba") {
                 // Keypad mailbox fields are IRQ evidence, never square coordinates.
                 // Report success only after validating the complete guest contract.
                 match (

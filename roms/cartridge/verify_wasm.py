@@ -26,6 +26,8 @@ def main():
                         help="also execute both keypad IRQ/HALT and framebuffer contracts in WASM")
     parser.add_argument("--dma", action="store_true",
                         help="execute DMA tile uploads and IRQ/scanout checkpoints in WASM")
+    parser.add_argument("--pcm", action="store_true",
+                        help="execute synchronized PCM and square checkpoints in WASM")
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[2]
     manifest = root / "fixtures/manifest.toml"
@@ -39,6 +41,8 @@ def main():
         names.extend(["keypad-or", "keypad-and"])
     if args.dma:
         names.append("dma")
+    if args.pcm:
+        names.append("pcm")
     build = subprocess.run(
         ["cargo", "build", "--locked", "-p", "gba-core", "--release",
          "--target", "wasm32-unknown-unknown", "--message-format=json"],
@@ -62,7 +66,7 @@ def main():
             if hashlib.sha256(data).hexdigest() != fixture["sha256"]:
                 raise ValueError(f"{name} ROM differs from frozen SHA-256")
             verification = fixture["verification"]
-            if verification["kind"] in ("diagnostic", "vblank", "keypad", "dma"):
+            if verification["kind"] in ("diagnostic", "vblank", "keypad", "dma", "pcm"):
                 firmware = root / "roms/test-firmware/division.bin"
                 if hashlib.sha256(firmware.read_bytes()).hexdigest() != verification["firmware_sha256"]:
                     raise ValueError("test firmware differs from frozen SHA-256")

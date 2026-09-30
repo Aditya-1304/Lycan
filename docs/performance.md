@@ -517,3 +517,244 @@ app timings with the existing benchmark controls and fill the platform rows abov
 Full Slice 11 visual acceptance remains pending these manual checks. Total app
 frame cost, sustained platform cycles/wall-time, allocation counts and 30-minute
 resource stability are not measured. Audio remains outside Slice 11.
+
+## Slice 12: Synchronized PCM scene
+
+Record date: 2026-09-30. Baseline: `3e0eda490278a94dc67f6a5ff10a0311aa1915ca`
+plus the current Slice 12 changes. The default application loads `pcm.gba`.
+Holding logical A (keyboard **Z**) makes the square green and selects a 2048 Hz
+tone; releasing it restores red and silence. One normal VBlank callback changes
+both the palette entry and DMA1 source. The guest sleeps in HALT between callbacks.
+
+The core now owns timer counters/reloads, prescalers, overflow IRQs, cascade
+progression, a 32-byte Direct Sound A FIFO, four-word DMA1 refill bursts and
+signed mono PCM at 32,768 Hz (one sample every 512 master cycles). FIFO mode
+forces word width and a fixed destination, ignores the programmed count, and
+retains source progression across refills. DMA beats still yield at bounded
+host deadlines and synchronize devices through the existing bus path.
+This slice uses the baseline A/timer-0 mono path. Sound-register mixer routing,
+channel B, master-enable and bias/PWM semantics remain Slice 12A work.
+
+Host adapters share an integer-phase streaming linear resampler. Linux CPAL
+consumes a bounded lock-free queue; browser AudioWorklet processing consumes a
+preallocated ring. Neither callback executes the machine, blocks on a lock,
+logs or allocates. Browser chunks are copied into ordinary owned ArrayBuffers,
+transferred and recycled; WASM linear memory is never detached. Queue capacity
+is 80 ms with a 60 ms initial/recovery priming target. Overflow and underrun
+frames are counted. Initial priming silence is not an underrun. Lifecycle
+boundaries invalidate old samples, clear core staging and reset interpolation.
+Mute and volume apply to host playback without changing guest hardware state.
+
+### Plan acceptance checklist
+
+| Slice 12 requirement | Evidence / status |
+| --- | --- |
+| Button changes a visible object and plays a sound | Original guest changes the 16×16 square at (112, 72) and DMA1 source in one VBlank callback; five full-image and exact PCM hash checkpoints pass on native and compiled WASM |
+| Timer overflow, Direct Sound FIFO consumption and DMA1 refill | Focused regression checks timer IF, forced four-word FIFO bursts, fixed destination, source progression, signed levels and identical output across small/large deadlines; guest replay has zero empty-FIFO events |
+| Core PCM follows emulated time | 5,486 samples after 2,808,960 cycles = floor(cycles / 512), at 32,768 Hz; no staging drops; native/WASM match |
+| Streaming resampling and native CPAL output | Uneven chunks match continuous conversion at 44,100/48,000/96,000 Hz; actual native device probe streams at 48,000 Hz with no callback errors |
+| Browser Worklet output and gesture startup | Chrome and Brave report running 48,000 Hz contexts and nonzero output frames with zero underruns/overflow; audible playback and repeatable gesture/unlock behavior remain unverified |
+| Volume/mute | Shared frontend controls implemented; audible behavior remains pending live interaction checks |
+| Repeated interaction, pause/resume and reset stay synchronized | Session regression rejects pre-boundary staging; resampler restart matches a fresh stream; eight-second native CLI probe exercises input, pause/resume, reset and focus suspension/resumption without underruns or overflow. Physical audiovisual alignment and native UI responsiveness were not measured; Chrome/Brave runtime checks remain pending |
+| Measure queue depth, underruns and output rate | Native probe and user-supplied Linux/Chrome/Brave live counters recorded below; all captured queue maxima remain under 80 ms with zero underruns/overflow |
+
+Three focused Rust tests were added. Each was observed RED before its missing
+behavior was implemented, then GREEN: missing timer/FIFO/DMA sound progression,
+stale staged PCM across lifecycle boundaries, and resampling phase/rate loss
+across uneven chunks. No per-function or duplicate-layer test suite was added.
+The original guest fixture supplies the required audiovisual integration evidence.
+
+### Frozen guest execution evidence
+
+ROM: `roms/pcm.gba`, 460 bytes; SHA-256:
+`80dfae4f8694e6349c624969d1991677780be31eee22387c1b9cdb0538e2b5d7`.
+Startup: cartridge-direct ARM, explicitly mapped original test firmware. Firmware
+SHA-256: `044a1305b3e47fcd568e77fcd792f251cd2cb85b359949931654ebb399a37498`.
+Declared ready instruction: `0x080000DC`; mailbox ID `0x0066` at `0x03000000`.
+Ready reached after 952 cycles. Replay bounds: 100,000 instructions and
+4,000,000 cycles. Final replay: 2,808,960 cycles, 365 instructions, CPU halted,
+10 VBlank callbacks, two button transitions and acknowledged IF = 0.
+
+| Frame | Square color | Button state | Transitions | PCM samples in that frame | Expected PCM |
+| --- | --- | --- | --- | --- | --- |
+| 4 | Red (0x001F) | Released | 0 | 549 | Silence |
+| 6 | Green (0x03E0) | Held | 1 | 548 | Alternating signed +32 / -32, eight core samples per level |
+| 7 | Green (0x03E0) | Held | 1 | 549 | Same waveform, continuous phase |
+| 9 | Red (0x001F) | Released | 2 | 548 | Silence |
+| 10 | Red (0x001F) | Released | 2 | 549 | Silence |
+
+Each checkpoint compares all 38,400 pixels and the SHA-256 of actual signed-byte
+PCM. Frozen hashes and input events are in `fixtures/manifest.toml`; the native
+runner also checks the app's included input timeline against that manifest.
+Silence hashes are derived from zero bytes. Stable active-window hashes are
+computed from the analytic +/-32 waveform, with frozen startup phase
+`(global sample index + 10) modulo 16`. The FIFO backlog introduces a bounded
+transition tail; the checkpoints verify stable windows after that tail.
+Core PCM timing does not establish physical audiovisual alignment: completed
+scanout and host audio buffering have distinct presentation delays.
+
+### Application measurements
+
+All earlier user-entered millisecond timings are preserved. These rows are for
+`pcm.gba` only. The following values were supplied by the user from the native,
+Chrome and Brave application status displays on 2026-09-30. CLI core timings
+are not substituted for application measurements.
+
+| Platform | Core mean / p95 (ms) | Conversion mean / p95 (ms) | Texture submission mean / p95 (ms) | Samples | Visual/audio acceptance |
+| --- | --- | --- | --- | --- | --- |
+| Native Linux | 0.890 / 1.181 | 0.131 / 0.161 | 0.026 / 0.040 | 120 / 120 / 120 | Live streaming counters recorded; visual/audible alignment and controls not verified |
+| Google Chrome | 1.115 / 1.500 | 0.239 / 0.300 | 0.035 / 0.100 | 120 / 120 / 120 | Running audio context and counters recorded; remaining live acceptance not verified |
+| Brave | 1.171 / 1.800 | 0.262 / 0.400 | 0.048 / 0.100 | 120 / 120 / 120 | Running audio context and counters recorded; remaining live acceptance not verified |
+
+Provenance: user-pasted application status for each platform. Exact timestamps,
+measurement duration, browser versions and held/released input conditions were
+not recorded. These are bounded core callback, conversion and CPU texture
+submission timings; they do not measure complete application frames or GPU
+presentation and do not establish sustained speed or physical synchronization.
+
+### User-recorded live audio counters
+
+| Field | Native Linux | Google Chrome | Brave |
+| --- | --- | --- | --- |
+| Displayed output rate | 8,000 Hz | 48,000 Hz (running) | 48,000 Hz (running) |
+| Queue depth at capture | 74.6 ms | 52.6 ms | 61.4 ms |
+| Maximum observed queue depth | 77.7 ms | 76.6 ms | 76.3 ms |
+| Queue capacity | 80 ms | 80 ms | 80 ms |
+| Underrun frames | 0 | 0 | 0 |
+| Overflow frames | 0 | 0 | 0 |
+| Output frames | 1,148,416 | 2,440,704 | 621,056 |
+| Device callback errors | 0 | Not exposed by this browser status | Not exposed by this browser status |
+| Core output cadence | 32,768 Hz | 32,768 Hz | 32,768 Hz |
+| Core samples produced | 916,048 | 1,049,810 | 505,367 |
+| Core staging drops | 0 | 0 | 0 |
+| Empty-FIFO events | 0 | 0 | 0 |
+
+Source: user-pasted live application status, recorded 2026-09-30. Native output
+rate is preserved exactly as pasted: **8,000 Hz**, distinct from the earlier
+48,000 Hz CLI probe below. The difference was not independently investigated.
+All captured queue maxima are below the 80 ms cap, with zero reported underruns,
+overflows, staging drops and empty-FIFO events. Counters can span different
+lifecycle/reset intervals; their totals are not used to infer session duration,
+sustained speed or wall-clock sample rate. Audible alignment, volume/mute,
+pause/resume/reset behavior and a 30-minute stability session were not explicitly
+confirmed by these captures and remain unverified.
+
+### Native audio queue measurements
+
+The production native adapter was measured by `gba-app --audio-probe`, which
+opens no window and runs the actual guest/session/resampler/CPAL path. It runs
+for approximately eight wall seconds, changes input, pauses for one second,
+resumes, resets, suspends focus for one second, then resumes for two seconds.
+No microphone/loopback recording or physical sound/image latency was measured.
+
+| Field | Measured result |
+| --- | --- |
+| Negotiated native output rate | 48,000 Hz |
+| Core output cadence | 32,768 Hz |
+| Queue target / cap | 60 / 80 ms |
+| Final queue depth | 58.0 ms |
+| Maximum observed queued depth | 69.6 ms |
+| Underrun frames after priming | 0 |
+| Overflow frames | 0 |
+| Output frames supplied to CPAL callbacks | 276,480 across the probe and lifecycle changes |
+| Device callback errors | 0 |
+| Post-reset core counters | 98,182 produced; 0 staging drops; 0 empty-FIFO events |
+| Browser measurements | User-recorded Chrome/Brave live counters are in the separate table above |
+
+Source: `/tmp/gba-pcm-results/audio-probe.txt`. The sample rate is the negotiated
+stream rate, not an independently calibrated hardware clock. This short probe
+establishes native streaming across discontinuities, not 30-minute stability or
+physical synchronization. Reset/pause discard prepared historical audio; sound
+already submitted to the OS/device cannot be recalled instantly.
+
+### Headless frame measurements
+
+Environment refreshed: Intel Core i7-13620H, 10 cores / 16 threads; rustc 1.98.1;
+release opt-level 3 / thin LTO; tracing disabled. Power profile could not be
+queried in the restricted environment and is not verified. OS/desktop, AC,
+thermal state and other host load were not independently refreshed. Benchmarks
+ran sequentially after release builds completed, with logical keys released.
+
+| Scenario | Complete emulated frame samples | Core mean (ms) | Core p95 (ms) | Core p95 <12 ms |
+| --- | --- | --- | --- | --- |
+| PCM square after 10-frame replay | 600 | 0.193 | 0.196 | Yes |
+| Earlier IRQ sprite scene after 20-frame replay | 600 | 0.292 | 0.297 | Yes |
+| Earlier DMA tile scene after 10-frame replay | 600 | 0.235 | 0.243 | Yes |
+
+Each sample advances an absolute deadline by 280,896 cycles. PCM production is
+included; draining is outside the timed window. Host resampling/output, color
+conversion, texture submission, GPU and host pacing are excluded. The earlier
+IRQ/DMA core costs increase from the prior record because the core now also
+produces clocked PCM, including silence. All three remain below the core-only
+12 ms p95 target. Full application-frame cost, sustained platform speed,
+allocation counts and 30-minute queue/resource trends remain not measured.
+Sources: `/tmp/gba-pcm-results/bench-{pcm,irq-sprites,dma}.txt`.
+
+### Automated validation and reproduction
+
+- All 21 manifest fixtures rebuilt or upstream identities verified and executed successfully.
+- Workspace tests: 20 passed (11 core, 9 session); app/tools and doc-test targets completed.
+- Clippy with warnings denied, formatting and diff whitespace checks passed.
+- Native app release build and Trunk WASM release artifact build passed.
+- Compiled-WASM Node runner: 24 WAITCNT cases, ARM/Thumb/services/memory diagnostics,
+  VBlank variants, both keypad contracts, DMA checkpoints and all five PCM checkpoints passed.
+- Native device probe: zero underruns, overflow and device errors across the recorded lifecycle changes.
+- Browser bridge and Worklet JavaScript syntax checked; user captures now record running Chrome/Brave output with zero underruns/overflow. Remaining audible and lifecycle acceptance is unverified.
+- CI now installs the ALSA development dependency and runs the PCM WASM contract/JavaScript syntax checks; the hosted CI job itself was not executed locally.
+
+Temporary raw evidence: `/tmp/gba-pcm-results/{tests,fixtures,build-fixtures,wasm,
+native-build,trunk,audio-probe}.txt`, benchmark logs, and signed PCM/image captures
+`frame.pcm-frame-{4,6,7,9,10}.{s8,ppm}`. These are local temporary provenance,
+not durable release artifacts. Reproduce:
+
+```bash
+cd /home/aditya/Projects/GBA/gba-rs
+cargo run --locked -p gba-tools --release -- build-fixtures
+cargo run --locked -p gba-tools --release -- fixtures run
+python3 roms/cartridge/verify_wasm.py --diagnostics --vblank --keypad --dma --pcm
+cargo test --locked --workspace
+cargo clippy --locked --workspace --all-targets -- -D warnings
+cargo run --locked -p gba-app --release -- --audio-probe
+cargo run --locked -p gba-tools --release -- bench --scenario pcm --frames 600
+```
+
+### Manual Linux / Chrome / Brave acceptance
+
+Linux interactive checks (visual/audible alignment remains unverified):
+
+```bash
+cd /home/aditya/Projects/GBA/gba-rs
+cargo run --locked -p gba-app --release
+```
+
+Browser:
+
+```bash
+cd /home/aditya/Projects/GBA/gba-rs
+env -u NO_COLOR trunk --config web/Trunk.toml serve --release
+```
+
+Open the printed localhost URL in Chrome, then Brave. For each platform:
+
+1. Click **Load PCM scene**, then **Enable audio**. Check the displayed device
+   rate and queue counters. Expect a red square and silence initially.
+2. Hold **Z**: the square turns green and a steady tone plays. Release **Z**:
+   red and silence return. Repeat at least ten times and check consistent alignment.
+3. Exercise **Volume** and **Mute** during the tone. Muting must leave the guest
+   square and emulation running; unmuting must resume current sound.
+4. During a held tone, **Pause**, then **Resume**. Pause releases Z and stops
+   queued playback. Press Z again after resume. **Reset** must restore red/silence
+   without replaying old samples; press Z again to check sound still works.
+5. Switch focus and hide the tab during a tone, then return. Buttons must be
+   released and old queued sound discarded. If the browser suspends its context,
+   click **Enable audio** again and check that the displayed state becomes running.
+6. Run **Replay PCM input**. It finishes paused with a red square, silence and
+   two transitions. Run it again after reset. Recheck the earlier IRQ/DMA replays.
+7. Record the actual output rate, queue range/max, underruns, overflows and app
+   timing sample counts. Queue capacity must remain 80 ms; recurring underruns or
+   overflow fail streaming acceptance. A 30-minute queue/resource session remains
+   unmeasured until performed and recorded.
+
+Slice 12 implementation and automated evidence are present. Full acceptance
+remains open for physical audiovisual alignment, audible controls and the
+Linux/Chrome/Brave live interaction checks; browser checks are owned by the user.

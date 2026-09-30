@@ -1,9 +1,12 @@
 #![forbid(unsafe_code)]
 
+mod resampler;
+pub use resampler::Resampler;
+
 use gba_core::{CoreError, Machine, RunError, RunReport};
 use std::time::Duration;
 
-pub use gba_core::{CYCLES_PER_FRAME, Cycle, GBA_CLOCK_HZ, SCREEN_HEIGHT, SCREEN_WIDTH};
+pub use gba_core::{CYCLES_PER_FRAME, Cycle, GBA_CLOCK_HZ, PCM_RATE, SCREEN_HEIGHT, SCREEN_WIDTH};
 
 pub use gba_core::{Button, ButtonState};
 
@@ -51,6 +54,16 @@ impl Default for Session {
 }
 
 impl Session {
+    /// Drains core PCM for the frontend's streaming resampler without running CPU work.
+    pub fn drain_pcm(&mut self, output: &mut Vec<f32>) {
+        self.machine.drain_pcm(output);
+    }
+
+    /// Reports core sample production, staging overflow and empty-FIFO consumption.
+    pub fn pcm_counters(&self) -> (u64, u64, u64) {
+        self.machine.pcm_counters()
+    }
+
     /// Creates a fresh machine with all buttons released and execution unpaused.
     pub fn new() -> Self {
         Self::default()
@@ -161,6 +174,7 @@ impl Session {
     pub fn set_active(&mut self, active: bool) {
         if self.active != active {
             self.active = active;
+            self.machine.clear_pcm();
             self.release_all_buttons();
             self.reanchor();
         }
@@ -231,6 +245,7 @@ impl Session {
     /// Switches between paused and running session states.
     pub fn toggle_pause(&mut self) {
         self.paused = !self.paused;
+        self.machine.clear_pcm();
         self.release_all_buttons();
         self.reanchor();
     }
@@ -249,6 +264,36 @@ impl Session {
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    // Catches pre-pause PCM being replayed after resume or focus return. Existing
+    // input/pacing tests preserve cycles but cannot observe stale sound staging.
+    #[test]
+    fn lifecycle_boundaries_discard_staged_audio() {
+        let mut session = Session::new();
+        session
+            .load_rom(include_bytes!("../../../roms/pixels.gba"))
+            .unwrap();
+        session.advance_frame().unwrap();
+        let mut samples = Vec::new();
+        session.drain_pcm(&mut samples);
+        assert!(!samples.is_empty());
+        session.advance_frame().unwrap();
+        session.toggle_pause();
+        samples.clear();
+        session.drain_pcm(&mut samples);
+        assert!(samples.is_empty());
+        session.toggle_pause();
+        session.advance_frame().unwrap();
+        session.set_active(false);
+        session.drain_pcm(&mut samples);
+        assert!(samples.is_empty());
+        session.set_active(true);
+        session.advance_frame().unwrap();
+        session.reset();
+        session.drain_pcm(&mut samples);
+        assert!(samples.is_empty());
+        assert_eq!(session.pcm_counters(), (0, 0, 0));
+    }
 
     // Catches a replay running past its declared final checkpoint when a host
     // callback straddles that deadline. Refresh-rate equality alone misses this.
