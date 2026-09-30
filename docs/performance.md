@@ -651,3 +651,65 @@ Collect each Performance panel after selecting that diagnostic and reaching 120
 samples. These are steady result-screen callback costs; the guest is already
 looping at its terminal. Keep them distinct from headless completion cost.
 Future entries should identify ARM or Thumb alongside each timing record.
+
+
+## Scroll a tiled background status
+
+Slice 8 measurements are intentionally left for manual entry. The mode-0 scene,
+six full-frame scroll/wrap checkpoints, pinned gba-tests stripes reference,
+and earlier bitmap fixtures passed headlessly. Native/WASM builds pass;
+platform interaction and reference-device timings remain pending.
+See [the plan audit and all measurement commands](tiled_background.md).
+
+### Measurement conditions
+
+- Date / commit: TODO
+- Confirm reference CPU, power profile, compiler, browser versions: TODO
+- Build: release; tracing disabled; no tile caches
+- Workload: tiled.gba, BG0 4bpp, 512×512, four palette banks
+- Headless measurement frames: TODO (suggested 600)
+- App Performance samples: TODO (120 per measurement window)
+- Moving / idle measurement windows: TODO
+- Artifacts / screenshots: TODO
+
+### Headless reference-device measurements
+
+- Scripted frames 10, 11, 13, 15, 18, 19 and full pixel checks: TODO
+- Final scroll (2,0), published image (2,0): TODO
+- stripes.gba 8-pixel vertical stripes: TODO
+- Earlier bitmap fixture regression run: TODO
+- Core mean per emulated frame: TODO ms
+- Core p95 per emulated frame: TODO ms
+- Unthrottled speed (16.742706 / core mean ms): TODO times real time
+- Scanline profiler command / output path: TODO
+- Hot scanline source lines and instruction-reference counts: TODO
+- Profile interpretation before considering caches: TODO
+
+### Native Linux / Google Chrome / Brave
+
+Fill each platform separately. Core/conversion/upload values below are the
+app's callback samples; texture submission measures CPU work, not GPU completion.
+
+| Check / metric | Native Linux | Google Chrome | Brave |
+| --- | --- | --- | --- |
+| Arrow-controlled scrolling and horizontal/vertical wrap | TODO | TODO | TODO |
+| Scripted replay final (2,0) and frame-19 image | TODO | TODO | TODO |
+| stripes.gba reference image | TODO | TODO | TODO |
+| Earlier bitmap scenes | TODO | TODO | TODO |
+| Pause/resume and Reset | TODO | TODO | TODO |
+| Focus loss releases held input | TODO | TODO | TODO |
+| Hidden-tab restore without catch-up | N/A | TODO | TODO |
+| Core execution mean / p95 (ms) | TODO | TODO | TODO |
+| Pixel conversion mean / p95 (ms) | TODO | TODO | TODO |
+| Texture submission mean / p95 (ms) | TODO | TODO | TODO |
+| Sample counts / moving or idle window | TODO | TODO | TODO |
+| Sustained speed from cycle-counter / wall-time interval | TODO | TODO | TODO |
+| Slowdown, growing memory, or input delay observations | TODO | TODO | TODO |
+| Capture / measurement artifact paths | TODO | TODO | TODO |
+
+### Acceptance closeout
+
+- Scroll/wrap captures reviewed on all three platforms: TODO
+- Core p95 compared with 12 ms target: TODO
+- Actual application responsiveness within 16.7427 ms frame budget: TODO
+- Remaining platform limitations / follow-ups: TODO

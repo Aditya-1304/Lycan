@@ -46,6 +46,11 @@ const COUNTER_ROM: &[u8] = include_bytes!(concat!(
 const ARM_DIAGNOSTIC_ROM: &[u8] = include_bytes!("../../../roms/gba-tests/arm/arm.gba");
 const THUMB_DIAGNOSTIC_ROM: &[u8] = include_bytes!("../../../roms/gba-tests/thumb/thumb.gba");
 
+/// Original mode-0 scene with guest-owned scrolling and the pinned reference ROM.
+const TILED_ROM: &[u8] = include_bytes!("../../../roms/tiled.gba");
+const STRIPES_ROM: &[u8] = include_bytes!("../../../roms/gba-tests/stripes.gba");
+const TILED_INPUT: &[(Cycle, Button, bool)] = &include!("../../../roms/tiled/input.rs");
+
 /// The replay uses the same ordered cycle transitions verified by gba-tools.
 const DEMO_INPUT: &[(Cycle, Button, bool)] = &include!(concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -110,7 +115,7 @@ impl GbaApp {
             texture: None,
             image_generation: 0,
             uploaded_generation: None,
-            status: "Loading buttons.gba".to_owned(),
+            status: "Loading tiled.gba".to_owned(),
             #[cfg(not(target_arch = "wasm32"))]
             capture_path: std::env::var_os("GBA_CAPTURE_PATH").map(Into::into),
             #[cfg(not(target_arch = "wasm32"))]
@@ -120,13 +125,23 @@ impl GbaApp {
             #[cfg(target_arch = "wasm32")]
             load_generation: Default::default(),
         };
-        app.load_rom_bytes("buttons.gba", BUTTONS_ROM);
+        app.load_rom_bytes("tiled.gba", TILED_ROM);
         app
     }
 
     /// Accepts bytes from the built-in ROM or a native/browser dropped file.
     fn load_rom_bytes(&mut self, name: &str, bytes: &[u8]) {
-        match self.session.load_rom(bytes) {
+        // The pinned stripes file ends at its idle branch. Two unexecuted words
+        // allow this loader's ARM pipeline look-ahead without changing the asset.
+        let mut mapped;
+        let bytes_to_load = if bytes == STRIPES_ROM {
+            mapped = bytes.to_vec();
+            mapped.extend_from_slice(&[0; 8]);
+            mapped.as_slice()
+        } else {
+            bytes
+        };
+        match self.session.load_rom(bytes_to_load) {
             Ok(()) => {
                 if bytes == ARM_DIAGNOSTIC_ROM || bytes == THUMB_DIAGNOSTIC_ROM {
                     self.session.enable_test_firmware();
@@ -231,6 +246,28 @@ impl GbaApp {
             }
             if ui.button("Reset").clicked() {
                 self.reset_demo();
+                ui.ctx().request_repaint();
+            }
+            if ui.button("Load tiled demo").clicked() {
+                self.load_rom_bytes("tiled.gba", TILED_ROM);
+                self.status = "Tiled scene: arrow keys scroll and wrap the 512×512 background".to_owned();
+                ui.ctx().request_repaint();
+            }
+            if ui.button("Replay tiled input").clicked() {
+                self.load_rom_bytes("tiled.gba", TILED_ROM);
+                for &(cycle, button, pressed) in TILED_INPUT {
+                    if let Err(error) = self.session.set_button_at(cycle, button, pressed) {
+                        self.status = format!("Replay input failed: {error}");
+                        self.session.toggle_pause();
+                        return;
+                    }
+                }
+                self.replay_deadline = Some(Cycle(19 * CYCLES_PER_FRAME));
+                self.status = "Replaying tiled scroll/wrap; final scroll (2, 0)".to_owned();
+                ui.ctx().request_repaint();
+            }
+            if ui.button("Load stripes reference").clicked() {
+                self.load_rom_bytes("stripes.gba", STRIPES_ROM);
                 ui.ctx().request_repaint();
             }
             if ui.button("Load copy demo").clicked() {
@@ -476,6 +513,9 @@ impl eframe::App for GbaApp {
                 self.session.inspect16(0x03000002),
                 self.session.inspect16(0x03000004),
             ) {
+                (Ok(x), Ok(y)) if self.rom_name == "tiled.gba" => {
+                    format!("Replay complete: scroll ({x}, {y}); expected (2, 0)")
+                }
                 (Ok(x), Ok(y)) => {
                     format!("Replay complete: square at ({x}, {y}); expected (114, 73)")
                 }

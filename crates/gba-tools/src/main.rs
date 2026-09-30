@@ -20,6 +20,9 @@ const DEMO_INPUT: &[(Cycle, Button, bool)] = &include!(concat!(
     "/../../roms/buttons/input.rs"
 ));
 
+/// The app replay is checked against the separately frozen fixture timeline.
+const TILED_INPUT: &[(Cycle, Button, bool)] = &include!("../../../roms/tiled/input.rs");
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Manifest {
@@ -58,8 +61,37 @@ enum Verification {
     Palette(Palette),
     Hello(Hello),
     Counter(Counter),
+    Tiled(Tiled),
+    Stripes(Stripes),
     Timing(Timing),
     Diagnostic(Diagnostic),
+}
+
+/// Scripted guest offsets and independently computed complete tile-scene captures.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Tiled {
+    ready_pc: u32,
+    input_events: Vec<InputEvent>,
+    checkpoints: Vec<TiledCheckpoint>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TiledCheckpoint {
+    frame: u16,
+    updates: u16,
+    x: u16,
+    y: u16,
+    image_x: usize,
+    image_y: usize,
+}
+
+/// Upstream success is tied to its source-defined idle PC and exact stripe colors.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Stripes {
+    terminal_pc: u32,
 }
 
 /// Frozen diagnostic success requires a specific opcode, status, result, and
@@ -241,6 +273,49 @@ fn manifest(path: &Path) -> Result<Manifest> {
             )));
         }
         match &fixture.verification {
+            Verification::Tiled(expected) => {
+                if expected.ready_pc & 3 != 0
+                    || expected.checkpoints.is_empty()
+                    || expected
+                        .checkpoints
+                        .windows(2)
+                        .any(|p| p[0].frame >= p[1].frame)
+                    || expected.checkpoints.iter().any(|p| {
+                        p.frame == 0
+                            || u64::from(p.frame) * CYCLES_PER_FRAME > fixture.max_cycles
+                            || p.x > 511
+                            || p.y > 511
+                            || p.image_x > 511
+                            || p.image_y > 511
+                    })
+                {
+                    return Err(fail("invalid tiled checkpoints"));
+                }
+                if expected
+                    .input_events
+                    .windows(2)
+                    .any(|p| p[0].cycle > p[1].cycle)
+                    || expected
+                        .input_events
+                        .iter()
+                        .any(|event| event.cycle > fixture.max_cycles)
+                {
+                    return Err(fail("invalid tiled input timeline"));
+                }
+                let events: Vec<_> = expected
+                    .input_events
+                    .iter()
+                    .map(|event| Ok((Cycle(event.cycle), button(&event.button)?, event.pressed)))
+                    .collect::<Result<_>>()?;
+                if events != TILED_INPUT {
+                    return Err(fail("app tiled replay differs from frozen manifest"));
+                }
+            }
+            Verification::Stripes(expected) => {
+                if expected.terminal_pc & 3 != 0 {
+                    return Err(fail("unaligned stripes idle PC"));
+                }
+            }
             Verification::Diagnostic(expected) => {
                 if expected.terminal_pc & 3 != 0
                     || expected.terminal_instruction != 0xeafffffe
@@ -445,9 +520,11 @@ fn build_fixtures(path: &Path) -> Result<()> {
         println!("BUILT original test firmware (SWI 0x06 only)");
     }
     for fixture in &manifest.fixture {
-        if matches!(fixture.verification, Verification::Hello(_))
-            || (matches!(fixture.verification, Verification::Diagnostic(_))
-                && fixture.source.ends_with(".asm"))
+        if matches!(
+            fixture.verification,
+            Verification::Hello(_) | Verification::Stripes(_)
+        ) || (matches!(fixture.verification, Verification::Diagnostic(_))
+            && fixture.source.ends_with(".asm"))
         {
             // Upstream distributes a FASMARM binary. Verify its identity rather
             // than attempting to assemble its source with GNU Arm binutils.
@@ -531,6 +608,8 @@ fn pixels(fixture: &Fixture) -> Result<&Pixels> {
         | Verification::Palette(_)
         | Verification::Hello(_)
         | Verification::Counter(_)
+        | Verification::Tiled(_)
+        | Verification::Stripes(_)
         | Verification::Timing(_)
         | Verification::Diagnostic(_) => Err(fail("expected a terminal pixels fixture")),
     }
@@ -813,6 +892,179 @@ fn run_palette(
     Ok(())
 }
 
+/// Samples the independent procedural scene after bounded guest execution.
+/// The oracle uses world coordinates, not emulated VRAM or renderer helpers.
+fn check_tiled_image(machine: &Machine, scroll_x: usize, scroll_y: usize) -> Result<()> {
+    for (index, &actual) in machine.framebuffer().iter().enumerate() {
+        let x = (index % SCREEN_WIDTH + scroll_x) % 512;
+        let y = (index / SCREEN_WIDTH + scroll_y) % 512;
+        let tx = x / 8;
+        let ty = y / 8;
+        let local_x = if tx.is_multiple_of(2) {
+            x % 8
+        } else {
+            7 - x % 8
+        };
+        let local_y = if ty.is_multiple_of(2) {
+            y % 8
+        } else {
+            7 - y % 8
+        };
+        let color = if (tx + ty).is_multiple_of(2) {
+            local_x
+        } else {
+            local_y
+        };
+        let bank = x / 256 + 2 * (y / 256);
+        let wanted = if color == 0 {
+            0x7fff
+        } else {
+            ((bank + 1) * 256 + color * 33) as u16
+        };
+        if actual != wanted {
+            return Err(fail(format!(
+                "tiled pixel ({},{}) scroll=({scroll_x},{scroll_y}) expected {wanted:#06x}, got {actual:#06x}",
+                index % SCREEN_WIDTH,
+                index / SCREEN_WIDTH
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Checks the setup PC, guest mailbox, scroll registers, and published frames
+/// under one shared instruction/cycle budget for the entire replay.
+fn run_tiled(
+    fixture: &Fixture,
+    expected: &Tiled,
+    bytes: &[u8],
+    capture_path: Option<&str>,
+) -> Result<Machine> {
+    let mut machine = Machine::new();
+    machine.load_rom(bytes)?;
+    for event in &expected.input_events {
+        machine.set_button_at(Cycle(event.cycle), button(&event.button)?, event.pressed)?;
+    }
+    machine.run_until_pc(
+        expected.ready_pc,
+        fixture.max_instructions,
+        Cycle(fixture.max_cycles),
+    )?;
+    println!("tiled initialization cycles={}", machine.cycles().0);
+    for point in &expected.checkpoints {
+        machine.advance_to(
+            Cycle(u64::from(point.frame) * CYCLES_PER_FRAME),
+            fixture
+                .max_instructions
+                .saturating_sub(machine.executed_instructions()),
+        )?;
+        if machine.cycles().0 > fixture.max_cycles {
+            return Err(fail("tiled exceeded cycle budget"));
+        }
+        let actual = [
+            machine.inspect16(fixture.mailbox_address)?,
+            machine.inspect16(fixture.mailbox_address + 2)?,
+            machine.inspect16(fixture.mailbox_address + 4)?,
+            machine.inspect16(fixture.mailbox_address + 6)?,
+        ];
+        let updates = point.updates;
+        if actual != [fixture.completion_id, point.x, point.y, updates]
+            || machine.inspect16(0x04000010)? != point.x
+            || machine.inspect16(0x04000012)? != point.y
+            || machine.framebuffer_generation() != u64::from(point.frame)
+        {
+            return Err(fail(format!(
+                "tiled frame {} unexpected mailbox {actual:?}, expected updates={updates}",
+                point.frame
+            )));
+        }
+        check_tiled_image(&machine, point.image_x, point.image_y)?;
+        if let Some(path) = capture_path {
+            capture(
+                Path::new(&format!("{path}.tiled-frame-{}.ppm", point.frame)),
+                machine.framebuffer(),
+            )?;
+        }
+        println!(
+            "PASS tiled frame={} scroll=({},{}) image=({},{}) pixels={}",
+            point.frame,
+            point.x,
+            point.y,
+            point.image_x,
+            point.image_y,
+            SCREEN_WIDTH * SCREEN_HEIGHT
+        );
+    }
+    println!(
+        "PASS tiled cycles={} instructions={}",
+        machine.cycles().0,
+        machine.executed_instructions()
+    );
+    Ok(machine)
+}
+
+/// Executes the pinned reference to its declared idle branch, then compares
+/// every pixel against the alternating colors specified by upstream source.
+fn run_stripes(
+    fixture: &Fixture,
+    expected: &Stripes,
+    bytes: &[u8],
+    capture_path: Option<&str>,
+) -> Result<()> {
+    let mut machine = Machine::new();
+    // The pinned 324-byte ROM ends at its idle branch. Supply two unexecuted
+    // look-ahead words for the current bounded-ROM loader; retain the upstream
+    // hash over the original bytes. This does not emulate absent-ROM bus reads.
+    let mut mapped = bytes.to_vec();
+    mapped.extend_from_slice(&[0; 8]);
+    machine.load_rom(&mapped)?;
+    machine.run_until_pc(
+        expected.terminal_pc,
+        fixture.max_instructions,
+        Cycle(fixture.max_cycles),
+    )?;
+    let opcode = u32::from(machine.inspect16(expected.terminal_pc)?)
+        | (u32::from(machine.inspect16(expected.terminal_pc + 2)?) << 16);
+    if opcode != 0xeafffffe {
+        return Err(fail("stripes source-defined idle instruction differs"));
+    }
+    let target = (machine.cycles().0 / CYCLES_PER_FRAME + 2) * CYCLES_PER_FRAME;
+    if target > fixture.max_cycles {
+        return Err(fail("stripes has no scanout budget"));
+    }
+    machine.advance_to(
+        Cycle(target),
+        fixture
+            .max_instructions
+            .saturating_sub(machine.executed_instructions()),
+    )?;
+    for (index, &actual) in machine.framebuffer().iter().enumerate() {
+        let wanted = if (index % SCREEN_WIDTH / 8).is_multiple_of(2) {
+            0x560b
+        } else {
+            0x6290
+        };
+        if actual != wanted {
+            return Err(fail(format!(
+                "stripes pixel {index} expected {wanted:#06x}, got {actual:#06x}"
+            )));
+        }
+    }
+    if let Some(path) = capture_path {
+        capture(
+            Path::new(&format!("{path}.stripes.ppm")),
+            machine.framebuffer(),
+        )?;
+    }
+    println!(
+        "PASS stripes terminal={:#010x} cycles={} pixels={}",
+        expected.terminal_pc,
+        machine.cycles().0,
+        SCREEN_WIDTH * SCREEN_HEIGHT
+    );
+    Ok(())
+}
+
 /// Executes every declared ARM return before sampling RAM and completed scanout.
 /// The manifest supplies independent expected values; a looping ROM is not success.
 fn run_counter(
@@ -1076,15 +1328,77 @@ fn run() -> Result<()> {
         && !(args[0] == "fixtures" && args.get(1).map(String::as_str) == Some("run"))
     {
         return Err(fail(
-            "usage: build-fixtures | fixtures run --manifest PATH [--capture PATH] | bench --scenario pixels --frames N",
+            "usage: build-fixtures | fixtures run --manifest PATH [--capture PATH] | bench --scenario pixels|tiled --frames N",
         ));
     }
-    if bench && option(&args, "--scenario")?.as_deref().unwrap_or("pixels") != "pixels" {
-        return Err(fail("only the Slice 1 pixels benchmark is available"));
+    let scenario = option(&args, "--scenario")?.unwrap_or_else(|| "pixels".to_owned());
+    if bench && !matches!(scenario.as_str(), "pixels" | "tiled") {
+        return Err(fail("benchmark scenario must be pixels or tiled"));
     }
     let manifest = manifest(&path)?;
     for fixture in &manifest.fixture {
+        if bench && fixture.name != scenario {
+            continue;
+        }
         let bytes = load(fixture, path.parent().unwrap())?;
+        if let Verification::Tiled(expected) = &fixture.verification {
+            let mut machine = run_tiled(
+                fixture,
+                expected,
+                &bytes,
+                option(&args, "--capture")?.as_deref(),
+            )?;
+            if bench {
+                let frames: usize = option(&args, "--frames")?
+                    .unwrap_or_else(|| "120".to_owned())
+                    .parse()?;
+                if frames == 0 || frames > 1_000_000 {
+                    return Err(fail("frame count must be 1..=1000000"));
+                }
+                let point = expected.checkpoints.last().expect("validated checkpoints");
+                // The replay has released every button. Benchmark stable scanout
+                // after initialization and require the same independent image.
+                if point.x as usize != point.image_x
+                    || point.y as usize != point.image_y
+                    || expected
+                        .input_events
+                        .iter()
+                        .any(|event| event.cycle > machine.cycles().0)
+                    || gba_session::BUTTONS
+                        .iter()
+                        .any(|&button| machine.button_pressed(button))
+                {
+                    return Err(fail("tiled benchmark requires a settled, released replay"));
+                }
+                let mut samples = Vec::with_capacity(frames);
+                let mut target = machine.cycles();
+                for _ in 0..frames {
+                    target.0 += CYCLES_PER_FRAME;
+                    let start = Instant::now();
+                    machine.advance_to(target, fixture.max_instructions)?;
+                    samples.push(start.elapsed().as_secs_f64() * 1000.0);
+                }
+                check_tiled_image(&machine, point.image_x, point.image_y)?;
+                let mean = samples.iter().sum::<f64>() / frames as f64;
+                samples.sort_by(f64::total_cmp);
+                let p95 = samples[(frames * 95).div_ceil(100).saturating_sub(1)];
+                println!(
+                    "BENCH tiled frames={frames} core_mean_ms={mean:.3} core_p95_ms={p95:.3} upload=not-applicable-headless"
+                );
+            }
+            continue;
+        }
+        if let Verification::Stripes(expected) = &fixture.verification {
+            if !bench {
+                run_stripes(
+                    fixture,
+                    expected,
+                    &bytes,
+                    option(&args, "--capture")?.as_deref(),
+                )?;
+            }
+            continue;
+        }
         if let Verification::Diagnostic(expected) = &fixture.verification {
             if !bench {
                 run_diagnostic(
