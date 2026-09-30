@@ -1,7 +1,9 @@
 #![forbid(unsafe_code)]
 
 mod backup;
+mod sram;
 pub use backup::{BackupDetection, BackupSelection, BackupType, detect_backup};
+pub use sram::{SRAM_BYTES, SaveImage};
 
 mod audio;
 pub use audio::PCM_RATE;
@@ -1449,6 +1451,8 @@ struct System {
     buttons: ButtonState,
     inputs: VecDeque<InputEvent>,
     rom: Vec<u8>,
+    /// Cartridge-owned SRAM persists through CPU reset; host storage is separate.
+    sram: Option<crate::sram::Sram>,
     /// Explicitly mapped original test firmware; absent for normal ROM loads.
     test_firmware: bool,
     ewram: Vec<u8>,
@@ -1475,6 +1479,7 @@ impl System {
             buttons: ButtonState::default(),
             inputs: VecDeque::new(),
             rom: Vec::new(),
+            sram: None,
             test_firmware: false,
             ewram: vec![0; 256 * 1024],
             iwram: vec![0; 32 * 1024],
@@ -1655,6 +1660,11 @@ impl System {
             return Err(CoreError::InvalidAccessAlignment { address, width: 2 });
         }
         self.charge(address, 2, access);
+        if let Some(value) = self.sram_read(address) {
+            let value = u16::from(value) * 0x0101;
+            self.open_bus = u32::from(value) * 0x0001_0001;
+            return Ok(value);
+        }
         let value = match self.read_bytes(address, 2) {
             Ok(bytes) => u16::from_le_bytes([bytes[0], bytes[1]]),
             Err(_) if matches!(access.kind, AccessKind::Data) => {
@@ -1671,6 +1681,10 @@ impl System {
             return Err(CoreError::InvalidAccessAlignment { address, width: 4 });
         }
         self.charge(address, 4, access);
+        if let Some(value) = self.sram_read(address) {
+            self.open_bus = u32::from(value) * 0x0101_0101;
+            return Ok(self.open_bus);
+        }
         let value = match self.read_bytes(address, 4) {
             Ok(bytes) => u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]),
             Err(_) if matches!(access.kind, AccessKind::Data) => self.open_bus,
@@ -1687,6 +1701,9 @@ impl System {
 
         self.charge(address, 2, access);
 
+        if self.sram_write(address, value.rotate_right((address & 1) * 8) as u8) {
+            return Ok(());
+        }
         self.write_halfword(address, value)
     }
 
@@ -1793,8 +1810,31 @@ impl System {
             return Err(CoreError::InvalidAccessAlignment { address, width: 4 });
         }
         self.charge(address, 4, access);
+        if self.sram_write(address, value.rotate_right((address & 3) * 8) as u8) {
+            return Ok(());
+        }
         self.write_halfword(address, value as u16)?;
         self.write_halfword(address.wrapping_add(2), (value >> 16) as u16)
+    }
+
+    /// The save bus is eight bits wide and mirrors the physical 32 KiB chip.
+    fn sram_read(&self, address: u32) -> Option<u8> {
+        if !(0x0e000000..0x10000000).contains(&address) {
+            return None;
+        }
+        self.sram.as_ref().map(|sram| sram.read(address))
+    }
+
+    fn sram_write(&mut self, address: u32, value: u8) -> bool {
+        if !(0x0e000000..0x10000000).contains(&address) {
+            return false;
+        }
+        if let Some(sram) = &mut self.sram {
+            sram.write(address, value);
+            true
+        } else {
+            false
+        }
     }
 
     fn read_bytes(&self, address: u32, width: usize) -> Result<&[u8], CoreError> {
@@ -1920,6 +1960,9 @@ impl CpuBus for System {
 
     fn read8(&mut self, address: u32, access: Access) -> Result<u8, CoreError> {
         self.charge(address, 1, access);
+        if let Some(value) = self.sram_read(address) {
+            return Ok(value);
+        }
         Ok(self.read_bytes(address, 1)?[0])
     }
 
@@ -1927,6 +1970,9 @@ impl CpuBus for System {
     /// while OBJ VRAM and OAM ignore byte stores. RAM bytes retain ordinary semantics.
     fn write8(&mut self, address: u32, value: u8, access: Access) -> Result<(), CoreError> {
         self.charge(address, 1, access);
+        if self.sram_write(address, value) {
+            return Ok(());
+        }
         if let Some(range) = ram_range(address, EWRAM_START, self.ewram.len(), 1) {
             self.ewram[range.start] = value;
         } else if let Some(range) = ram_range(address, IWRAM_START, self.iwram.len(), 1) {
@@ -2375,6 +2421,9 @@ impl Machine {
             detection: detect_backup(rom),
             manual_override,
         };
+        if self.backup.selected() == Some(BackupType::Sram) {
+            self.system.sram = Some(sram::Sram::new());
+        }
         self.system.rom.extend_from_slice(rom);
         Ok(())
     }
@@ -2382,6 +2431,36 @@ impl Machine {
     /// Reports cartridge evidence and the effective save-hardware selection.
     pub fn backup_selection(&self) -> &BackupSelection {
         &self.backup
+    }
+
+    /// Copies cartridge bytes and their revision for asynchronous host storage.
+    pub fn save_image(&self) -> Option<SaveImage> {
+        self.system.sram.as_ref().map(sram::Sram::image)
+    }
+
+    /// Loads validated initial bytes before execution, without making them dirty.
+    pub fn load_save(&mut self, bytes: &[u8]) -> Result<(), &'static str> {
+        self.system
+            .sram
+            .as_mut()
+            .ok_or("cartridge does not use SRAM")?
+            .load(bytes)
+    }
+
+    /// Imports bytes as a newer revision, even when the content is unchanged.
+    pub fn import_save(&mut self, bytes: &[u8]) -> Result<(), &'static str> {
+        self.system
+            .sram
+            .as_mut()
+            .ok_or("cartridge does not use SRAM")?
+            .import(bytes)
+    }
+
+    /// A completion can acknowledge only the revision actually written.
+    pub fn acknowledge_save(&mut self, revision: u64) {
+        if let Some(sram) = &mut self.system.sram {
+            sram.acknowledge(revision);
+        }
     }
 
     /// Enables the original SWI-division and IRQ-vector firmware for a controlled diagnostic
@@ -2574,9 +2653,11 @@ impl Machine {
         let rom = std::mem::take(&mut self.system.rom);
         let firmware = self.system.test_firmware;
         let backup = self.backup.clone();
+        let sram = self.system.sram.take();
         *self = Self::new();
         self.system.rom = rom;
         self.backup = backup;
+        self.system.sram = sram;
         if firmware {
             self.enable_test_firmware();
         }
@@ -2635,6 +2716,25 @@ fn range_for(address: u32, start: u32, length: usize, width: usize) -> Option<Ra
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A detected SRAM cartridge must expose mirrored byte storage rather than
+    /// returning unmapped-bus errors or losing the score across a CPU reset.
+    #[test]
+    fn sram_byte_bus_survives_reset() {
+        let mut machine = Machine::new();
+        machine
+            .load_rom(include_bytes!("../../../roms/backup/sram.gba"))
+            .unwrap();
+        let access = Access {
+            kind: AccessKind::Data,
+            sequential: false,
+        };
+        assert_eq!(machine.system.read8(0x0e000000, access).unwrap(), 0xff);
+        machine.system.write8(0x0e000003, 42, access).unwrap();
+        assert_eq!(machine.system.read8(0x0f008003, access).unwrap(), 42);
+        machine.reset();
+        assert_eq!(machine.system.read8(0x0e000003, access).unwrap(), 42);
+    }
 
     /// Exercises sleep, firmware dispatch, W1C and masked wake through guest code.
     #[test]

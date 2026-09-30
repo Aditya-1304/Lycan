@@ -2,12 +2,21 @@
 
 mod app;
 mod audio;
+mod saves;
 
 use app::GbaApp;
 
 #[cfg(not(target_arch = "wasm32"))]
 fn main() -> eframe::Result {
-    if std::env::args().any(|argument| argument == "--audio-probe") {
+    let arguments: Vec<_> = std::env::args().collect();
+    if let Some(index) = arguments
+        .iter()
+        .position(|argument| argument == "--save-probe")
+    {
+        return saves::probe(arguments.get(index + 1).map_or("", String::as_str))
+            .map_err(|error| eframe::Error::AppCreation(Box::new(std::io::Error::other(error))));
+    }
+    if arguments.iter().any(|argument| argument == "--audio-probe") {
         return audio::probe()
             .map_err(|error| eframe::Error::AppCreation(Box::new(std::io::Error::other(error))));
     }
