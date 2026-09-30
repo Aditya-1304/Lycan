@@ -4,7 +4,7 @@ mod backup;
 mod flash;
 mod sram;
 pub use backup::{BackupDetection, BackupSelection, BackupType, detect_backup};
-pub use flash::FLASH64_BYTES;
+pub use flash::{FLASH64_BYTES, FLASH128_BYTES};
 pub use sram::{SRAM_BYTES, SaveImage};
 
 mod audio;
@@ -1460,7 +1460,7 @@ struct System {
     /// Cartridge-owned SRAM persists through CPU reset; host storage is separate.
     sram: Option<crate::sram::Sram>,
     /// Flash commands and bytes share the cartridge lifecycle, not host storage.
-    flash: Option<crate::flash::Flash64>,
+    flash: Option<crate::flash::Flash>,
     /// Explicitly mapped original test firmware; absent for normal ROM loads.
     test_firmware: bool,
     ewram: Vec<u8>,
@@ -2451,8 +2451,13 @@ impl Machine {
         };
         if self.backup.selected() == Some(BackupType::Sram) {
             self.system.sram = Some(sram::Sram::new());
-        } else if self.backup.selected() == Some(BackupType::Flash64) {
-            self.system.flash = Some(flash::Flash64::new());
+        } else if matches!(
+            self.backup.selected(),
+            Some(BackupType::Flash64 | BackupType::Flash128)
+        ) {
+            self.system.flash = Some(flash::Flash::new(
+                self.backup.selected() == Some(BackupType::Flash128),
+            ));
         }
         self.system.rom.extend_from_slice(rom);
         Ok(())
@@ -2469,7 +2474,7 @@ impl Machine {
             .sram
             .as_ref()
             .map(sram::Sram::image)
-            .or_else(|| self.system.flash.as_ref().map(flash::Flash64::image))
+            .or_else(|| self.system.flash.as_ref().map(flash::Flash::image))
     }
 
     /// Loads validated initial bytes before execution, without making them dirty.
@@ -2771,6 +2776,67 @@ fn range_for(address: u32, start: u32, length: usize, width: usize) -> Option<Ra
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Bank-local programming and sector erase must preserve the other bank.
+    /// A complete persisted image restores both banks after protocol reset.
+    #[test]
+    fn flash_banks_preserve_and_restore_independent_bytes() {
+        let mut machine = Machine::new();
+        machine
+            .load_rom(include_bytes!("../../../roms/backup/flash128.gba"))
+            .unwrap();
+        let access = Access {
+            kind: AccessKind::Data,
+            sequential: false,
+        };
+        let mut command = |bank, value| {
+            for (offset, byte) in [
+                (0x5555, 0xaa),
+                (0x2aaa, 0x55),
+                (0x5555, 0xb0),
+                (0, bank),
+                (0x5555, 0xaa),
+                (0x2aaa, 0x55),
+                (0x5555, 0xa0),
+                (0x123, value),
+            ] {
+                machine
+                    .system
+                    .write8(0x0e000000 + offset, byte, access)
+                    .unwrap();
+            }
+        };
+        command(0, 0x42);
+        command(1, 0x24);
+        let saved = machine
+            .save_image()
+            .expect("Flash128 must expose persistence");
+        assert_eq!(saved.bytes.len(), 131072);
+        assert_eq!(saved.bytes[0x123], 0x42);
+        assert_eq!(saved.bytes[0x10123], 0x24);
+        for (offset, byte) in [
+            (0x5555, 0xaa),
+            (0x2aaa, 0x55),
+            (0x5555, 0x80),
+            (0x5555, 0xaa),
+            (0x2aaa, 0x55),
+            (0, 0x30),
+        ] {
+            machine
+                .system
+                .write8(0x0e000000 + offset, byte, access)
+                .unwrap();
+        }
+        let erased = machine.save_image().unwrap();
+        assert_eq!(erased.bytes[0x123], 0x42);
+        assert_eq!(erased.bytes[0x10123], 0xff);
+        machine.load_save(&saved.bytes).unwrap();
+        machine.reset();
+        assert_eq!(machine.system.read8(0x0e000123, access).unwrap(), 0x42);
+        assert_eq!(machine.save_image().unwrap().bytes, saved.bytes);
+        assert!(machine.import_save(&saved.bytes[..65536]).is_err());
+        assert_eq!(machine.save_image().unwrap().bytes, saved.bytes);
+    }
 
     /// A save read interrupts an unfinished Flash unlock. Resuming its remaining
     /// writes must not program a byte; a fresh, uninterrupted sequence must work.

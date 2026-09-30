@@ -14,6 +14,8 @@ struct RomRead {
 
 /// Original score cartridges use the normal loader and persistence route.
 const FLASH_DIAGNOSTIC_ROM: &[u8] = include_bytes!("../../../roms/gba-tests/save/flash64.gba");
+const BANKED_DIAGNOSTIC_ROM: &[u8] = include_bytes!("../../../roms/gba-tests/save/flash128.gba");
+const BANKED_ROM: &[u8] = include_bytes!("../../../roms/flash-banked-score.gba");
 const FLASH_ROM: &[u8] = include_bytes!("../../../roms/flash-score.gba");
 const SRAM_ROM: &[u8] = include_bytes!("../../../roms/sram.gba");
 
@@ -260,7 +262,11 @@ impl GbaApp {
         // version. Its explicit fixture configuration uses the common override
         // path; picked games still rely on detector evidence or the user's choice.
         let backup_override = self.backup_override.or_else(|| {
-            (bytes == FLASH_DIAGNOSTIC_ROM).then_some(gba_session::BackupType::Flash64)
+            if bytes == BANKED_DIAGNOSTIC_ROM {
+                Some(gba_session::BackupType::Flash128)
+            } else {
+                (bytes == FLASH_DIAGNOSTIC_ROM).then_some(gba_session::BackupType::Flash64)
+            }
         });
         match self
             .session
@@ -281,6 +287,7 @@ impl GbaApp {
                     || bytes == THUMB_DIAGNOSTIC_ROM
                     || bytes == MEMORY_ROM
                     || bytes == FLASH_DIAGNOSTIC_ROM
+                    || bytes == BANKED_DIAGNOSTIC_ROM
                     || bytes == KEYPAD_OR_ROM
                     || bytes == KEYPAD_AND_ROM
                     || bytes == VBLANK_ROM
@@ -573,6 +580,12 @@ impl GbaApp {
             if ui.button("Reset").clicked() {
                 self.reset_demo();
                 ui.ctx().request_repaint();
+            }
+            if ui.button("Load Flash128 test").clicked() {
+                self.load_rom_bytes("flash128.gba", BANKED_DIAGNOSTIC_ROM);
+            }
+            if ui.button("Load banked Flash128 score").clicked() {
+                self.load_rom_bytes("flash-banked-score.gba", BANKED_ROM);
             }
             if ui.button("Load Flash64 test").clicked() {
                 self.load_rom_bytes("flash64.gba", FLASH_DIAGNOSTIC_ROM);
