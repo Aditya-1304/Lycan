@@ -202,3 +202,58 @@ Texture submission: mean 0.032 ms | p95 0.100 ms | samples 120
 Core execution: mean 2.262 ms | p95 3.400 ms | samples 120
 Pixel conversion: mean 0.188 ms | p95 0.300 ms | samples 120
 Texture submission: mean 0.028 ms | p95 0.100 ms | samples 120
+
+## Slice 4 verification status
+
+The original CPU calculation fixture executes selected ARM arithmetic, logical,
+comparison, barrel-shifter, carry, and multiplication cases entirely as guest
+code. Each case compares against a fixed expected result and draws its status
+through the existing Mode 3 display route.
+
+### Headless
+
+- Fixture: `calculations.gba`
+- SHA-256: `8ef128a96363775c3a6b0b3aad2997edfa48e43ba95a920121e9b7a04b4604f5`
+- Terminal PC: `0x08001000`
+- Completion mailbox ID: `0x005d`
+- Completion result: `1`
+- First failing case: `0`
+- Selected calculation cases passed: `16 / 16`
+- Full 240×160 framebuffer verification: passed
+- Diagnostic completion host time: TODO ms
+
+### Native Linux
+
+- Diagnostic visually verified: yes
+- All calculation bands passed: yes
+- Completion mailbox `0x005d`: yes
+- Completion result `1`: yes
+- First failing case `0`: yes
+- Earlier Slice 1–3 scenes regression checked: yes
+Core execution: mean 1.863 ms | p95 2.962 ms | samples 120
+Pixel conversion: mean 0.110 ms | p95 0.157 ms | samples 120
+Texture submission: mean 0.026 ms | p95 0.041 ms | samples 120
+
+### Google Chrome
+
+- Diagnostic visually verified: yes
+- All calculation bands passed: yes
+- Completion mailbox `0x005d`: yes
+- Completion result `1`: yes
+- First failing case `0`: yes
+- Earlier Slice 1–3 scenes regression checked: yes
+Core execution: mean 2.044 ms | p95 6.700 ms | samples 120
+Pixel conversion: mean 0.156 ms | p95 0.300 ms | samples 120
+Texture submission: mean 0.029 ms | p95 0.100 ms | samples 120
+
+### Brave
+
+- Diagnostic visually verified: yes
+- All calculation bands passed: yes
+- Completion mailbox `0x005d`: yes
+- Completion result `1`: yes
+- First failing case `0`: yes
+- Earlier Slice 1–3 scenes regression checked: yes
+Core execution: mean 2.125 ms | p95 2.800 ms | samples 120
+Pixel conversion: mean 0.227 ms | p95 0.300 ms | samples 120
+Texture submission: mean 0.028 ms | p95 0.100 ms | samples 120
