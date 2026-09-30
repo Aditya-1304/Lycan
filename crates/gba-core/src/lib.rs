@@ -233,6 +233,8 @@ struct Access {
 }
 
 trait CpuBus {
+    fn read8(&mut self, address: u32, access: Access) -> Result<u8, CoreError>;
+    fn write8(&mut self, address: u32, value: u8, access: Access) -> Result<(), CoreError>;
     fn read16(&mut self, address: u32, access: Access) -> Result<u16, CoreError>;
     fn read32(&mut self, address: u32, access: Access) -> Result<u32, CoreError>;
 
@@ -519,17 +521,19 @@ impl Cpu {
         true
     }
 
-    /// Handles immediate-offset word transfers, including literal loads and
-    /// display-status polling. Byte and shifted-offset transfers remain deferred.
+    /// Handles immediate-offset byte and word transfers through the timed bus.
+    /// Word loads rotate unaligned data; stores discard the low address bits.
+    /// Shifted register offsets and privileged transfers remain deferred.
     fn execute_word_transfer<B: CpuBus>(
         &mut self,
         address: u32,
         instruction: u32,
         bus: &mut B,
     ) -> Result<bool, CoreError> {
-        if instruction & 0x0E40_0000 != 0x0400_0000 {
+        if instruction & 0x0E00_0000 != 0x0400_0000 {
             return Ok(false);
         }
+        let byte = instruction & (1 << 22) != 0;
         let rn = ((instruction >> 16) & 15) as usize;
         let rd = ((instruction >> 12) & 15) as usize;
         let pre = instruction & (1 << 24) != 0;
@@ -558,10 +562,19 @@ impl Cpu {
             sequential: false,
         };
         if load {
-            self.registers[rd] = bus.read32(target, access)?;
+            self.registers[rd] = if byte {
+                u32::from(bus.read8(target, access)?)
+            } else {
+                bus.read32(target & !3, access)?
+                    .rotate_right((target & 3) * 8)
+            };
             bus.idle(1);
         } else {
-            bus.write32(target, self.registers[rd], access)?;
+            if byte {
+                bus.write8(target, self.registers[rd] as u8, access)?;
+            } else {
+                bus.write32(target & !3, self.registers[rd], access)?;
+            }
         }
         if writeback {
             self.registers[rn] = updated;
@@ -776,12 +789,12 @@ impl System {
     fn write_halfword(&mut self, address: u32, value: u16) -> Result<(), CoreError> {
         let bytes = value.to_le_bytes();
 
-        if let Some(range) = range_for(address, EWRAM_START, self.ewram.len(), 2) {
+        if let Some(range) = ram_range(address, EWRAM_START, self.ewram.len(), 2) {
             self.ewram[range].copy_from_slice(&bytes);
             return Ok(());
         }
 
-        if let Some(range) = range_for(address, IWRAM_START, self.iwram.len(), 2) {
+        if let Some(range) = ram_range(address, IWRAM_START, self.iwram.len(), 2) {
             self.iwram[range].copy_from_slice(&bytes);
             return Ok(());
         }
@@ -829,10 +842,10 @@ impl System {
         if let Some(range) = range_for(address, ROM_START, self.rom.len(), width) {
             return Ok(&self.rom[range]);
         }
-        if let Some(range) = range_for(address, EWRAM_START, self.ewram.len(), width) {
+        if let Some(range) = ram_range(address, EWRAM_START, self.ewram.len(), width) {
             return Ok(&self.ewram[range]);
         }
-        if let Some(range) = range_for(address, IWRAM_START, self.iwram.len(), width) {
+        if let Some(range) = ram_range(address, IWRAM_START, self.iwram.len(), width) {
             return Ok(&self.iwram[range]);
         }
         if let Some(range) = range_for(address, IO_START, self.io.len(), width) {
@@ -857,9 +870,9 @@ impl System {
             if address >= ROM_START && (address as u64) < ROM_START as u64 + MAX_ROM_BYTES as u64 {
                 let sequential = access.sequential && address & 0x1FFFF != 0;
                 (if sequential { 3 } else { 5 }) + if width == 4 { 3 } else { 0 }
-            } else if range_for(address, EWRAM_START, 256 * 1024, 1).is_some() {
+            } else if ram_range(address, EWRAM_START, 256 * 1024, 1).is_some() {
                 3 * beats
-            } else if range_for(address, IWRAM_START, 32 * 1024, 1).is_some()
+            } else if ram_range(address, IWRAM_START, 32 * 1024, 1).is_some()
                 || range_for(address, IO_START, IO_BYTES, 1).is_some()
             {
                 1
@@ -888,6 +901,36 @@ impl System {
 }
 
 impl CpuBus for System {
+    fn read8(&mut self, address: u32, access: Access) -> Result<u8, CoreError> {
+        self.charge(address, 1, access);
+        Ok(self.read_bytes(address, 1)?[0])
+    }
+
+    /// Video memory has a 16-bit write bus: palette and BG bytes are duplicated,
+    /// while OBJ VRAM ignores byte stores. RAM bytes retain ordinary semantics.
+    fn write8(&mut self, address: u32, value: u8, access: Access) -> Result<(), CoreError> {
+        self.charge(address, 1, access);
+        if let Some(range) = ram_range(address, EWRAM_START, self.ewram.len(), 1) {
+            self.ewram[range.start] = value;
+        } else if let Some(range) = ram_range(address, IWRAM_START, self.iwram.len(), 1) {
+            self.iwram[range.start] = value;
+        } else if palette_range(address, 1).is_some() {
+            self.write_halfword(address & !1, u16::from(value) * 0x0101)?;
+        } else if let Some(range) = range_for(address, VRAM_START, self.vram.len(), 1) {
+            let object_start = if self.display.control & 7 >= 3 {
+                0x14000
+            } else {
+                0x10000
+            };
+            if range.start < object_start {
+                self.write_halfword(address & !1, u16::from(value) * 0x0101)?;
+            }
+        } else {
+            return Err(CoreError::UnmappedAddress { address, width: 1 });
+        }
+        Ok(())
+    }
+
     fn read16(&mut self, address: u32, access: Access) -> Result<u16, CoreError> {
         self.read16_impl(address, access)
     }
@@ -1183,6 +1226,15 @@ fn palette_range(address: u32, width: usize) -> Option<Range<usize>> {
     }
     let start = address as usize & (PALETTE_BYTES - 1);
     (start + width <= PALETTE_BYTES).then_some(start..start + width)
+}
+
+/// Work RAM repeats throughout its region; decode before accessing backing storage.
+fn ram_range(address: u32, start: u32, length: usize, width: usize) -> Option<Range<usize>> {
+    if address >> 24 != start >> 24 {
+        return None;
+    }
+    let offset = address as usize & (length - 1);
+    (offset.checked_add(width)? <= length).then_some(offset..offset + width)
 }
 
 fn range_for(address: u32, start: u32, length: usize, width: usize) -> Option<Range<usize>> {

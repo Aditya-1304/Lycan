@@ -53,6 +53,7 @@ struct Fixture {
 enum Verification {
     Pixels(Pixels),
     Calculations(Pixels),
+    Copy(Pixels),
     Buttons(Movement),
     Palette(Palette),
     Hello(Hello),
@@ -94,6 +95,23 @@ struct Pixels {
     colors: Vec<u16>,
     input_events: Vec<String>,
     time_events: Vec<String>,
+    /// Frozen halfwords checked independently of the displayed frame.
+    #[serde(default)]
+    memory_checks: Vec<MemoryCheck>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MemoryCheck {
+    address: u32,
+    value: u16,
+    /// Number of consecutive halfwords; singleton probes omit this field.
+    #[serde(default = "one_halfword")]
+    halfwords: u32,
+}
+
+fn one_halfword() -> u32 {
+    1
 }
 
 #[derive(Deserialize)]
@@ -191,7 +209,9 @@ fn manifest(path: &Path) -> Result<Manifest> {
                     return Err(fail("invalid palette checkpoint"));
                 }
             }
-            Verification::Pixels(expected) | Verification::Calculations(expected) => {
+            Verification::Pixels(expected)
+            | Verification::Calculations(expected)
+            | Verification::Copy(expected) => {
                 if !expected.input_events.is_empty()
                     || !expected.time_events.is_empty()
                     || expected.band_height == 0
@@ -332,7 +352,9 @@ fn load(fixture: &Fixture, directory: &Path) -> Result<Vec<u8>> {
 /// Requires the exact executed terminal PC and both diagnostic RAM values.
 fn pixels(fixture: &Fixture) -> Result<&Pixels> {
     match &fixture.verification {
-        Verification::Pixels(expected) | Verification::Calculations(expected) => Ok(expected),
+        Verification::Pixels(expected)
+        | Verification::Calculations(expected)
+        | Verification::Copy(expected) => Ok(expected),
         Verification::Buttons(_) | Verification::Palette(_) | Verification::Hello(_) => {
             Err(fail("expected a terminal pixels fixture"))
         }
@@ -348,6 +370,24 @@ fn execute(fixture: &Fixture, bytes: &[u8]) -> Result<Machine> {
         fixture.max_instructions,
         Cycle(fixture.max_cycles),
     )?;
+    for check in &expected.memory_checks {
+        for offset in 0..check.halfwords {
+            let address = check
+                .address
+                .checked_add(
+                    offset
+                        .checked_mul(2)
+                        .ok_or_else(|| fail("memory expectation overflow"))?,
+                )
+                .ok_or_else(|| fail("memory expectation overflow"))?;
+            if machine.inspect16(address)? != check.value {
+                return Err(fail(format!(
+                    "{} copied memory mismatch at {address:#010x}",
+                    fixture.name
+                )));
+            }
+        }
+    }
     let id = machine.inspect16(fixture.mailbox_address)?;
     let result = machine.inspect16(fixture.mailbox_address + 2)?;
     // Diagnostic guests retain the earliest failing case independently of the

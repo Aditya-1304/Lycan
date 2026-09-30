@@ -128,3 +128,36 @@ band_height = 10
 colors = [0x03e0, 0x03e0, 0x03e0, 0x03e0, 0x03e0, 0x03e0, 0x03e0, 0x03e0, 0x03e0, 0x03e0, 0x03e0, 0x03e0, 0x03e0, 0x03e0, 0x03e0, 0x03e0]
 input_events = []
 time_events = []
+
+[[fixture]]
+name = "copy"
+rom = "../roms/copy.gba"
+source = "../roms/copy/copy.s"
+linker = "../roms/pixels/linker.ld"
+sha256 = "70ae32d6d49cfbbe8d05f66da4fa22a1076838b0753cab0a9827f304cb695306"
+origin = "Original MIT guest assembly in roms/copy/copy.s"
+startup = "cartridge-direct-arm"
+bios_required = false
+mailbox_address = 0x03000000
+completion_id = 0x005e
+max_instructions = 150000
+max_cycles = 3000000
+[fixture.verification]
+kind = "copy"
+terminal_pc = 0x0800a000
+result = 1
+band_height = 80
+colors = [0x001f, 0x60e0]
+input_events = []
+time_events = []
+# Verify every copied halfword plus independent bus-rule probes.
+memory_checks = [
+    { address = 0x02000000, value = 0x0101, halfwords = 9600 },
+    { address = 0x02004b00, value = 0x0202, halfwords = 9600 },
+    { address = 0x0200a000, value = 0x3344 },
+    { address = 0x0200a002, value = 0x1122 },
+    { address = 0x03000020, value = 0x005e },
+    { address = 0x05000004, value = 0xe0e0 },
+    { address = 0x06010000, value = 0x0202 },
+    { address = 0x06014000, value = 0x0000 },
+]

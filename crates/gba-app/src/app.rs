@@ -31,6 +31,10 @@ const CALCULATIONS_ROM: &[u8] = include_bytes!(concat!(
     "/../../roms/calculations.gba"
 ));
 
+/// The bitmap-copy guest uses the shared loader and frame pacing on native and
+/// browser hosts; copying, redraw, and return all execute inside the emulated CPU.
+const COPY_ROM: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../roms/copy.gba"));
+
 /// The replay uses the same ordered cycle transitions verified by gba-tools.
 const DEMO_INPUT: &[(Cycle, Button, bool)] = &include!(concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -213,6 +217,11 @@ impl GbaApp {
             }
             if ui.button("Reset").clicked() {
                 self.reset_demo();
+                ui.ctx().request_repaint();
+            }
+            if ui.button("Load copy demo").clicked() {
+                self.load_rom_bytes("copy.gba", COPY_ROM);
+                self.status = "Copy demo: red upper band and green lower band".to_owned();
                 ui.ctx().request_repaint();
             }
             if ui.button("Load CPU diagnostic").clicked() {
