@@ -1289,5 +1289,197 @@ IDBDatabase.prototype.transaction = originalSaveTransaction;
 
 Implementation, automated evidence and browser manual acceptance are complete.
 The only remaining platform acceptance item is the native GUI/picker/close/failure
-check; the supplied confirmation concerns Chrome and Brave. Slice 14 Flash
-behavior was not started.
+check; the supplied confirmation concerns Chrome and Brave. At that closeout,
+Slice 14 Flash behavior had not started; its current evidence follows below.
+
+## Slice 14 — Flash64 score recovery (2026-10-01)
+
+Flash64 is selected through the existing centralized detector/typed override.
+The cartridge owns 65536 erased (`ff`) bytes, Panasonic identification (`32 1b`),
+unlock/command decoding, byte programming, chip erase and 4 KiB sector erase.
+Programming clears bits; erase restores them to one. Ordinary save-bus reads
+cancel incomplete command sequences while identification reads remain available
+until reset/exit. CPU reset retains bytes and pending revisions and clears the
+volatile decoder/identification state. Program/erase currently complete
+synchronously; physical busy delays and status-bit polling are not modeled.
+
+The pinned guest exposed discarded low address bits on wide CPU stores. Backup
+stores now retain those bits so the eight-bit bus selects the correct source
+byte; ordinary memory stores retain their alignment behavior. The upstream test
+failed case 6 before this fix and passes all eleven cases afterward. One focused
+unit regression was added: a read between unlock writes must prevent later
+writes from programming a byte. It first failed on the missing Flash bus and
+then passed; an uninterrupted sequence programs successfully and survives reset.
+
+Flash snapshots reuse the existing identity, serialized storage, dirty revision,
+completion acknowledgement, disk and IndexedDB routes. Initial loads are clean,
+imports are dirty, stale acknowledgements cannot clean newer data, and rejected
+sizes leave bytes intact. Existing SRAM exports remain byte-for-byte compatible.
+Flash exports contain `GBAFLS64`, the 32-byte original-ROM SHA-256 digest and
+exactly 65536 backup bytes (65576 total). The core also validates the image against
+the currently selected hardware. Shared UI labels now say backup/save.
+
+### Fixture and automated evidence
+
+**Load Flash64 score** loads the original `roms/flash-score.gba` through the normal
+app storage route. Its source, frozen identity/bounds, rebuild command and shared
+native/WASM contract are in [roms/flash](../roms/flash/README.md). It uses direct
+ARM startup without BIOS or test firmware. Tap/release **Z (A)** for a point;
+each point fills an eight-by-eight green cell, up to sixteen.
+
+**Load Flash64 test** loads the unchanged upstream diagnostic. Its padded
+identification strings lack SDK version digits, so this explicitly configured
+fixture uses the existing typed Flash64 override and original test firmware for
+its result text. The detector is unchanged and no commercial-game patch is added.
+Its manifest requires the exact terminal opcode, zero result, CPSR and complete
+success-screen SHA-256; reaching an arbitrary loop is insufficient.
+
+| Evidence | Result |
+| --- | --- |
+| Score ROM SHA-256 / size | `5474814fb7782e47aab77fc2fb6da5b38a6400843d08e6363e5a9f37548d4e07` / 616 bytes |
+| Upstream source revision | `jsmolka/gba-tests` at `a7113b67e63f83a9b321696ddd7042ccfad6c881`; MIT notice retained |
+| Upstream ROM SHA-256 / size | `7e2aa32e943aedde88bd750eadcdbf55152d3a1ec61385011b7f15cd85b07c02` / 3708 bytes |
+| Upstream terminal/result | PASS: `0x08000ac8`, instruction `eafffffe`, `r12 = 0`, CPSR `600000df` |
+| Upstream bounded completion | 20750192 cycles; 1760344 instructions; limits 50000000 cycles / 4000000 instructions |
+| Upstream exact success screen | PASS: SHA-256 `59ce42abae9825c2d2579c5cd838e47d88be917e37ea36ff162d46fc5d0991e3` after scanout |
+| Score completion | Mailbox `0x03000000 = 0x74`; score at `0x03000002`; three frames, 200000 instructions per frame, at most 842750 cycles |
+| Fresh score, A held | Score 1; PC `0x08000148`; 842688 cycles; 78839 instructions; revision 5, dirty |
+| Reopened score, A released | Score 1; PC `0x08000150`; 842696 cycles; 78839 instructions; revision 1, clean |
+| Restored score, next increment | Score 2; PC `0x08000150`; 842698 cycles; 78841 instructions; revision 4, dirty; erase/reprogram required |
+| Exact score output | All 38400 completed pixels verified; backup begins `a5 01` or `a5 02`, remaining 65534 bytes `ff` |
+| Portable score-1 image SHA-256 | `0cc173a9820a93c5d32f5881e5cee8b86667f7c6ddd511bc70fce9393de6d5b1` |
+| Native full-process reopen | PASS: separate write/read processes using production disk and envelope functions |
+| Export/import and failure contract | PASS: disk export/readback, envelope decode, wrong identity rejected, invalid image size rejected, stale revision remains dirty, failed native replacement rejected |
+| Production WASM execution | PASS in Node: upstream terminal/result plus original identification, score/recovery, erase/reprogram and image/revision contract; browser storage is not exercised |
+| Existing SRAM recovery | PASS: production native write/read probes and existing WASM contract; original export hash unchanged |
+| Core/session tests | PASS: 14 core unit, one backup integration and nine session tests (24 total) |
+| All existing release fixtures | PASS, including the new pinned Flash64 case |
+| Reproducible fixture builds | PASS: existing build-fixtures verifies the pinned binary; `python3 roms/flash/build.py` rebuilds the score with matching hash |
+| Clippy / format | PASS: workspace/all targets with warnings denied; `cargo fmt --all -- --check` |
+| Native / WASM app builds | PASS: native release build, WASM check and release Trunk build (0.21.14) |
+| Native GUI/pickers/close/failure status | PASS: user confirmed all manual acceptance checks complete |
+| Chrome / Brave test screen, IndexedDB reopen, export/import and failure UI | PASS: user manually confirmed all checks, including recovery, import/export, diagnostic screen and failure paths |
+
+Retained evidence: [tests](verification/flash-tests.txt),
+[release fixtures](verification/flash-fixtures.txt),
+[fixture builds](verification/flash-build-fixtures.txt),
+[native write](verification/flash-native-write.txt),
+[separate-process reopen](verification/flash-native-reopen.txt), and
+[production WASM](verification/flash-wasm.txt).
+Native probe data is in `/tmp/gba-flash-verified-20261001`; temporary data is not
+a permanent evidence store. Live environment: Linux `7.2.7-arch1-1`, rustc/cargo
+`1.98.1`. Browser versions, refresh rate and zoom were not recorded for this slice.
+
+### Slice 14 timing fields
+
+All earlier user-supplied millisecond entries are preserved. The following Chrome
+and Brave measurements were supplied by the user for `flash-score.gba`, together
+with confirmation that all manual acceptance checks passed. Mean values are
+recorded as mean, not as p50. Unreported measurements remain unavailable.
+
+| Measurement | Linux app | Chrome | Brave |
+| --- | --- | --- | --- |
+| Core execution mean / p95 (ms) | Not measured | 7.265 / 9.400 | 6.639 / 9.000 |
+| Core execution samples | Not recorded | 120 | 120 |
+| Pixel conversion mean / p95 (ms) | Not measured | 0.149 / 0.300 | 0.135 / 0.200 |
+| Pixel conversion samples | Not recorded | 120 | 120 |
+| Texture submission mean / p95 (ms) | Not measured | 0.022 / 0.100 | 0.017 / 0.100 |
+| Texture submission samples | Not recorded | 12 | 120 |
+| Core / conversion / submission p50 and p99 (ms) | Not measured | Not measured | Not measured |
+| Sustained speed | Not measured | Not measured | Not measured |
+| Version / refresh rate / zoom | Not recorded | Not recorded | Not recorded |
+
+The supplied browser runtime snapshots also record:
+
+| Runtime evidence | Chrome | Brave |
+| --- | --- | --- |
+| Loaded cartridge | flash-score.gba | flash-score.gba |
+| Backup selection / detection / override | Some(Flash64) / Identified(Flash64) / None | Some(Flash64) / Identified(Flash64) / None |
+| Storage completion | Saved revision 38 | Saved revision 41 |
+| Guest state | Running | Running |
+| Executed instructions | 26191336 | 20941686 |
+| GBA cycles | 287816497 | 230116300 |
+| Core PCM rate | 32768 Hz | 32768 Hz |
+| Produced PCM samples | 562141 | 449445 |
+| Staging drops / empty FIFO | 0 / 0 | 0 / 0 |
+| Host audio | Off | Off |
+
+The snapshots show acknowledged save revisions and automatic Flash64 selection.
+Manual recovery and failure-path acceptance is based on the user's explicit
+confirmation, rather than inferred from these snapshots. CLI completion samples
+in retained logs are not sustained GUI benchmarks.
+
+### Manual app commands and acceptance
+
+PASS: the user confirmed all manual checks complete on 2026-10-01. The commands
+and procedure below are retained for reproducing acceptance.
+
+Run the browser server from the workspace and open **the same origin** in each
+browser for close/reopen checks:
+
+```bash
+cd /home/aditya/Projects/GBA/gba-rs
+env -u NO_COLOR trunk --config web/Trunk.toml serve --release --address 127.0.0.1 --port 8080
+```
+
+Open `http://127.0.0.1:8080` in Chrome and Brave. Use **Auto detect** in the backup
+selector. In each browser:
+
+1. Click **Load Flash64 test**; wait for the guest's successful test screen.
+2. Click **Load Flash64 score**. Tap/release Z several times and confirm green
+   cells increase once per press. Pause and wait for **Saved revision**.
+3. Close the browser completely, reopen the same URL, and load the score again.
+   Confirm the same cells return; add another point and repeat the save check.
+4. Export the save. Change the score, then import that export. Resume after the
+   import and confirm the earlier cells return; wait for **Saved revision**,
+   close/reopen and confirm the imported score persists.
+5. Try an SRAM/different-ROM export or a truncated Flash export. It must report
+   an error and retain the score. For the storage failure path, inject an aborted
+   write transaction using the DevTools snippet below, then add a point. It must
+   remain pending, show failure, and permit Retry/Export. Restore writes with the
+   second snippet and confirm Retry reaches **Saved revision**. Record the result.
+6. Record the measurements above and browser version/refresh rate/zoom.
+
+DevTools console: abort writes to the emulator's `saves` store before commit:
+
+```javascript
+// Preserve the browser method so the fault can be removed without reloading.
+globalThis.flashOriginalPut = IDBObjectStore.prototype.put;
+IDBObjectStore.prototype.put = function (...args) {
+  const request = globalThis.flashOriginalPut.apply(this, args);
+  if (this.name === "saves") {
+    const transaction = this.transaction;
+    queueMicrotask(() => transaction.abort());
+  }
+  return request;
+};
+```
+
+Restore the method before clicking **Retry**:
+
+```javascript
+IDBObjectStore.prototype.put = globalThis.flashOriginalPut;
+delete globalThis.flashOriginalPut;
+```
+
+For native visual acceptance, use the same buttons/checks with:
+
+```bash
+cd /home/aditya/Projects/GBA/gba-rs
+cargo run --locked -p gba-app --release
+```
+
+### Plan comparison
+
+- [x] Flash64 command decoding, identification, erase and program behavior added.
+- [x] Flash score uses the completed host save route and the centralized selection path.
+- [x] Required pinned `flash64.gba` passes on native and production WASM.
+- [x] Flash-backed score survives a separate-process native reopen.
+- [x] Ordinary reads cannot accidentally continue a partial command sequence.
+- [x] Affected prior tests/fixtures pass; documentation and manual commands updated.
+- [x] Native visual/picker/close/failure acceptance confirmed manually by the user.
+- [x] Chrome and Brave score reopen, import/export, diagnostic screen and failure UI confirmed manually by the user.
+
+Implementation, automated checks and user-confirmed manual platform acceptance
+are complete for Slice 14. Unreported timing/environment fields remain marked
+unavailable. Slice 15 banked Flash128 behavior is not implemented.

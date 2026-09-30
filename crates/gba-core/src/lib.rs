@@ -1,8 +1,10 @@
 #![forbid(unsafe_code)]
 
 mod backup;
+mod flash;
 mod sram;
 pub use backup::{BackupDetection, BackupSelection, BackupType, detect_backup};
+pub use flash::FLASH64_BYTES;
 pub use sram::{SRAM_BYTES, SaveImage};
 
 mod audio;
@@ -641,8 +643,8 @@ impl Cpu {
         } else if op & 0xf000 == 0x5000 {
             let target = self.registers[rn].wrapping_add(self.registers[((op >> 6) & 7) as usize]);
             match (op >> 9) & 7 {
-                0 => bus.write32(target & !3, self.registers[rd], access)?,
-                1 => bus.write16(target & !1, self.registers[rd] as u16, access)?,
+                0 => bus.write32(store_address(target, 3), self.registers[rd], access)?,
+                1 => bus.write16(store_address(target, 1), self.registers[rd] as u16, access)?,
                 2 => bus.write8(target, self.registers[rd] as u8, access)?,
                 3 => self.registers[rd] = self.load_halfword_signed(bus, target, 2, access)?,
                 4 => {
@@ -682,11 +684,11 @@ impl Cpu {
                 };
                 bus.idle(1);
             } else if halfword {
-                bus.write16(target & !1, self.registers[rd] as u16, access)?;
+                bus.write16(store_address(target, 1), self.registers[rd] as u16, access)?;
             } else if byte {
                 bus.write8(target, self.registers[rd] as u8, access)?;
             } else {
-                bus.write32(target & !3, self.registers[rd], access)?;
+                bus.write32(store_address(target, 3), self.registers[rd], access)?;
             }
             self.next_fetch_is_sequential = false;
         } else if op & 0xf000 == 0x9000 {
@@ -698,7 +700,7 @@ impl Cpu {
                     .rotate_right((target & 3) * 8);
                 bus.idle(1);
             } else {
-                bus.write32(target & !3, self.registers[register], access)?;
+                bus.write32(store_address(target, 3), self.registers[register], access)?;
             }
             self.next_fetch_is_sequential = false;
         } else if op & 0xf000 == 0xa000 {
@@ -1057,7 +1059,7 @@ impl Cpu {
             let value = bus
                 .read32(target & !3, access)?
                 .rotate_right((target & 3) * 8);
-            bus.write32(target & !3, source, access)?;
+            bus.write32(store_address(target, 3), source, access)?;
             value
         };
         bus.idle(1);
@@ -1132,7 +1134,7 @@ impl Cpu {
             if byte {
                 bus.write8(target, value as u8, access)?;
             } else {
-                bus.write32(target & !3, value, access)?;
+                bus.write32(store_address(target, 3), value, access)?;
             }
         }
         if writeback && !(load && rn == rd) {
@@ -1233,7 +1235,7 @@ impl Cpu {
                 } else {
                     self.registers[register]
                 };
-                bus.write32(target & !3, value, access)?;
+                bus.write32(store_address(target, 3), value, access)?;
             }
             target = target.wrapping_add(4);
             sequential = true;
@@ -1299,7 +1301,11 @@ impl Cpu {
                 self.load_halfword_signed(bus, target, (instruction >> 5) & 3, access)?;
             bus.idle(1);
         } else {
-            bus.write16(target & !1, self.registers[source] as u16, access)?;
+            bus.write16(
+                store_address(target, 1),
+                self.registers[source] as u16,
+                access,
+            )?;
         }
         if (!pre || writeback) && !(instruction & (1 << 20) != 0 && base_register == source) {
             self.registers[base_register] = updated;
@@ -1453,6 +1459,8 @@ struct System {
     rom: Vec<u8>,
     /// Cartridge-owned SRAM persists through CPU reset; host storage is separate.
     sram: Option<crate::sram::Sram>,
+    /// Flash commands and bytes share the cartridge lifecycle, not host storage.
+    flash: Option<crate::flash::Flash64>,
     /// Explicitly mapped original test firmware; absent for normal ROM loads.
     test_firmware: bool,
     ewram: Vec<u8>,
@@ -1480,6 +1488,7 @@ impl System {
             inputs: VecDeque::new(),
             rom: Vec::new(),
             sram: None,
+            flash: None,
             test_firmware: false,
             ewram: vec![0; 256 * 1024],
             iwram: vec![0; 32 * 1024],
@@ -1660,7 +1669,7 @@ impl System {
             return Err(CoreError::InvalidAccessAlignment { address, width: 2 });
         }
         self.charge(address, 2, access);
-        if let Some(value) = self.sram_read(address) {
+        if let Some(value) = self.backup_read(address) {
             let value = u16::from(value) * 0x0101;
             self.open_bus = u32::from(value) * 0x0001_0001;
             return Ok(value);
@@ -1681,7 +1690,7 @@ impl System {
             return Err(CoreError::InvalidAccessAlignment { address, width: 4 });
         }
         self.charge(address, 4, access);
-        if let Some(value) = self.sram_read(address) {
+        if let Some(value) = self.backup_read(address) {
             self.open_bus = u32::from(value) * 0x0101_0101;
             return Ok(self.open_bus);
         }
@@ -1695,15 +1704,21 @@ impl System {
     }
 
     fn write16_impl(&mut self, address: u32, value: u16, access: Access) -> Result<(), CoreError> {
+        // Backup memory is an eight-bit bus: retain the original address to
+        // select the corresponding source byte even for an unaligned store.
+        if (0x0e000000..0x10000000).contains(&address)
+            && (self.sram.is_some() || self.flash.is_some())
+        {
+            self.charge(address, 2, access);
+            self.backup_write(address, value.rotate_right((address & 1) * 8) as u8);
+            return Ok(());
+        }
         if address & 1 != 0 {
             return Err(CoreError::InvalidAccessAlignment { address, width: 2 });
         }
 
         self.charge(address, 2, access);
 
-        if self.sram_write(address, value.rotate_right((address & 1) * 8) as u8) {
-            return Ok(());
-        }
         self.write_halfword(address, value)
     }
 
@@ -1806,31 +1821,44 @@ impl System {
     }
 
     fn write32_impl(&mut self, address: u32, value: u32, access: Access) -> Result<(), CoreError> {
+        // Backup memory is an eight-bit bus: retain the original address to
+        // select the corresponding source byte even for an unaligned store.
+        if (0x0e000000..0x10000000).contains(&address)
+            && (self.sram.is_some() || self.flash.is_some())
+        {
+            self.charge(address, 4, access);
+            self.backup_write(address, value.rotate_right((address & 3) * 8) as u8);
+            return Ok(());
+        }
         if address & 3 != 0 {
             return Err(CoreError::InvalidAccessAlignment { address, width: 4 });
         }
         self.charge(address, 4, access);
-        if self.sram_write(address, value.rotate_right((address & 3) * 8) as u8) {
-            return Ok(());
-        }
+
         self.write_halfword(address, value as u16)?;
         self.write_halfword(address.wrapping_add(2), (value >> 16) as u16)
     }
 
-    /// The save bus is eight bits wide and mirrors the physical 32 KiB chip.
-    fn sram_read(&self, address: u32) -> Option<u8> {
+    /// The eight-bit save bus delegates mirroring and commands to the selected chip.
+    fn backup_read(&mut self, address: u32) -> Option<u8> {
         if !(0x0e000000..0x10000000).contains(&address) {
             return None;
         }
-        self.sram.as_ref().map(|sram| sram.read(address))
+        self.sram
+            .as_ref()
+            .map(|sram| sram.read(address))
+            .or_else(|| self.flash.as_mut().map(|flash| flash.read(address)))
     }
 
-    fn sram_write(&mut self, address: u32, value: u8) -> bool {
+    fn backup_write(&mut self, address: u32, value: u8) -> bool {
         if !(0x0e000000..0x10000000).contains(&address) {
             return false;
         }
         if let Some(sram) = &mut self.sram {
             sram.write(address, value);
+            true
+        } else if let Some(flash) = &mut self.flash {
+            flash.write(address, value);
             true
         } else {
             false
@@ -1960,7 +1988,7 @@ impl CpuBus for System {
 
     fn read8(&mut self, address: u32, access: Access) -> Result<u8, CoreError> {
         self.charge(address, 1, access);
-        if let Some(value) = self.sram_read(address) {
+        if let Some(value) = self.backup_read(address) {
             return Ok(value);
         }
         Ok(self.read_bytes(address, 1)?[0])
@@ -1970,7 +1998,7 @@ impl CpuBus for System {
     /// while OBJ VRAM and OAM ignore byte stores. RAM bytes retain ordinary semantics.
     fn write8(&mut self, address: u32, value: u8, access: Access) -> Result<(), CoreError> {
         self.charge(address, 1, access);
-        if self.sram_write(address, value) {
+        if self.backup_write(address, value) {
             return Ok(());
         }
         if let Some(range) = ram_range(address, EWRAM_START, self.ewram.len(), 1) {
@@ -2423,6 +2451,8 @@ impl Machine {
         };
         if self.backup.selected() == Some(BackupType::Sram) {
             self.system.sram = Some(sram::Sram::new());
+        } else if self.backup.selected() == Some(BackupType::Flash64) {
+            self.system.flash = Some(flash::Flash64::new());
         }
         self.system.rom.extend_from_slice(rom);
         Ok(())
@@ -2435,31 +2465,41 @@ impl Machine {
 
     /// Copies cartridge bytes and their revision for asynchronous host storage.
     pub fn save_image(&self) -> Option<SaveImage> {
-        self.system.sram.as_ref().map(sram::Sram::image)
+        self.system
+            .sram
+            .as_ref()
+            .map(sram::Sram::image)
+            .or_else(|| self.system.flash.as_ref().map(flash::Flash64::image))
     }
 
     /// Loads validated initial bytes before execution, without making them dirty.
     pub fn load_save(&mut self, bytes: &[u8]) -> Result<(), &'static str> {
-        self.system
-            .sram
-            .as_mut()
-            .ok_or("cartridge does not use SRAM")?
-            .load(bytes)
+        if let Some(sram) = &mut self.system.sram {
+            sram.load(bytes)
+        } else if let Some(flash) = &mut self.system.flash {
+            flash.load(bytes)
+        } else {
+            Err("cartridge has no supported backup hardware")
+        }
     }
 
     /// Imports bytes as a newer revision, even when the content is unchanged.
     pub fn import_save(&mut self, bytes: &[u8]) -> Result<(), &'static str> {
-        self.system
-            .sram
-            .as_mut()
-            .ok_or("cartridge does not use SRAM")?
-            .import(bytes)
+        if let Some(sram) = &mut self.system.sram {
+            sram.import(bytes)
+        } else if let Some(flash) = &mut self.system.flash {
+            flash.import(bytes)
+        } else {
+            Err("cartridge has no supported backup hardware")
+        }
     }
 
     /// A completion can acknowledge only the revision actually written.
     pub fn acknowledge_save(&mut self, revision: u64) {
         if let Some(sram) = &mut self.system.sram {
             sram.acknowledge(revision);
+        } else if let Some(flash) = &mut self.system.flash {
+            flash.acknowledge(revision);
         }
     }
 
@@ -2654,10 +2694,15 @@ impl Machine {
         let firmware = self.system.test_firmware;
         let backup = self.backup.clone();
         let sram = self.system.sram.take();
+        let mut flash = self.system.flash.take();
+        if let Some(chip) = &mut flash {
+            chip.reset();
+        }
         *self = Self::new();
         self.system.rom = rom;
         self.backup = backup;
         self.system.sram = sram;
+        self.system.flash = flash;
         if firmware {
             self.enable_test_firmware();
         }
@@ -2672,6 +2717,16 @@ impl Default for Machine {
             system: System::new(),
             executed_instructions: 0,
         }
+    }
+}
+
+/// Ordinary stores align to their transfer width. The cartridge backup bus
+/// instead needs the original low address bits to select one source byte.
+fn store_address(address: u32, alignment_mask: u32) -> u32 {
+    if (0x0e000000..0x10000000).contains(&address) {
+        address
+    } else {
+        address & !alignment_mask
     }
 }
 
@@ -2716,6 +2771,45 @@ fn range_for(address: u32, start: u32, length: usize, width: usize) -> Option<Ra
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A save read interrupts an unfinished Flash unlock. Resuming its remaining
+    /// writes must not program a byte; a fresh, uninterrupted sequence must work.
+    #[test]
+    fn flash_read_cancels_partial_unlock() {
+        let mut machine = Machine::new();
+        machine
+            .load_rom(include_bytes!("../../../roms/backup/flash64.gba"))
+            .unwrap();
+        let access = Access {
+            kind: AccessKind::Data,
+            sequential: false,
+        };
+        machine.system.write8(0x0e005555, 0xaa, access).unwrap();
+        assert_eq!(machine.system.read8(0x0e000123, access).unwrap(), 0xff);
+        for (offset, value) in [(0x2aaa, 0x55), (0x5555, 0xa0), (0x123, 0x42)] {
+            machine
+                .system
+                .write8(0x0e000000 + offset, value, access)
+                .unwrap();
+        }
+        assert_eq!(machine.system.read8(0x0e000123, access).unwrap(), 0xff);
+        assert!(!machine.save_image().unwrap().dirty);
+        for (offset, value) in [
+            (0x5555, 0xaa),
+            (0x2aaa, 0x55),
+            (0x5555, 0xa0),
+            (0x123, 0x42),
+        ] {
+            machine
+                .system
+                .write8(0x0e000000 + offset, value, access)
+                .unwrap();
+        }
+        assert_eq!(machine.system.read8(0x0e000123, access).unwrap(), 0x42);
+        machine.reset();
+        assert_eq!(machine.system.read8(0x0e000123, access).unwrap(), 0x42);
+        assert!(machine.save_image().unwrap().dirty);
+    }
 
     /// A detected SRAM cartridge must expose mirrored byte storage rather than
     /// returning unmapped-bus errors or losing the score across a CPU reset.

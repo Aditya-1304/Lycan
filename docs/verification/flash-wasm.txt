@@ -1,0 +1,4 @@
+   Compiling gba-core v0.1.0 (/home/aditya/Projects/GBA/gba-rs/crates/gba-core)
+   Compiling gba-session v0.1.0 (/home/aditya/Projects/GBA/gba-rs/crates/gba-session)
+    Finished `release` profile [optimized] target(s) in 0.50s
+WASM Flash64 contract PASS: pinned upstream r12=0, identification, score, restore, erase/reprogram and image validation

@@ -12,7 +12,9 @@ struct RomRead {
     result: Option<(String, Result<Vec<u8>, String>)>,
 }
 
-/// Original SRAM score uses the same loader and persistence as picked cartridges.
+/// Original score cartridges use the normal loader and persistence route.
+const FLASH_DIAGNOSTIC_ROM: &[u8] = include_bytes!("../../../roms/gba-tests/save/flash64.gba");
+const FLASH_ROM: &[u8] = include_bytes!("../../../roms/flash-score.gba");
 const SRAM_ROM: &[u8] = include_bytes!("../../../roms/sram.gba");
 
 const WIDTH: usize = SCREEN_WIDTH;
@@ -254,9 +256,15 @@ impl GbaApp {
         } else {
             bytes
         };
+        // The pinned homebrew Flash test has padded SDK strings without a
+        // version. Its explicit fixture configuration uses the common override
+        // path; picked games still rely on detector evidence or the user's choice.
+        let backup_override = self.backup_override.or_else(|| {
+            (bytes == FLASH_DIAGNOSTIC_ROM).then_some(gba_session::BackupType::Flash64)
+        });
         match self
             .session
-            .load_rom_with_backup(bytes_to_load, self.backup_override)
+            .load_rom_with_backup(bytes_to_load, backup_override)
         {
             Ok(()) => {
                 self.save_generation = self.save_generation.wrapping_add(1);
@@ -272,6 +280,7 @@ impl GbaApp {
                 if bytes == ARM_DIAGNOSTIC_ROM
                     || bytes == THUMB_DIAGNOSTIC_ROM
                     || bytes == MEMORY_ROM
+                    || bytes == FLASH_DIAGNOSTIC_ROM
                     || bytes == KEYPAD_OR_ROM
                     || bytes == KEYPAD_AND_ROM
                     || bytes == VBLANK_ROM
@@ -329,9 +338,9 @@ impl GbaApp {
                         Ok(()) => {
                             self.restoring_save = false;
                             self.storage.status = if bytes.is_some() {
-                                "SRAM restored"
+                                "Backup restored"
                             } else {
-                                "No stored SRAM; new cartridge"
+                                "No stored backup; new cartridge"
                             }
                             .into();
                             if self.pending_rom.is_none()
@@ -350,14 +359,14 @@ impl GbaApp {
                 Outcome::Loaded(Err(error)) => {
                     self.storage.failed = true;
                     self.storage.status =
-                        format!("Initial SRAM load failed: {error}; guest remains paused");
+                        format!("Initial backup load failed: {error}; guest remains paused");
                 }
                 Outcome::Written(Ok(())) => {
                     self.session.acknowledge_save(completion.revision);
                     self.storage.failed = false;
                     self.storage.status =
                         if self.session.save_image().is_some_and(|image| image.dirty) {
-                            "Stored snapshot; newer SRAM changes remain pending".into()
+                            "Stored snapshot; newer backup changes remain pending".into()
                         } else {
                             format!("Saved revision {}", completion.revision)
                         };
@@ -427,7 +436,7 @@ impl GbaApp {
         let Some(identity) = self.save_identity.clone() else {
             return;
         };
-        ui.label(format!("SRAM: {}", self.storage.status));
+        ui.label(format!("Backup: {}", self.storage.status));
         if let Some(image) = self.session.save_image().filter(|image| image.dirty) {
             ui.label(format!(
                 "Revision {} is pending storage acknowledgement",
@@ -445,7 +454,7 @@ impl GbaApp {
             if ui
                 .add_enabled(
                     !self.storage.busy && self.pending_rom.is_none(),
-                    egui::Button::new("Import SRAM"),
+                    egui::Button::new("Import save"),
                 )
                 .clicked()
             {
@@ -457,7 +466,7 @@ impl GbaApp {
                 self.save_import_open = self.storage.busy;
             }
             if ui
-                .add_enabled(!self.storage.busy, egui::Button::new("Export SRAM"))
+                .add_enabled(!self.storage.busy, egui::Button::new("Export save"))
                 .clicked()
                 && let Some(image) = self.session.save_image()
             {
@@ -563,6 +572,14 @@ impl GbaApp {
             }
             if ui.button("Reset").clicked() {
                 self.reset_demo();
+                ui.ctx().request_repaint();
+            }
+            if ui.button("Load Flash64 test").clicked() {
+                self.load_rom_bytes("flash64.gba", FLASH_DIAGNOSTIC_ROM);
+                ui.ctx().request_repaint();
+            }
+            if ui.button("Load Flash64 score").clicked() {
+                self.load_rom_bytes("flash-score.gba", FLASH_ROM);
                 ui.ctx().request_repaint();
             }
             if ui.button("Load SRAM score").clicked() {

@@ -1,0 +1,5 @@
+Flash guest PASS: score=1 PC=0x08000148 cycles=842688 instructions=78839 revision=5 dirty=true
+Flash guest PASS: score=1 PC=0x08000150 cycles=842696 instructions=78839 revision=1 dirty=false
+Flash guest PASS: score=2 PC=0x08000150 cycles=842698 instructions=78841 revision=4 dirty=true
+Flash guest PASS: score=1 PC=0x08000148 cycles=842688 instructions=78839 revision=5 dirty=true
+Native backup write PASS: ROM=5474814fb7782e47aab77fc2fb6da5b38a6400843d08e6363e5a9f37548d4e07, save=/tmp/gba-flash-verified-20261001/5474814fb7782e47aab77fc2fb6da5b38a6400843d08e6363e5a9f37548d4e07.gbasav, export/import validated, failed replacement rejected

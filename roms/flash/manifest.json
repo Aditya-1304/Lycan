@@ -1,0 +1,16 @@
+{
+  "sha256": "5474814fb7782e47aab77fc2fb6da5b38a6400843d08e6363e5a9f37548d4e07",
+  "startup": "cartridge-direct-arm",
+  "backup": "Flash64",
+  "mailbox_address": 50331648,
+  "completion_id": 116,
+  "score_address": 50331650,
+  "max_instructions_per_frame": 200000,
+  "frames": 3,
+  "max_cycles": 842750,
+  "checkpoint_pc_range": [
+    "0x08000148",
+    "0x0800015c"
+  ],
+  "expected_image": "38400 pixels; score green 8x8 cells in first eight rows; all remaining pixels black"
+}

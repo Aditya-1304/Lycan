@@ -215,6 +215,8 @@ struct Stripes {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Diagnostic {
+    /// Pinned homebrew without an SDK version uses the centralized typed override.
+    backup_override: Option<String>,
     terminal_pc: u32,
     terminal_instruction: u32,
     cpsr_mask: u32,
@@ -2153,7 +2155,12 @@ fn run_diagnostic(
     }
     let start = Instant::now();
     let mut machine = Machine::new();
-    machine.load_rom(bytes)?;
+    let backup_override = expected
+        .backup_override
+        .as_deref()
+        .map(str::parse)
+        .transpose()?;
+    machine.load_rom_with_backup(bytes, backup_override)?;
     machine.enable_test_firmware();
     let report = machine.run_until_pc(
         expected.terminal_pc,

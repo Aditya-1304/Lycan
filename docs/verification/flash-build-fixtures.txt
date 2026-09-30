@@ -1,0 +1,28 @@
+   Compiling gba-core v0.1.0 (/home/aditya/Projects/GBA/gba-rs/crates/gba-core)
+   Compiling gba-session v0.1.0 (/home/aditya/Projects/GBA/gba-rs/crates/gba-session)
+   Compiling gba-tools v0.1.0 (/home/aditya/Projects/GBA/gba-rs/crates/gba-tools)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 10.00s
+     Running `target/debug/gba-tools build-fixtures`
+BUILT original test firmware (SWI 0x06 and IRQ vector)
+BUILT counter bytes=220 sha256=4d02748bdfb9a8f8a61b6c8c300c415117db7f4985c578c272b6dd70eb7b2d79
+BUILT pixels bytes=524 sha256=4fb24cb1f126ac04638a3c5819ecee7f3c4fd0bc2b948e186daa79bbdc9c1a12
+BUILT buttons bytes=324 sha256=eae58be9de7214f5bfe808970778d3f8ccca5437f97d37ce11986f2f2fe56b6d
+BUILT palette bytes=228 sha256=88806d5738b0d298918b3b59ce67bb08504584f948312614ba8a2977927efc3b
+VERIFIED hello upstream binary sha256=38aed48b67bc0f701e8aa222b0c3334bd306bd29888707bb7224d81f5576c264
+BUILT calculations bytes=4108 sha256=8ef128a96363775c3a6b0b3aad2997edfa48e43ba95a920121e9b7a04b4604f5
+BUILT copy bytes=40972 sha256=70ae32d6d49cfbbe8d05f66da4fa22a1076838b0753cab0a9827f304cb695306
+BUILT cartridge bytes=16388 sha256=5b4fc59af58129cad68743df97fde3fa37fd48e206c415455b16486728f9cf2c
+VERIFIED arm upstream binary sha256=77ee88662552bdc885c1080c0172ff119d54db791bd73b21808cf1ff1fe5b40e
+VERIFIED thumb upstream binary sha256=b5cb2291df4ab314b31c598acd9bff2ccfa0b38efff29daadfe97422ce369b67
+BUILT services bytes=1040 sha256=b12c06f84e1ac37c32d69e4df4205bc7306185b680a1335b20661e364d831453
+BUILT tiled bytes=424 sha256=2b0627b372f31e389be512d9a5c43e15e0fc643223ed36f94b2146602841601d
+VERIFIED stripes upstream binary sha256=80d6cc05b5f289b9a2392621fc245270f08e9f0d77fd33982120cef240f5a504
+VERIFIED memory upstream binary sha256=21024fb6aae6343f5f0466dd54e3149de1fbeb23f78e7d85a015c983684d2f87
+BUILT sprites bytes=1048 sha256=ac62694d6961736a22497b0b478548a7853ba5142e73696e854058b2f1eba1f2
+BUILT vblank bytes=780 sha256=9455932dfc166c92edbd7bdc488ee3b170f0c14cc46587dbe5442ca0766fb3c3
+BUILT irq-sprites bytes=1148 sha256=d6ff49b269e618aaf232145f629f87a6c01ff66aacf57ec4916ac26324c6fe3e
+BUILT keypad-or bytes=780 sha256=78530967862d77dd3cfd234cd2f3bcf8726fb38f7d045f67013a2b07c1d81102
+BUILT keypad-and bytes=780 sha256=aec5d725291224e1ec0889d108b3c824586ab6518a88768b2f20cae7001a8d05
+BUILT dma bytes=380 sha256=f515710122c58b37e3487ae0ab51c93b89b94f56178270edb49a6969ac9ae6e7
+BUILT pcm bytes=568 sha256=89b13fc1aa5f4d397324f7ded22f5830fc8cb3bf305b01bab8e276bcde78e5cb
+VERIFIED flash64 upstream binary sha256=7e2aa32e943aedde88bd750eadcdbf55152d3a1ec61385011b7f15cd85b07c02

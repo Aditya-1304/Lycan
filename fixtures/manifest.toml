@@ -615,3 +615,31 @@ mixer_checkpoints = [
 
 # One empty pop after each of the two intentional FIFO reset strobes.
 mixer_fifo_underruns = 2
+
+
+[[fixture]]
+name = "flash64"
+rom = "../roms/gba-tests/save/flash64.gba"
+source = "../roms/gba-tests/save/flash64.asm"
+linker = "../roms/pixels/linker.ld"
+sha256 = "7e2aa32e943aedde88bd750eadcdbf55152d3a1ec61385011b7f15cd85b07c02"
+origin = "jsmolka/gba-tests save/flash64.gba at a7113b67e63f83a9b321696ddd7042ccfad6c881; MIT notice in roms/gba-tests/LICENSE"
+startup = "cartridge-direct-arm"
+bios_required = true
+mailbox_address = 0
+completion_id = 0
+max_instructions = 4000000
+max_cycles = 50000000
+[fixture.verification]
+kind = "diagnostic"
+# Upstream contains padded identifiers without the SDK version digits. Preserve
+# its exact bytes and select hardware through the existing validated override.
+backup_override = "flash64"
+terminal_pc = 0x08000ac8
+terminal_instruction = 0xeafffffe
+cpsr_mask = 0xffffffff
+cpsr_value = 0x600000df
+firmware_sha256 = "044a1305b3e47fcd568e77fcd792f251cd2cb85b359949931654ebb399a37498"
+result_register = 12
+result = 0
+framebuffer_sha256 = "59ce42abae9825c2d2579c5cd838e47d88be917e37ea36ff162d46fc5d0991e3"
