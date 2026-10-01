@@ -1,6 +1,7 @@
 //! Timers, Direct Sound FIFOs and the stereo PWM mixer on the machine clock.
 //! Host adapters consume fixed-rate frames and never own device registers.
 
+use crate::pulse::Pulse;
 use std::collections::VecDeque;
 
 /// Fixed core output cadence; host adapters resample this stream continuously.
@@ -33,6 +34,9 @@ impl Timer {
 /// Bounded guest PCM staging and hardware FIFO. All storage is reserved once,
 /// never allocated per sample; a consumer that stops draining cannot grow it.
 pub(super) struct Audio {
+    pulses: [Pulse; 2],
+    next_sequence: u64,
+    sequence_step: u8,
     timers: [Timer; 4],
     fifo: [VecDeque<i8>; 2],
     held: [i8; 2],
@@ -53,6 +57,9 @@ pub(super) struct Audio {
 impl Audio {
     pub fn new() -> Self {
         Self {
+            pulses: std::array::from_fn(|_| Pulse::default()),
+            next_sequence: 32768,
+            sequence_step: 0,
             timers: [Timer::default(); 4],
             fifo: std::array::from_fn(|_| VecDeque::with_capacity(32)),
             held: [0; 2],
@@ -102,6 +109,16 @@ impl Audio {
     /// disable resets PSG control storage, but preserves Direct Sound devices.
     pub fn write_control(&mut self, offset: usize, value: u16) {
         match offset {
+            0x60 | 0x62 | 0x64 | 0x68 | 0x6c if self.master => {
+                let (index, register) = match offset {
+                    0x60 => (0, 0),
+                    0x62 => (0, 1),
+                    0x64 => (0, 2),
+                    0x68 => (1, 1),
+                    _ => (1, 2),
+                };
+                self.pulses[index].write(register, value, index == 0);
+            }
             0x80 => {
                 if self.master {
                     self.control_l = value & 0xff77;
@@ -120,6 +137,8 @@ impl Audio {
                 self.master = value & 0x80 != 0;
                 if !self.master {
                     self.control_l = 0;
+                    self.pulses = std::array::from_fn(|_| Pulse::default());
+                    self.sequence_step = 0;
                 }
             }
             0x88 => self.bias = value & 0xc3fe,
@@ -127,13 +146,36 @@ impl Audio {
         }
     }
 
-    /// PSG status bits remain zero until their channels are implemented; FIFO
-    /// playback never sets the four PSG activity flags in SOUNDCNT_X.
+    /// Byte writes merge against writable latches, never masked readback. In
+    /// particular, a high-byte trigger must retain the write-only frequency low byte.
+    pub fn pulse_latch(&self, offset: usize) -> Option<u16> {
+        match offset {
+            0x60 => Some(self.pulses[0].sweep),
+            0x62 => Some(self.pulses[0].envelope),
+            0x64 => Some(self.pulses[0].control),
+            0x68 => Some(self.pulses[1].envelope),
+            0x6c => Some(self.pulses[1].control),
+            _ => None,
+        }
+    }
+
+    /// Exposes readable PSG fields and activity flags; trigger and frequency
+    /// fields are write-only. Direct Sound does not set PSG activity flags.
     pub fn refresh_controls(&self, io: &mut [u8]) {
         for (offset, value) in [
+            (0x60, self.pulses[0].sweep),
+            (0x62, self.pulses[0].envelope & 0xffc0),
+            (0x64, self.pulses[0].control & 0x4000),
+            (0x68, self.pulses[1].envelope & 0xffc0),
+            (0x6c, self.pulses[1].control & 0x4000),
             (0x80, self.control_l),
             (0x82, self.control_h),
-            (0x84, u16::from(self.master) << 7),
+            (
+                0x84,
+                (u16::from(self.master) << 7)
+                    | u16::from(self.pulses[0].active)
+                    | (u16::from(self.pulses[1].active) << 1),
+            ),
             (0x88, self.bias),
         ] {
             io[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
@@ -154,7 +196,15 @@ impl Audio {
     /// timers advance from the preceding overflow, never from host elapsed time.
     pub fn next_event(&self, now: u64) -> u64 {
         let period = SAMPLE_CYCLES >> (self.bias >> 14);
-        let mut next = self.next_sample.min((now / period + 1) * period);
+        let mut next = self
+            .next_sample
+            .min((now / period + 1) * period)
+            .min(self.next_sequence);
+        for pulse in &self.pulses {
+            if let Some(edge) = pulse.next_edge() {
+                next = next.min(now + edge);
+            }
+        }
         for (index, timer) in self.timers.iter().enumerate() {
             if timer.enabled() && !timer.cascade(index) {
                 next = next
@@ -168,6 +218,18 @@ impl Audio {
     /// Each FIFO consumes its selected timer, independently of master enable.
     /// Returns ordinary timer IF bits and the FIFO DMA request level.
     pub fn advance(&mut self, elapsed: u64, now: u64) -> (u16, [bool; 2]) {
+        for pulse in &mut self.pulses {
+            pulse.advance(elapsed);
+        }
+        if now == self.next_sequence {
+            if self.master {
+                for (index, pulse) in self.pulses.iter_mut().enumerate() {
+                    pulse.sequence(self.sequence_step, index == 0);
+                }
+                self.sequence_step = (self.sequence_step + 1) & 7;
+            }
+            self.next_sequence += 32768;
+        }
         let mut previous_overflow = false;
         let mut irq = 0;
         let mut refill = [false; 2];
@@ -265,6 +327,20 @@ impl Audio {
                 levels[1] += value;
             }
         }
+        let ratio = [1, 2, 4, 4][(self.control_h & 3) as usize];
+        for (channel, pulse) in self.pulses.iter().enumerate() {
+            for (side, level) in levels.iter_mut().enumerate() {
+                let route = if side == 0 { 12 } else { 8 };
+                let volume = if side == 0 {
+                    (self.control_l >> 4) & 7
+                } else {
+                    self.control_l & 7
+                };
+                if self.control_l & (1 << (route + channel)) != 0 {
+                    *level += pulse.level() * i32::from(volume + 1) * ratio / 4;
+                }
+            }
+        }
         let mask = !((1 << (1 + (self.bias >> 14))) - 1);
         levels.map(|level| {
             let dac = (level + i32::from(self.bias & 0x3fe)).clamp(0, 1023) & mask;
@@ -280,6 +356,53 @@ impl Audio {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // FIFO regressions cannot detect absent PSG synthesis or a drain resetting
+    // oscillator history. Compare actual mixed samples across two drain schedules.
+    #[test]
+    fn pulse_voices_mix_with_fifo_and_preserve_chunk_history() {
+        fn render(chunk: u64) -> Vec<[f32; 2]> {
+            let mut audio = Audio::new();
+            audio.write_control(0x84, 0x80);
+            audio.write_control(0x80, 0x2177);
+            audio.write_control(0x82, 0x0306);
+            audio.push_channel(0, &[16; 32]);
+            audio.write_timer(0x100, 0xfe00);
+            audio.write_timer(0x102, 0x80);
+            audio.write_control(0x60, 0x29);
+            audio.write_control(0x62, 0xa180);
+            audio.write_control(0x64, 0x8400);
+            audio.write_control(0x68, 0x6880);
+            audio.write_control(0x6c, 0x8600);
+            let mut output = Vec::new();
+            let mut now = 0;
+            while now < 524_288 {
+                let next = audio.next_event(now);
+                audio.advance(next - now, next);
+                now = next;
+                if now % chunk == 0 {
+                    audio.drain_stereo(&mut output);
+                }
+            }
+            audio.drain_stereo(&mut output);
+            assert_eq!(
+                audio.pulses[0].control & 0x7ff,
+                256,
+                "two decreasing sweep updates"
+            );
+            assert_eq!(audio.pulses[0].level().abs(), 8, "two envelope steps");
+            assert!(
+                output.iter().any(|f| f[0] != f[1]),
+                "second voice must be independently routed"
+            );
+            assert!(
+                output.iter().any(|f| f[0].abs() > 0.125),
+                "pulse must mix with FIFO"
+            );
+            output
+        }
+        assert_eq!(render(512), render(8192));
+    }
 
     // Existing DMA checks do not detect master-disable writes being ignored.
     // The FIFO must keep consuming bytes while the mixer emits silence.
