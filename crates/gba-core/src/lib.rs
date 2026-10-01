@@ -41,13 +41,17 @@ pub enum Button {
 pub struct ButtonState(u16);
 impl ButtonState {
     /// Updates one logical button without affecting the other nine buttons.
-    pub fn set(&mut self, button: Button, pressed: bool) {
+    pub fn set(&mut self, button: Button, pressed: bool) -> bool {
         let mask = 1 << button as u8;
+        let before = self.0;
+
         if pressed {
             self.0 |= mask;
         } else {
             self.0 &= !mask;
         }
+
+        self.0 != before
     }
     /// Reports whether the logical button is pressed.
     pub fn pressed(self, button: Button) -> bool {
@@ -2000,8 +2004,10 @@ impl System {
             .is_some_and(|event| event.cycle.0 <= target)
         {
             let event = self.inputs.pop_front().expect("front was present");
-            self.buttons.set(event.button, event.pressed);
-            self.evaluate_keypad();
+
+            if self.buttons.set(event.button, event.pressed) {
+                self.evaluate_keypad();
+            }
         }
         self.display
             .synchronize_to(target, &self.vram, &self.palette, &self.io, &self.oam);
@@ -2416,7 +2422,10 @@ pub struct Machine {
 impl Machine {
     /// Applies a live host transition at the current instruction boundary.
     pub fn set_button(&mut self, button: Button, pressed: bool) {
-        self.system.buttons.set(button, pressed);
+        if !self.system.buttons.set(button, pressed) {
+            return;
+        }
+
         self.system.evaluate_keypad();
         self.system.refresh_status();
     }
@@ -3478,5 +3487,50 @@ mod tests {
         assert_ne!(machine.cpu.cpsr & CPSR_I, 0);
         assert_ne!(machine.cpu.cpsr & CPSR_F, 0);
         assert_eq!(machine.cpu.cpsr & 0x1F, CPSR_SYSTEM_MODE);
+    }
+
+    #[test]
+    fn unchanged_button_state_does_not_retrigger_keypad_irq() {
+        let mut machine = Machine::new();
+        let access = Access {
+            kind: AccessKind::Data,
+            sequential: false,
+        };
+
+        // Select A, OR mode, IRQ enabled.
+        machine
+            .system
+            .write16_impl(IO_START + 0x132, 0x4001, access)
+            .unwrap();
+
+        machine.set_button(Button::A, true);
+        assert_eq!(
+            machine.inspect16(IO_START + 0x202).unwrap() & 0x1000,
+            0x1000
+        );
+
+        // Acknowledge keypad IF.
+        machine
+            .system
+            .write16_impl(IO_START + 0x202, 0x1000, access)
+            .unwrap();
+
+        assert_eq!(machine.inspect16(IO_START + 0x202).unwrap() & 0x1000, 0);
+
+        // Host polling the same state repeatedly must have no hardware effect.
+        for _ in 0..100 {
+            machine.set_button(Button::A, true);
+        }
+
+        assert_eq!(machine.inspect16(IO_START + 0x202).unwrap() & 0x1000, 0);
+
+        // A genuine transition may request it again.
+        machine.set_button(Button::A, false);
+        machine.set_button(Button::A, true);
+
+        assert_eq!(
+            machine.inspect16(IO_START + 0x202).unwrap() & 0x1000,
+            0x1000
+        );
     }
 }
