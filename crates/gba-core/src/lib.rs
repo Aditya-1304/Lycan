@@ -7,7 +7,7 @@ mod flash;
 mod sram;
 pub use backup::{BackupDetection, BackupSelection, BackupType, detect_backup};
 pub use flash::{FLASH64_BYTES, FLASH128_BYTES};
-pub use sram::{SRAM_BYTES, SaveImage};
+pub use sram::{SRAM_BYTES, SaveImage, SaveStatus};
 
 mod audio;
 mod noise;
@@ -2541,6 +2541,16 @@ impl Machine {
             .map(sram::Sram::image)
             .or_else(|| self.system.flash.as_ref().map(flash::Flash::image))
             .or_else(|| self.system.eeprom.as_ref().map(eeprom::Eeprom::image))
+    }
+
+    /// Reports cartridge save metadata without copying the owned backup bytes.
+    pub fn save_status(&self) -> Option<SaveStatus> {
+        self.system
+            .sram
+            .as_ref()
+            .map(sram::Sram::status)
+            .or_else(|| self.system.flash.as_ref().map(flash::Flash::status))
+            .or_else(|| self.system.eeprom.as_ref().map(eeprom::Eeprom::status))
     }
 
     /// Loads validated initial bytes before execution, without making them dirty.

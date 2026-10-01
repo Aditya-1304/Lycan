@@ -1,7 +1,7 @@
 //! Host-independent Flash command decoder and revision-tagged backup bytes.
 //! Commands complete synchronously; physical busy timing is not modeled here.
 
-use crate::SaveImage;
+use crate::{SaveImage, SaveStatus};
 
 /// Physical backup capacity, also used to validate persisted and imported images.
 pub const FLASH64_BYTES: usize = 64 * 1024;
@@ -148,6 +148,15 @@ impl Flash {
         self.command = Command::Idle;
         self.identification = false;
         self.bank = 0;
+    }
+
+    /// Reports backup metadata without cloning the Flash bytes.
+    pub fn status(&self) -> SaveStatus {
+        SaveStatus {
+            len: self.bytes.len(),
+            revision: self.revision,
+            dirty: self.revision > self.acknowledged,
+        }
     }
 
     pub fn image(&self) -> SaveImage {

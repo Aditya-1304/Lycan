@@ -11,6 +11,7 @@ pub use gba_core::{CYCLES_PER_FRAME, Cycle, GBA_CLOCK_HZ, PCM_RATE, SCREEN_HEIGH
 pub use gba_core::{BackupSelection, BackupType, Button, ButtonState};
 pub use gba_core::{
     EEPROM8K_BYTES, EEPROM512_BYTES, FLASH64_BYTES, FLASH128_BYTES, SRAM_BYTES, SaveImage,
+    SaveStatus,
 };
 
 pub const BUTTONS: [Button; 10] = [
@@ -60,6 +61,11 @@ impl Session {
     /// Captures cartridge bytes without advancing guest execution.
     pub fn save_image(&self) -> Option<SaveImage> {
         self.machine.save_image()
+    }
+
+    /// Reports cartridge save metadata without copying the owned backup bytes.
+    pub fn save_status(&self) -> Option<SaveStatus> {
+        self.machine.save_status()
     }
 
     /// Installs initial storage bytes before the first guest instruction.

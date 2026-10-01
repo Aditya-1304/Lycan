@@ -1,7 +1,7 @@
 //! Cartridge serial EEPROM. Halfword accesses clock bit zero, MSB first.
 //! Programming completes synchronously, matching the existing Flash abstraction.
 
-use crate::SaveImage;
+use crate::{SaveImage, SaveStatus};
 
 /// Physical capacity of a six-address-bit EEPROM.
 pub const EEPROM512_BYTES: usize = 512;
@@ -141,6 +141,15 @@ impl Eeprom {
         self.address_bits = self
             .capacity
             .map(|size| if size == EEPROM512_BYTES { 6 } else { 14 });
+    }
+
+    /// Reports resolved EEPROM capacity and revision metadata without cloning bytes.
+    pub fn status(&self) -> SaveStatus {
+        SaveStatus {
+            len: self.capacity.unwrap_or(0),
+            revision: self.revision,
+            dirty: self.revision > self.acknowledged,
+        }
     }
 
     /// An unresolved image is empty and clean. It still exposes the host storage
