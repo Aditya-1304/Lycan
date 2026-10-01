@@ -1792,10 +1792,15 @@ impl System {
     /// Applies a bus beat after its access time has synchronized scanout. Word
     /// transfers reuse this path without charging the hardware clock twice.
     fn write_halfword(&mut self, address: u32, value: u16) -> Result<(), CoreError> {
+        if self.bios_enabled && address < BIOS_SIZE as u32 {
+            return Ok(());
+        }
+
         if self.eeprom_address(address) {
             self.eeprom.as_mut().unwrap().write(value);
             return Ok(());
         }
+
         let bytes = value.to_le_bytes();
 
         if let Some(range) = ram_range(address, EWRAM_START, self.ewram.len(), 2) {
@@ -2161,8 +2166,15 @@ impl CpuBus for System {
         if self.backup_write(address, value) {
             return Ok(());
         }
+
+        if self.bios_enabled && address < BIOS_SIZE as u32 {
+            // The BIOS is ROM. Stores occupy the bus but do not modify it and do
+            // not raise a CPU-visible memory fault.
+            return Ok(());
+        }
+
         // RegisterRamReset writes a byte to this undocumented write-only
-        // location. Accept the timed access without backing unused MMIO space;
+        // location. Accept the timed access without backing unused MMIO space;write8(
         // neighboring addresses retain their existing unmapped behavior.
         if address == BIOS_UNDOCUMENTED_IO_410 {
             return Ok(());
