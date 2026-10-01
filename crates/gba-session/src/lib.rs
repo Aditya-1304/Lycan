@@ -1,7 +1,7 @@
 #![forbid(unsafe_code)]
 
 mod resampler;
-pub use resampler::Resampler;
+pub use resampler::{Resampler, StereoResampler};
 
 use gba_core::{CoreError, Machine, RunError, RunReport};
 use std::time::Duration;

@@ -70,11 +70,22 @@ impl Output {
             return;
         }
         let epoch = self.shared.epoch.load(Ordering::Acquire);
-        for &sample in samples {
-            if self.producer.push((epoch, sample)).is_err() {
-                self.overflows += 1;
-            }
+        let available = self.producer.slots();
+        let accepted = available.min(samples.len());
+
+        if accepted != 0 {
+            self.producer
+                .write_chunk_uninit(accepted)
+                .expect("queried producer capacity must remain available")
+                .fill_from_iter(
+                    samples[..accepted]
+                        .iter()
+                        .copied()
+                        .map(|sample| (epoch, sample)),
+                );
         }
+
+        self.overflows += (samples.len() - accepted) as u64;
         self.max_depth = self.max_depth.max(self.capacity - self.producer.slots());
     }
 

@@ -7,19 +7,17 @@ mod browser;
 mod native;
 #[cfg(target_arch = "wasm32")]
 use browser::Output;
-use gba_session::{Resampler, Session};
+use gba_session::{Session, StereoResampler};
 #[cfg(not(target_arch = "wasm32"))]
 use native::Output;
 
 /// Frontend-owned playback state and reusable sample staging for one session.
 pub struct Audio {
     output: Option<Output>,
-    resampler: Option<[Resampler; 2]>,
+    resampler: Option<StereoResampler>,
     rate: u32,
     core: Vec<[f32; 2]>,
     converted: Vec<[f32; 2]>,
-    channels: [Vec<f32>; 2],
-    resampled: [Vec<f32>; 2],
     playing: bool,
     pub volume: f32,
     pub muted: bool,
@@ -34,8 +32,6 @@ impl Default for Audio {
             rate: 0,
             core: Vec::with_capacity(4096),
             converted: Vec::with_capacity(16384),
-            channels: std::array::from_fn(|_| Vec::with_capacity(4096)),
-            resampled: std::array::from_fn(|_| Vec::with_capacity(16384)),
             playing: false,
             volume: 0.5,
             muted: false,
@@ -68,9 +64,7 @@ impl Audio {
             output.clear();
         }
         if let Some(resampler) = &mut self.resampler {
-            for channel in resampler {
-                channel.reset();
-            }
+            resampler.reset();
         }
         self.core.clear();
         self.converted.clear();
@@ -100,7 +94,7 @@ impl Audio {
         }
         if rate != self.rate {
             self.rate = rate;
-            self.resampler = Some(std::array::from_fn(|_| Resampler::new(rate)));
+            self.resampler = Some(StereoResampler::new(rate));
             output.clear();
         }
         output.set_gain(if self.muted { 0.0 } else { self.volume });
@@ -109,20 +103,7 @@ impl Audio {
         }
         self.converted.clear();
         if let Some(resampler) = &mut self.resampler {
-            // Both converters retain identical phase while interpolating each
-            // speaker independently; routing is never collapsed to mono.
-            for (index, converter) in resampler.iter_mut().enumerate() {
-                self.channels[index].clear();
-                self.channels[index].extend(self.core.iter().map(|frame| frame[index]));
-                self.resampled[index].clear();
-                converter.process(&self.channels[index], &mut self.resampled[index]);
-            }
-            self.converted.extend(
-                self.resampled[0]
-                    .iter()
-                    .zip(&self.resampled[1])
-                    .map(|(&l, &r)| [l, r]),
-            );
+            resampler.process(&self.core, &mut self.converted);
         }
         output.submit(&self.converted);
     }

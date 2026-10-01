@@ -63,6 +63,21 @@ impl std::str::FromStr for BackupType {
     }
 }
 
+/// Checks every byte offset for a three-digit version or the homebrew `nnn` marker.
+fn contains_signature(rom: &[u8], prefix: &[u8]) -> bool {
+    let length = prefix.len() + 3;
+
+    rom.windows(length).any(|window| {
+        if !window.starts_with(prefix) {
+            return false;
+        }
+
+        let version = &window[prefix.len()..];
+
+        version == b"nnn" || version.iter().all(u8::is_ascii_digit)
+    })
+}
+
 /// Inspects library signatures without consulting titles or save-file contents.
 pub fn detect_backup(rom: &[u8]) -> BackupDetection {
     let signatures: &[(BackupType, &[&[u8]])] = &[
@@ -73,20 +88,7 @@ pub fn detect_backup(rom: &[u8]) -> BackupDetection {
     ];
     let mut found = Vec::new();
     for &(kind, aliases) in signatures {
-        // SDK identifiers are word-aligned and carry a three-digit version.
-        // The documented homebrew placeholder "nnn" is also accepted.
-        let matches = (0..rom.len()).step_by(4).any(|offset| {
-            aliases.iter().any(|prefix| {
-                let tail = &rom[offset..];
-                tail.starts_with(prefix)
-                    && tail
-                        .get(prefix.len()..prefix.len() + 3)
-                        .is_some_and(|version| {
-                            version == b"nnn" || version.iter().all(u8::is_ascii_digit)
-                        })
-            })
-        });
-        if matches {
+        if aliases.iter().any(|prefix| contains_signature(rom, prefix)) {
             found.push(kind);
         }
     }
@@ -94,5 +96,58 @@ pub fn detect_backup(rom: &[u8]) -> BackupDetection {
         [] => BackupDetection::Unknown,
         [kind] => BackupDetection::Identified(*kind),
         _ => BackupDetection::Ambiguous(found),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{BackupDetection, BackupType, detect_backup};
+
+    #[test]
+    fn detects_versioned_markers_at_every_word_offset() {
+        for offset in 0..4 {
+            let mut rom = vec![0; offset];
+            rom.extend_from_slice(b"FLASH1M_V123");
+
+            assert_eq!(
+                detect_backup(&rom),
+                BackupDetection::Identified(BackupType::Flash128),
+                "marker at byte offset {offset} should be detected"
+            );
+        }
+    }
+
+    #[test]
+    fn detects_numeric_signature_versions() {
+        assert_eq!(
+            detect_backup(b"EEPROM_V123"),
+            BackupDetection::Identified(BackupType::Eeprom)
+        );
+    }
+
+    #[test]
+    fn preserves_homebrew_placeholder_versions() {
+        assert_eq!(
+            detect_backup(b"SRAM_Vnnn"),
+            BackupDetection::Identified(BackupType::Sram)
+        );
+    }
+
+    #[test]
+    fn rejects_malformed_signature_versions() {
+        assert_eq!(detect_backup(b"EEPROM_V12x"), BackupDetection::Unknown);
+    }
+
+    #[test]
+    fn rejects_truncated_signature_versions() {
+        assert_eq!(detect_backup(b"FLASH512_V12"), BackupDetection::Unknown);
+    }
+
+    #[test]
+    fn reports_distinct_save_families_as_ambiguous() {
+        assert_eq!(
+            detect_backup(b"SRAM_V001\0\0\0FLASH_V002"),
+            BackupDetection::Ambiguous(vec![BackupType::Sram, BackupType::Flash64])
+        );
     }
 }
