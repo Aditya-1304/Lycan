@@ -9,7 +9,15 @@ use web_time::Instant;
 /// Completion of a picker or dropped-file request. None means dialog cancellation.
 struct RomRead {
     generation: u64,
+    backup_override: Option<gba_session::BackupType>,
     result: Option<(String, Result<Vec<u8>, String>)>,
+}
+
+/// ROM bytes waiting for the preceding session's save barrier to clear.
+struct PendingRom {
+    name: String,
+    bytes: Vec<u8>,
+    backup_override: Option<gba_session::BackupType>,
 }
 
 /// Original score cartridges use the normal loader and persistence route.
@@ -118,7 +126,7 @@ pub struct GbaApp {
     save_import_open: bool,
     #[cfg(not(target_arch = "wasm32"))]
     close_when_saved: bool,
-    pending_rom: Option<(String, Vec<u8>)>,
+    pending_rom: Option<PendingRom>,
 
     audio: Audio,
     rom_name: String,
@@ -195,6 +203,7 @@ impl GbaApp {
     /// Starts one asynchronous picker from the user's click. Native dialog/read
     /// work runs on a worker; browser work stays on its local executor.
     fn pick_rom(&mut self, ctx: &egui::Context) {
+        let backup_override = self.backup_override.take();
         self.load_generation = self.load_generation.wrapping_add(1);
         let generation = self.load_generation;
         self.picker_open = true;
@@ -205,6 +214,8 @@ impl GbaApp {
             .add_filter("GBA ROM", &["gba"]);
         // Construct the future during the click so browsers retain user activation.
         let selection = dialog.pick_file();
+        #[cfg(not(target_arch = "wasm32"))]
+        let fallback_override = backup_override;
         let task = async move {
             let result = if let Some(file) = selection.await {
                 let name = file.file_name();
@@ -219,7 +230,11 @@ impl GbaApp {
             } else {
                 None
             };
-            let _ = sender.send(RomRead { generation, result });
+            let _ = sender.send(RomRead {
+                generation,
+                backup_override,
+                result,
+            });
             ctx.request_repaint();
         };
         #[cfg(not(target_arch = "wasm32"))]
@@ -228,6 +243,7 @@ impl GbaApp {
             .spawn(move || pollster::block_on(task))
         {
             self.picker_open = false;
+            self.restore_backup_override(fallback_override);
             self.status = format!("ROM picker failed: {error}");
         }
         #[cfg(target_arch = "wasm32")]
@@ -236,23 +252,43 @@ impl GbaApp {
 
     /// Accepts bytes from built-in scenes, picked files and dropped files.
     fn load_rom_bytes(&mut self, name: &str, bytes: &[u8]) {
+        let backup_override = self.backup_override.take();
+        self.load_rom_request(name, bytes, backup_override);
+    }
+
+    /// Keeps the override with this request while save persistence delays installation.
+    fn load_rom_request(
+        &mut self,
+        name: &str,
+        bytes: &[u8],
+        backup_override: Option<gba_session::BackupType>,
+    ) {
         // Replacement is a save barrier. Retain the old machine until its last
         // dirty revision is durable; a failed write remains retryable/exportable.
         if self.storage.busy
             || self.restoring_save
             || self.session.save_image().is_some_and(|image| image.dirty)
         {
-            self.pending_rom = Some((name.to_owned(), bytes.to_vec()));
+            self.pending_rom = Some(PendingRom {
+                name: name.to_owned(),
+                bytes: bytes.to_vec(),
+                backup_override,
+            });
             if !self.session.paused() {
                 self.session.toggle_pause();
             }
             return;
         }
-        self.install_rom(name, bytes);
+        self.install_rom(name, bytes, backup_override);
     }
 
     /// Installs a cartridge only after the preceding session's save barrier.
-    fn install_rom(&mut self, name: &str, bytes: &[u8]) {
+    fn install_rom(
+        &mut self,
+        name: &str,
+        bytes: &[u8],
+        requested_override: Option<gba_session::BackupType>,
+    ) {
         self.load_generation = self.load_generation.wrapping_add(1);
         self.picker_open = false;
         // The pinned stripes file ends at its idle branch. Two unexecuted words
@@ -268,7 +304,7 @@ impl GbaApp {
         // The pinned homebrew Flash test has padded SDK strings without a
         // version. Its explicit fixture configuration uses the common override
         // path; picked games still rely on detector evidence or the user's choice.
-        let backup_override = self.backup_override.or_else(|| {
+        let backup_override = requested_override.or_else(|| {
             if bytes == BANKED_DIAGNOSTIC_ROM {
                 Some(gba_session::BackupType::Flash128)
             } else {
@@ -320,7 +356,17 @@ impl GbaApp {
                 self.conversion_times = Measurements::default();
                 self.upload_times = Measurements::default();
             }
-            Err(error) => self.status = format!("ROM load failed: {error}"),
+            Err(error) => {
+                self.restore_backup_override(requested_override);
+                self.status = format!("ROM load failed: {error}");
+            }
+        }
+    }
+
+    /// Restores a request's override only when the user has not chosen a newer one.
+    fn restore_backup_override(&mut self, requested_override: Option<gba_session::BackupType>) {
+        if self.backup_override.is_none() {
+            self.backup_override = requested_override;
         }
     }
 
@@ -438,8 +484,8 @@ impl GbaApp {
                     self.storage
                         .write(ctx, identity, self.save_generation, image);
                 }
-            } else if let Some((name, bytes)) = self.pending_rom.take() {
-                self.install_rom(&name, &bytes);
+            } else if let Some(pending) = self.pending_rom.take() {
+                self.install_rom(&pending.name, &pending.bytes, pending.backup_override);
             }
         }
         if self.storage.busy || self.pending_rom.is_some() || self.restoring_save {
@@ -1012,6 +1058,7 @@ impl eframe::App for GbaApp {
             }
             #[cfg(target_arch = "wasm32")]
             {
+                let backup_override = self.backup_override.take();
                 self.load_generation = self.load_generation.wrapping_add(1);
                 self.picker_open = false;
                 let generation = self.load_generation;
@@ -1020,7 +1067,11 @@ impl eframe::App for GbaApp {
                 self.status = format!("Reading {name}");
                 wasm_bindgen_futures::spawn_local(async move {
                     let result = Some((name, file.bytes_async().await));
-                    let _ = sender.send(RomRead { generation, result });
+                    let _ = sender.send(RomRead {
+                        generation,
+                        backup_override,
+                        result,
+                    });
                     ctx.request_repaint();
                 });
             }
@@ -1030,11 +1081,17 @@ impl eframe::App for GbaApp {
                 continue;
             }
             self.picker_open = false;
+            let backup_override = completion.backup_override;
             if let Some((name, result)) = completion.result {
                 match result {
-                    Ok(bytes) => self.load_rom_bytes(&name, &bytes),
-                    Err(error) => self.status = format!("ROM read failed: {error}"),
+                    Ok(bytes) => self.load_rom_request(&name, &bytes, backup_override),
+                    Err(error) => {
+                        self.restore_backup_override(backup_override);
+                        self.status = format!("ROM read failed: {error}");
+                    }
                 }
+            } else {
+                self.restore_backup_override(backup_override);
             }
         }
         self.poll_save_storage(ctx);
