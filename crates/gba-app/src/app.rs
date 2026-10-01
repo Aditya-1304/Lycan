@@ -1213,13 +1213,19 @@ impl GbaApp {
         }
         ui.label("Click Load ROM or drop a .gba file here.");
         ui.label("Demo: arrow keys move the square once per GBA frame.");
-        if self.session.slowed() {
-            ui.label("Slow emulation: host delay exceeded the work budget.");
-        }
         ui.collapsing("Performance", |ui| {
             ui.label(self.core_times.label("Core execution"));
             ui.label(self.conversion_times.label("Pixel conversion"));
             ui.label(self.upload_times.label("Texture submission"));
+
+            let pacing = if self.session.slowed() {
+                egui::RichText::new("Pacing: work budget reached").color(egui::Color32::YELLOW)
+            } else {
+                egui::RichText::new("Pacing: real-time")
+            };
+
+            ui.label(pacing);
+
             ui.small(
                 "Texture submission measures CPU queue/copy time; GPU completion is not timed.",
             );
