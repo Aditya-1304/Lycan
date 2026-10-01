@@ -1547,6 +1547,11 @@ impl System {
             open_bus: 0,
             cpu_open_bus: 0,
         };
+        // Controlled cartridge startup supplies the BIOS-style identity transform.
+        // Supplied-BIOS startup clears these values so firmware owns initialization.
+        for offset in [0x20, 0x26, 0x30, 0x36] {
+            system.io[offset..offset + 2].copy_from_slice(&256i16.to_le_bytes());
+        }
         system.refresh_status();
         system
     }
@@ -1872,6 +1877,7 @@ impl System {
                 return Ok(());
             }
             self.io[range].copy_from_slice(&bytes);
+            self.display.write_reference(offset, &self.io);
             if offset == 4 {
                 self.refresh_status();
             }
@@ -2406,9 +2412,79 @@ impl NormalObject {
     }
 }
 
+/// Affine source sampling uses signed 8.8 coefficients and signed 28-bit origins.
+/// The display owns accumulated origins; this snapshot resolves one scanline.
+struct AffineBackground {
+    control: u16,
+    origin: [i32; 2],
+    step: [i32; 2],
+}
+
+impl AffineBackground {
+    /// Captures horizontal coefficients while retaining the display's current line origin.
+    fn new(io: &[u8], background: usize, origin: [i32; 2]) -> Self {
+        let base = 0x20 + (background - 2) * 16;
+        Self {
+            control: u16::from_le_bytes([io[8 + background * 2], io[9 + background * 2]]),
+            origin,
+            step: [0, 4].map(|offset| {
+                i16::from_le_bytes([io[base + offset], io[base + offset + 1]]) as i32
+            }),
+        }
+    }
+
+    /// Bitmap bounds always clip; tiled backgrounds may wrap through BGxCNT.
+    fn pixel(
+        &self,
+        screen_x: usize,
+        mode: u16,
+        page: usize,
+        vram: &[u8],
+        palette: &[u8],
+    ) -> Option<u16> {
+        let [mut x, mut y] = std::array::from_fn(|axis| {
+            self.origin[axis].wrapping_add(self.step[axis] * screen_x as i32) >> 8
+        });
+        let (width, height) = if mode == 5 {
+            (160, 128)
+        } else if mode >= 3 {
+            (240, 160)
+        } else {
+            let size = 128 << (self.control >> 14);
+            (size, size)
+        };
+        if mode < 3 && self.control & 0x2000 != 0 {
+            x = x.rem_euclid(width);
+            y = y.rem_euclid(height);
+        } else if x < 0 || y < 0 || x >= width || y >= height {
+            return None;
+        }
+        let (x, y) = (x as usize, y as usize);
+        if mode == 3 || mode == 5 {
+            let offset = (if mode == 5 { page } else { 0 }) + (y * width as usize + x) * 2;
+            return Some(u16::from_le_bytes([vram[offset], vram[offset + 1]]) & 0x7fff);
+        }
+        let color = if mode == 4 {
+            vram[page + y * 240 + x]
+        } else {
+            let map = usize::from((self.control >> 8) & 31) * 0x800;
+            let tile = usize::from(vram[(map + y / 8 * (width as usize / 8) + x / 8) & 0xffff]);
+            let base = usize::from((self.control >> 2) & 3) * 0x4000;
+            vram[(base + tile * 64 + y % 8 * 8 + x % 8) & 0xffff]
+        };
+        if color == 0 {
+            return None;
+        }
+        let offset = usize::from(color) * 2;
+        Some(u16::from_le_bytes([palette[offset], palette[offset + 1]]) & 0x7fff)
+    }
+}
+
 /// Display timing is independent of VRAM writes and frontend presentation.
 struct Display {
     control: u16,
+    /// Internal BG2/BG3 origins advance independently of the visible MMIO latches.
+    affine_origin: [[i32; 2]; 2],
     drawing: Vec<u16>,
     completed: Vec<u16>,
     generation: u64,
@@ -2421,12 +2497,24 @@ impl Display {
     fn new() -> Self {
         Self {
             control: 0,
+            affine_origin: [[0; 2]; 2],
             drawing: vec![0; FRAMEBUFFER_PIXELS],
             completed: vec![0; FRAMEBUFFER_PIXELS],
             generation: 0,
             frame_start: 0,
             line: 0,
             next_event: 960,
+        }
+    }
+
+    /// Reloads only the written coordinate, including partial byte/halfword stores.
+    fn write_reference(&mut self, offset: usize, io: &[u8]) {
+        if (0x28..0x30).contains(&offset) || (0x38..0x40).contains(&offset) {
+            let background = usize::from(offset >= 0x38);
+            let axis = (offset & 7) / 4;
+            let base = 0x28 + background * 16 + axis * 4;
+            let raw = i32::from_le_bytes(io[base..base + 4].try_into().unwrap());
+            self.affine_origin[background][axis] = (raw << 4) >> 4;
         }
     }
 
@@ -2474,56 +2562,62 @@ impl Display {
         while self.next_event <= target {
             if self.line < SCREEN_HEIGHT {
                 let mode = self.control & 7;
-                let enabled = matches!(mode, 3 | 4) && self.control & (1 << 10) != 0;
-                // Mode 4 pages are separated by 40 KiB, although only 38,400
-                // bytes in each page are visible. Mode 3 ignores page selection.
-                let page = if self.control & (1 << 4) != 0 {
-                    0xa000
-                } else {
-                    0
-                };
-                let forced_blank = self.control & (1 << 7) != 0;
-                let start = self.line * SCREEN_WIDTH;
-                // Priority 4 represents the backdrop rather than a BG layer.
-                let mut bg_priority = [4u8; SCREEN_WIDTH];
-                for index in start..start + SCREEN_WIDTH {
-                    self.drawing[index] = if forced_blank {
-                        0x7FFF
-                    } else if enabled && mode == 3 {
-                        bg_priority[index - start] = io[12] & 3;
-                        u16::from_le_bytes([vram[index * 2], vram[index * 2 + 1]]) & 0x7FFF
-                    } else if enabled {
-                        let color = usize::from(vram[page + index]) * 2;
-                        if color != 0 {
-                            bg_priority[index - start] = io[12] & 3;
-                        }
-                        // Index zero resolves to the backdrop color in BG palette
-                        // entry zero; it must not become a hard-coded black pixel.
-                        u16::from_le_bytes([palette[color], palette[color + 1]]) & 0x7FFF
-                    } else {
-                        u16::from_le_bytes([palette[0], palette[1]]) & 0x7FFF
-                    };
+                if self.line == 0 {
+                    for offset in [0x28, 0x2c, 0x38, 0x3c] {
+                        self.write_reference(offset, io);
+                    }
                 }
-                if mode == 0 && !forced_blank {
-                    // Paint back to front. Lower priority values win, with the
-                    // lower BG number winning ties. Transparent texels preserve
-                    // the lower background or the already-filled backdrop.
+                let page = if self.control & 0x10 != 0 { 0xa000 } else { 0 };
+                let forced_blank = self.control & 0x80 != 0;
+                let start = self.line * SCREEN_WIDTH;
+                let backdrop = u16::from_le_bytes([palette[0], palette[1]]) & 0x7fff;
+                self.drawing[start..start + SCREEN_WIDTH].fill(if forced_blank {
+                    0x7fff
+                } else {
+                    backdrop
+                });
+                let mut bg_priority = [4u8; SCREEN_WIDTH];
+                if !forced_blank {
+                    // Back-to-front composition preserves lower-numbered BG ties.
                     for priority in (0..4).rev() {
                         for background in (0..4).rev() {
-                            if self.control & (1 << (8 + background)) == 0 {
+                            if self.control & (1 << (8 + background)) == 0
+                                || io[8 + background * 2] & 3 != priority
+                            {
                                 continue;
                             }
-                            let layer = TextBackground::from_registers(io, background);
-                            if layer.control & 3 != priority {
+                            let text = mode == 0 || (mode == 1 && background < 2);
+                            let affine = (mode == 1 && background == 2)
+                                || (mode == 2 && background >= 2)
+                                || ((3..=5).contains(&mode) && background == 2);
+                            if !text && !affine {
                                 continue;
                             }
+                            let text_layer = TextBackground::from_registers(io, background);
                             for (x, pixel_priority) in bg_priority.iter_mut().enumerate() {
-                                if let Some(color) = layer.pixel(x, self.line, vram, palette) {
+                                let color = if text {
+                                    text_layer.pixel(x, self.line, vram, palette)
+                                } else {
+                                    AffineBackground::new(
+                                        io,
+                                        background,
+                                        self.affine_origin[background - 2],
+                                    )
+                                    .pixel(x, mode, page, vram, palette)
+                                };
+                                if let Some(color) = color {
                                     self.drawing[start + x] = color;
-                                    *pixel_priority = priority as u8;
+                                    *pixel_priority = priority;
                                 }
                             }
                         }
+                    }
+                }
+                for (background, origin) in self.affine_origin.iter_mut().enumerate() {
+                    for (axis, coordinate) in origin.iter_mut().enumerate() {
+                        let offset = 0x22 + background * 16 + axis * 4;
+                        let delta = i16::from_le_bytes([io[offset], io[offset + 1]]) as i32;
+                        *coordinate = (coordinate.wrapping_add(delta) << 4) >> 4;
                     }
                 }
                 if !forced_blank && self.control & (1 << 12) != 0 {
@@ -2645,6 +2739,7 @@ impl Machine {
     /// Restores reset-vector execution in ARM supervisor mode with IRQ/FIQ
     /// masked. Firmware owns stack initialization and every subsequent service.
     fn start_bios(&mut self) {
+        self.system.io[0x20..0x40].fill(0);
         self.cpu = Cpu::new();
         self.cpu.registers = [0; 16];
         self.cpu.cpsr = CPSR_I | CPSR_F | 0x13;
@@ -3053,6 +3148,52 @@ fn range_for(address: u32, start: u32, length: usize, width: usize) -> Option<Ra
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Catches recomputing origins from line number after a mid-frame write,
+    /// and treating signed 28-bit reference coordinates as unsigned values.
+    #[test]
+    fn affine_reference_write_reloads_current_line_and_advances() {
+        let mut bus = System::new();
+        bus.display.control = 0x0403;
+        bus.vram[0..2].copy_from_slice(&31u16.to_le_bytes());
+        bus.vram[480..482].copy_from_slice(&992u16.to_le_bytes());
+        bus.vram[960..962].copy_from_slice(&0x4210u16.to_le_bytes());
+        bus.display
+            .synchronize_to(960, &bus.vram, &bus.palette, &bus.io, &bus.oam);
+        bus.write_halfword(0x0400002c, 0).unwrap();
+        bus.write_halfword(0x0400002e, 0).unwrap();
+        bus.display
+            .synchronize_to(2192, &bus.vram, &bus.palette, &bus.io, &bus.oam);
+        assert_eq!(bus.display.drawing[240], 31);
+        bus.display
+            .synchronize_to(3424, &bus.vram, &bus.palette, &bus.io, &bus.oam);
+        assert_eq!(bus.display.drawing[480], 992);
+        bus.write_halfword(0x04000028, 0xff00).unwrap();
+        bus.write_halfword(0x0400002a, 0x0fff).unwrap();
+        bus.display
+            .synchronize_to(4656, &bus.vram, &bus.palette, &bus.io, &bus.oam);
+        assert_eq!(bus.display.drawing[720], 0);
+        assert_eq!(bus.display.drawing[721], 0x4210); // X=-1 clips, then X=0 samples row 2.
+    }
+
+    /// Catches screen-linear sampling, missing mode-5 pages, and incorrect clipping.
+    #[test]
+    fn affine_bitmap_rotation_clips_and_selects_page() {
+        let mut display = Display::new();
+        let mut io = vec![0; IO_BYTES];
+        let mut vram = vec![0; VRAM_BYTES];
+        let palette = vec![0; PALETTE_BYTES];
+        let oam = vec![0; OAM_BYTES];
+        io[0x24..0x26].copy_from_slice(&256i16.to_le_bytes());
+        io[0x28..0x2c].copy_from_slice(&256i32.to_le_bytes());
+        vram[0xa002..0xa004].copy_from_slice(&0x1234u16.to_le_bytes());
+        vram[0xa142..0xa144].copy_from_slice(&0x5678u16.to_le_bytes());
+        display.control = 0x0415;
+        display.synchronize_to(960, &vram, &palette, &io, &oam);
+        assert_eq!(display.drawing[0], 0x1234);
+        assert_eq!(display.drawing[1], 0x5678);
+        assert_eq!(display.drawing[128], 0);
+    }
 
     #[test]
     fn retail_bios_undocumented_0410_byte_write_is_accepted() {

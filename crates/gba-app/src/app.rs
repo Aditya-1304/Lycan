@@ -30,6 +30,15 @@ const BANKED_ROM: &[u8] = include_bytes!("../../../roms/flash-banked-score.gba")
 const FLASH_ROM: &[u8] = include_bytes!("../../../roms/flash-score.gba");
 const SRAM_ROM: &[u8] = include_bytes!("../../../roms/sram.gba");
 
+/// Original affine diagnostics use controlled ARM startup; retail ROMs retain BIOS boot.
+const AFFINE_ROMS: [&[u8]; 5] = [
+    include_bytes!("../../../roms/affine-mode-1.gba"),
+    include_bytes!("../../../roms/affine-mode-2.gba"),
+    include_bytes!("../../../roms/affine-mode-3.gba"),
+    include_bytes!("../../../roms/affine-mode-4.gba"),
+    include_bytes!("../../../roms/affine-mode-5.gba"),
+];
+
 const WIDTH: usize = SCREEN_WIDTH;
 const HEIGHT: usize = SCREEN_HEIGHT;
 const WAKE_SECONDS: f64 = CYCLES_PER_FRAME as f64 / GBA_CLOCK_HZ as f64;
@@ -260,6 +269,9 @@ impl GbaApp {
     /// Byte identity confines controlled startup to the shipped diagnostics.
     /// Every other cartridge must pass through the supplied BIOS reset path.
     fn controlled_rom(bytes: &[u8]) -> bool {
+        if AFFINE_ROMS.contains(&bytes) {
+            return true;
+        }
         [
             FLASH_DIAGNOSTIC_ROM,
             BANKED_DIAGNOSTIC_ROM,

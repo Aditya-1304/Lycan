@@ -1,5 +1,8 @@
 #![forbid(unsafe_code)]
 
+#[path = "../../../roms/affine/contract.rs"]
+mod affine_contract;
+
 use gba_core::{CYCLES_PER_FRAME, Cycle, Machine, SCREEN_HEIGHT, SCREEN_WIDTH};
 use gba_session::{Button, Session};
 use serde::Deserialize;
@@ -2408,6 +2411,38 @@ fn probe_bios(args: &[String], diagnostic: bool) -> Result<()> {
 
 fn run() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().map(String::as_str) == Some("verify-affine") {
+        let capture = option(&args, "--capture")?.map(PathBuf::from);
+        if let Some(directory) = &capture {
+            fs::create_dir_all(directory)?;
+        }
+        let identity: toml::Value = toml::from_str(&fs::read_to_string(
+            root().join("roms/affine/manifest.toml"),
+        )?)?;
+        for mode in 1..=5 {
+            let bytes = fs::read(root().join(format!("roms/affine-mode-{mode}.gba")))?;
+            if identity[format!("mode_{mode}")]["sha256"].as_str() != Some(hash(&bytes).as_str()) {
+                return Err(format!("Affine mode {mode} ROM identity mismatch").into());
+            }
+        }
+        affine_contract::verify_with_capture(|mode, frame, pixels| {
+            if let Some(directory) = &capture {
+                let mut ppm = b"P6\n240 160\n255\n".to_vec();
+                for pixel in pixels {
+                    for shift in [0, 5, 10] {
+                        let channel = ((pixel >> shift) & 31) as u8;
+                        ppm.push((channel << 3) | (channel >> 2));
+                    }
+                }
+                fs::write(
+                    directory.join(format!("mode-{mode}-frame-{frame}.ppm")),
+                    ppm,
+                )
+                .expect("write affine capture");
+            }
+        });
+        return Ok(());
+    }
     if matches!(
         args.first().map(String::as_str),
         Some("verify-bios" | "probe")
