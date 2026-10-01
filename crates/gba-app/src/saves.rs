@@ -249,6 +249,45 @@ fn path(identity: &Identity) -> Result<std::path::PathBuf, String> {
     Ok(root.join(format!("{}.gbasav", identity.key())))
 }
 
+/// Removes a staging file when replacement exits before the rename consumes it.
+#[cfg(not(target_arch = "wasm32"))]
+struct PendingFile(std::path::PathBuf);
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Drop for PendingFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+/// Checks file contents in bounded chunks without allocating a save-sized buffer.
+#[cfg(not(target_arch = "wasm32"))]
+fn verify_file(path: &std::path::Path, expected: &[u8]) -> std::io::Result<()> {
+    use std::io::Read;
+
+    let mut file = std::fs::File::open(path)?;
+    let mut buffer = [0_u8; 8192];
+    let mut offset = 0;
+
+    while offset < expected.len() {
+        let count = (expected.len() - offset).min(buffer.len());
+        file.read_exact(&mut buffer[..count])?;
+
+        if buffer[..count] != expected[offset..offset + count] {
+            return Err(std::io::Error::other("save verification failed"));
+        }
+
+        offset += count;
+    }
+
+    let mut extra = [0_u8; 1];
+    if file.read(&mut extra)? != 0 {
+        return Err(std::io::Error::other("save file longer than expected"));
+    }
+
+    Ok(())
+}
+
 /// Checked replacement: complete bytes, fsync, readback, atomic rename, directory
 /// sync and final readback. Any failure leaves the machine's revision pending.
 #[cfg(not(target_arch = "wasm32"))]
@@ -262,23 +301,32 @@ pub fn replace(path: &std::path::Path, bytes: &[u8]) -> Result<(), String> {
         // Separate application processes must never truncate each other's
         // staging files. The serial app route handles ordering within a process.
         static NEXT_FILE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let nonce = NEXT_FILE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let temporary =
-            path.with_extension(format!("gbasav.pending-{}-{nonce}", std::process::id()));
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temporary)?;
-        file.write_all(bytes)?;
-        file.sync_all()?;
-        if std::fs::read(&temporary)? != bytes {
-            return Err(std::io::Error::other("save verification failed"));
+        let (temporary, file) = loop {
+            let nonce = NEXT_FILE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let temporary =
+                path.with_extension(format!("gbasav.pending-{}-{nonce}", std::process::id()));
+
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&temporary)
+            {
+                Ok(file) => break (temporary, file),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(error),
+            }
+        };
+        let cleanup = PendingFile(temporary);
+        {
+            // Close the handle before rename and before the cleanup guard runs on error.
+            let mut file = file;
+            file.write_all(bytes)?;
+            file.sync_all()?;
         }
-        std::fs::rename(&temporary, path)?;
+        verify_file(&cleanup.0, bytes)?;
+        std::fs::rename(&cleanup.0, path)?;
         std::fs::File::open(parent)?.sync_all()?;
-        if std::fs::read(path)? != bytes {
-            return Err(std::io::Error::other("replacement verification failed"));
-        }
+        verify_file(path, bytes)?;
         Ok(())
     };
     operation().map_err(|error| error.to_string())
