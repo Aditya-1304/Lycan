@@ -88,6 +88,9 @@ pub const FRAMEBUFFER_PIXELS: usize = SCREEN_WIDTH * SCREEN_HEIGHT;
 /// Original division firmware, never a replacement for the retail BIOS.
 pub const TEST_FIRMWARE: &[u8] = include_bytes!("../../../roms/test-firmware/division.bin");
 
+/// Exact length of the supplied ARM7TDMI BIOS image.
+pub const BIOS_SIZE: usize = 0x4000;
+
 const ROM_START: u32 = 0x0800_0000;
 const MAX_ROM_BYTES: usize = 32 * 1024 * 1024;
 const EWRAM_START: u32 = 0x0200_0000;
@@ -130,6 +133,8 @@ pub enum CoreError {
     InvalidInputTimestamp { requested: Cycle, earliest: Cycle },
     InputQueueFull,
     EmptyRom,
+    MissingBios,
+    InvalidBiosSize { size: usize },
     RomTooLarge { size: usize, maximum: usize },
     InvalidAccessAlignment { address: u32, width: usize },
     UnmappedAddress { address: u32, width: usize },
@@ -148,6 +153,12 @@ impl fmt::Display for CoreError {
                 requested.0, earliest.0
             ),
             Self::InputQueueFull => formatter.write_str("timestamped input queue is full"),
+            Self::MissingBios => {
+                formatter.write_str("load a supplied 16 KiB BIOS before booting a cartridge")
+            }
+            Self::InvalidBiosSize { size } => {
+                write!(formatter, "BIOS is {size} bytes; expected {BIOS_SIZE}")
+            }
             Self::EmptyRom => formatter.write_str("cannot load an empty ROM"),
             Self::RomTooLarge { size, maximum } => {
                 write!(
@@ -256,6 +267,10 @@ struct Access {
 }
 
 trait CpuBus {
+    /// Supplies the executing instruction address independently of pipeline lookahead.
+    fn set_execution_address(&mut self, address: u32);
+    /// Publishes instruction bus context before any operand accesses overwrite data latches.
+    fn set_cpu_open_bus(&mut self, pipeline: [u32; 2], address: u32, thumb: bool);
     fn read8(&mut self, address: u32, access: Access) -> Result<u8, CoreError>;
     fn write8(&mut self, address: u32, value: u8, access: Access) -> Result<(), CoreError>;
     fn read16(&mut self, address: u32, access: Access) -> Result<u16, CoreError>;
@@ -400,6 +415,7 @@ impl Cpu {
     /// Fills the two-stage instruction pipeline after reset or a taken branch.
     fn refill<B: CpuBus>(&mut self, bus: &mut B) -> Result<(), CoreError> {
         let pc = self.registers[15];
+        bus.set_execution_address(pc);
         bus.restart_fetch();
         self.pipeline[0] = self.fetch(
             bus,
@@ -462,6 +478,7 @@ impl Cpu {
             self.refill(bus)?;
         }
         let address = self.registers[15];
+        bus.set_execution_address(address);
         let instruction = self.pipeline[0];
         let width = self.instruction_width();
         let next = self.fetch(
@@ -473,6 +490,7 @@ impl Cpu {
             },
         )?;
         self.pipeline = [self.pipeline[1], next];
+        bus.set_cpu_open_bus(self.pipeline, address, self.cpsr & CPSR_T != 0);
         self.registers[15] = address.wrapping_add(width);
         self.next_fetch_is_sequential = true;
         if self.cpsr & CPSR_T != 0 {
@@ -1474,6 +1492,12 @@ struct System {
     eeprom: Option<eeprom::Eeprom>,
     /// Explicitly mapped original test firmware; absent for normal ROM loads.
     test_firmware: bool,
+    /// User-supplied firmware is owned separately from controlled diagnostics.
+    bios: Option<Box<[u8; BIOS_SIZE]>>,
+    /// Last successful opcode bus fetch in BIOS, including pipeline lookahead.
+    bios_latch: u32,
+    bios_enabled: bool,
+    execution_address: u32,
     ewram: Vec<u8>,
     iwram: Vec<u8>,
     io: Vec<u8>,
@@ -1487,6 +1511,8 @@ struct System {
     gamepak: GamePak,
     /// Last driven word supplies otherwise unmapped data reads.
     open_bus: u32,
+    /// Instruction prefetch remains independent of the DMA/data bus latch.
+    cpu_open_bus: u32,
 }
 
 impl System {
@@ -1502,6 +1528,10 @@ impl System {
             flash: None,
             eeprom: None,
             test_firmware: false,
+            bios: None,
+            bios_latch: 0,
+            bios_enabled: false,
+            execution_address: ROM_START,
             ewram: vec![0; 256 * 1024],
             iwram: vec![0; 32 * 1024],
             io: vec![0; IO_BYTES],
@@ -1512,6 +1542,7 @@ impl System {
             cycles: 0,
             gamepak: GamePak::default(),
             open_bus: 0,
+            cpu_open_bus: 0,
         };
         system.refresh_status();
         system
@@ -1701,10 +1732,13 @@ impl System {
             self.open_bus = u32::from(value) * 0x0001_0001;
             return Ok(value);
         }
+        if let Some(word) = self.bios_read(address, access) {
+            return Ok((word >> ((address & 2) * 8)) as u16);
+        }
         let value = match self.read_bytes(address, 2) {
             Ok(bytes) => u16::from_le_bytes([bytes[0], bytes[1]]),
             Err(_) if matches!(access.kind, AccessKind::Data) => {
-                (self.open_bus >> ((address & 2) * 8)) as u16
+                (self.unmapped_read() >> ((address & 2) * 8)) as u16
             }
             Err(error) => return Err(error),
         };
@@ -1721,9 +1755,12 @@ impl System {
             self.open_bus = u32::from(value) * 0x0101_0101;
             return Ok(self.open_bus);
         }
+        if let Some(word) = self.bios_read(address, access) {
+            return Ok(word);
+        }
         let value = match self.read_bytes(address, 4) {
             Ok(bytes) => u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]),
-            Err(_) if matches!(access.kind, AccessKind::Data) => self.open_bus,
+            Err(_) if matches!(access.kind, AccessKind::Data) => self.unmapped_read(),
             Err(error) => return Err(error),
         };
         self.open_bus = value;
@@ -1908,6 +1945,37 @@ impl System {
         }
     }
 
+    /// DMA observes the data bus; CPU unmapped reads observe instruction prefetch.
+    fn unmapped_read(&self) -> u32 {
+        if self.dma.iter().any(|dma| dma.active) {
+            self.open_bus
+        } else {
+            self.cpu_open_bus
+        }
+    }
+
+    /// BIOS protection depends on CPU execution context, including DMA reads.
+    /// Width-specific callers select the corresponding byte lanes from this word.
+    fn bios_read(&mut self, address: u32, access: Access) -> Option<u32> {
+        if !self.bios_enabled {
+            return None;
+        }
+        let bios = self.bios.as_ref()?;
+        if address >= BIOS_SIZE as u32 {
+            return None;
+        }
+        if self.execution_address < BIOS_SIZE as u32 {
+            let offset = address as usize & !3;
+            let word = u32::from_le_bytes(bios[offset..offset + 4].try_into().unwrap());
+            if matches!(access.kind, AccessKind::Fetch) {
+                self.bios_latch = word;
+            }
+            Some(word)
+        } else {
+            Some(self.bios_latch)
+        }
+    }
+
     fn read_bytes(&self, address: u32, width: usize) -> Result<&[u8], CoreError> {
         if self.test_firmware
             && let Some(range) = range_for(address, 0, TEST_FIRMWARE.len(), width)
@@ -2031,6 +2099,29 @@ impl System {
 }
 
 impl CpuBus for System {
+    fn set_cpu_open_bus(&mut self, pipeline: [u32; 2], address: u32, thumb: bool) {
+        self.cpu_open_bus = if !thumb {
+            pipeline[1]
+        } else {
+            let fetch_address = address.wrapping_add(4);
+            match fetch_address >> 24 {
+                // These regions have a 32-bit instruction bus. BIOS fetches
+                // already captured the complete aligned word in the protected latch.
+                0 if self.bios_enabled => self.bios_latch,
+                7 => self
+                    .read_bytes(fetch_address & !3, 4)
+                    .map(|bytes| u32::from_le_bytes(bytes.try_into().unwrap()))
+                    .unwrap_or(pipeline[1] * 0x00010001),
+                3 if fetch_address & 2 != 0 => (pipeline[1] << 16) | pipeline[0],
+                3 => pipeline[1] | (pipeline[0] << 16),
+                _ => pipeline[1] * 0x00010001,
+            }
+        };
+    }
+
+    fn set_execution_address(&mut self, address: u32) {
+        self.execution_address = address;
+    }
     fn restart_fetch(&mut self) {
         self.gamepak = GamePak::default();
     }
@@ -2040,7 +2131,16 @@ impl CpuBus for System {
         if let Some(value) = self.backup_read(address) {
             return Ok(value);
         }
-        Ok(self.read_bytes(address, 1)?[0])
+        if let Some(word) = self.bios_read(address, access) {
+            return Ok((word >> ((address & 3) * 8)) as u8);
+        }
+        match self.read_bytes(address, 1) {
+            Ok(bytes) => Ok(bytes[0]),
+            Err(_) if matches!(access.kind, AccessKind::Data) => {
+                Ok((self.unmapped_read() >> ((address & 3) * 8)) as u8)
+            }
+            Err(error) => Err(error),
+        }
     }
 
     /// Video memory has a 16-bit write bus: palette and BG bytes are duplicated,
@@ -2413,6 +2513,8 @@ impl Display {
 
 /// Owns the CPU, memory, display, and cycle state for one emulated machine.
 pub struct Machine {
+    /// Reset retains the selected boot route; diagnostics remain controlled.
+    bios_startup: bool,
     backup: BackupSelection,
     cpu: Cpu,
     system: System,
@@ -2477,6 +2579,48 @@ impl Machine {
         Self::default()
     }
 
+    /// Validates firmware before changing ownership. Loading does not execute or
+    /// reset controlled diagnostics. An active BIOS session reboots with backup
+    /// storage retained, preventing prefetched instructions from the previous image.
+    pub fn load_bios(&mut self, bytes: &[u8]) -> Result<(), CoreError> {
+        if bytes.len() != BIOS_SIZE {
+            return Err(CoreError::InvalidBiosSize { size: bytes.len() });
+        }
+        self.system.bios = Some(bytes.to_vec().into_boxed_slice().try_into().unwrap());
+        if self.bios_startup {
+            self.reset();
+        }
+        Ok(())
+    }
+
+    /// Boots a cartridge from the hardware reset vector. No diagnostic firmware
+    /// or controlled stack/status state participates in this route.
+    pub fn boot_rom_with_bios(
+        &mut self,
+        rom: &[u8],
+        manual_override: Option<BackupType>,
+    ) -> Result<(), CoreError> {
+        if self.system.bios.is_none() {
+            return Err(CoreError::MissingBios);
+        }
+        self.load_rom_with_backup(rom, manual_override)?;
+        self.bios_startup = true;
+        self.start_bios();
+        Ok(())
+    }
+
+    /// Restores reset-vector execution in ARM supervisor mode with IRQ/FIQ
+    /// masked. Firmware owns stack initialization and every subsequent service.
+    fn start_bios(&mut self) {
+        self.cpu = Cpu::new();
+        self.cpu.registers = [0; 16];
+        self.cpu.cpsr = CPSR_I | CPSR_F | 0x13;
+        self.system.execution_address = 0;
+        self.system.bios_latch = 0;
+        self.system.bios_enabled = true;
+        self.system.test_firmware = false;
+    }
+
     /// Loads a byte-based cartridge image and resets execution to its entry point.
     pub fn load_rom(&mut self, rom: &[u8]) -> Result<(), CoreError> {
         self.load_rom_with_backup(rom, None)
@@ -2498,7 +2642,9 @@ impl Machine {
             });
         }
 
+        let bios = self.system.bios.take();
         *self = Self::new();
+        self.system.bios = bios;
         self.backup = BackupSelection {
             detection: detect_backup(rom),
             manual_override,
@@ -2593,6 +2739,9 @@ impl Machine {
     /// Enables the original SWI-division and IRQ-vector firmware for a controlled diagnostic
     /// session. Normal cartridge loading leaves the low firmware region unmapped.
     pub fn enable_test_firmware(&mut self) {
+        if self.bios_startup {
+            return;
+        }
         self.system.test_firmware = true;
         self.cpu.exception_banks[1][0] = 0x0300_7fe0;
     }
@@ -2779,6 +2928,8 @@ impl Machine {
     pub fn reset(&mut self) {
         let rom = std::mem::take(&mut self.system.rom);
         let firmware = self.system.test_firmware;
+        let bios = self.system.bios.take();
+        let bios_startup = self.bios_startup;
         let backup = self.backup.clone();
         let sram = self.system.sram.take();
         let mut eeprom = self.system.eeprom.take();
@@ -2791,6 +2942,11 @@ impl Machine {
         }
         *self = Self::new();
         self.system.rom = rom;
+        self.system.bios = bios;
+        self.bios_startup = bios_startup;
+        if bios_startup {
+            self.start_bios();
+        }
         self.backup = backup;
         self.system.sram = sram;
         self.system.flash = flash;
@@ -2804,6 +2960,7 @@ impl Machine {
 impl Default for Machine {
     fn default() -> Self {
         Self {
+            bios_startup: false,
             backup: BackupSelection::default(),
             cpu: Cpu::new(),
             system: System::new(),
@@ -3057,6 +3214,80 @@ mod tests {
         assert_eq!(machine.system.read8(0x0f008003, access).unwrap(), 42);
         machine.reset();
         assert_eq!(machine.system.read8(0x0e000003, access).unwrap(), 42);
+    }
+
+    // A block load crossing from mapped MMIO into an unmapped address must
+    // retain CPU pipeline context, rather than expose the preceding MMIO value.
+    // Existing timing tests do not cross a mapped/unmapped boundary in one LDM.
+    #[test]
+    fn open_bus_block_load_retains_cpu_prefetch() {
+        let words = [0xe8900006u32, 0xe1a00000, 0xe1a04004, 0xeafffffe];
+        let rom: Vec<u8> = words.iter().flat_map(|word| word.to_le_bytes()).collect();
+        let mut machine = Machine::new();
+        machine.load_rom(&rom).unwrap();
+        machine.cpu.registers[0] = IO_START + 0x3fc;
+        machine.step().unwrap();
+        assert_eq!(machine.registers()[1], 0);
+        assert_eq!(machine.registers()[2], 0xe1a04004);
+    }
+
+    // Existing controlled fixtures cannot catch commercial boot bypassing the
+    // reset vector or losing cartridge storage when the BIOS is retained.
+    #[test]
+    fn supplied_bios_boot_and_reset_preserve_backup() {
+        let mut machine = Machine::new();
+        assert!(
+            machine
+                .boot_rom_with_bios(&[0; 8], Some(BackupType::Sram))
+                .is_err()
+        );
+        assert!(machine.load_bios(&[0; 4]).is_err());
+        let mut bios = vec![0; BIOS_SIZE];
+        bios[..4].copy_from_slice(&0xeafffffeu32.to_le_bytes());
+        machine.load_bios(&bios).unwrap();
+        machine
+            .boot_rom_with_bios(&[0; 8], Some(BackupType::Sram))
+            .unwrap();
+        assert_eq!(machine.registers()[15], 0);
+        assert_eq!(machine.registers()[13], 0);
+        assert_eq!(machine.cpsr(), 0xd3);
+        machine.system.backup_write(0x0e000000, 0x42);
+        let saved = machine.save_image().unwrap();
+        machine.step().unwrap();
+        machine.reset();
+        assert_eq!(machine.registers()[15], 0);
+        assert_eq!(machine.save_image().unwrap().bytes, saved.bytes);
+        assert_eq!(machine.save_image().unwrap().revision, saved.revision);
+        machine.step().unwrap();
+        machine.load_rom(&[0; 8]).unwrap();
+        assert_eq!(machine.registers()[15], ROM_START);
+    }
+
+    // Protected reads must retain the last fetched BIOS word after a redirect;
+    // exposing raw BIOS data would fail upstream startup/SWI/IRQ checks.
+    #[test]
+    fn bios_protection_uses_execution_context_and_fetch_latch() {
+        let mut machine = Machine::new();
+        let mut bios = vec![0; BIOS_SIZE];
+        bios[..4].copy_from_slice(&0x12345678u32.to_le_bytes());
+        bios[4..8].copy_from_slice(&0xabcdef01u32.to_le_bytes());
+        machine.load_bios(&bios).unwrap();
+        machine.system.bios_enabled = true;
+        machine.system.execution_address = 0;
+        let fetch = Access {
+            kind: AccessKind::Fetch,
+            sequential: false,
+        };
+        let data = Access {
+            kind: AccessKind::Data,
+            sequential: false,
+        };
+        assert_eq!(machine.system.read32(4, fetch).unwrap(), 0xabcdef01);
+        assert_eq!(machine.system.read32(0, data).unwrap(), 0x12345678);
+        machine.system.execution_address = ROM_START;
+        assert_eq!(machine.system.read32(0, data).unwrap(), 0xabcdef01);
+        assert_eq!(machine.system.read16(2, data).unwrap(), 0xabcd);
+        assert_eq!(machine.system.read8(1, data).unwrap(), 0xef);
     }
 
     /// Exercises sleep, firmware dispatch, W1C and masked wake through guest code.

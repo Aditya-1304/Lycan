@@ -6,3 +6,6 @@
 
 # BIOS, commercial games, and other private validation data.
 /private-data/
+
+# Optional user-owned game directory used by bounded startup probes.
+/local-roms/

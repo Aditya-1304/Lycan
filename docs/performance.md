@@ -2308,3 +2308,43 @@ Slice 19 is complete against the plan with automated checks passing and manual
 native/Chrome/Brave acceptance explicitly confirmed by the user. Supplied
 performance/audio snapshots are recorded above; unavailable measurements remain
 marked as such.
+
+## Slice 20 — supplied BIOS startup implementation
+
+Code adds exact 16 KiB BIOS validation, BIOS reset startup separate from controlled
+diagnostics, guest SWI/IRQ execution through supplied firmware, protected fetch
+latching and access-width lanes, CPU/DMA open-bus context, BIOS/backup retention
+through reset, shared native/browser BIOS loading and bounded probe tooling.
+
+Implementation verification on 2026-10-01:
+
+- All 41 core/session tests pass, including focused BIOS, protected-read,
+  save/reset and lifecycle checks.
+- The mapped-to-unmapped block-load regression failed with zero instead of the
+  prefetched opcode before its fix, then passed.
+- BIOS installation during a paused save barrier failed before preserving pause,
+  then passed. Invalid image length is rejected before state mutation.
+- Earlier manifest guest fixtures and the pulse/wave/noise contracts pass;
+  native/WASM checks, browser release build and strict Clippy pass.
+- The BIOS diagnostic WASM contract compiles; retail BIOS execution is not verified.
+- The native runner rejects a 4-byte BIOS and a synthetic reset-vector loop;
+  the latter reaches its declared cycle limit without being mistaken for success.
+- BIOS SHA-256, five commercial ROM identities/checkpoints and all Linux/Chrome/
+  Brave game observations: not recorded/not verified.
+- Native/browser core/conversion/upload mean and p95 timings: not measured.
+
+The upstream BIOS diagnostic uses the shared contract in `roms/bios/contract.rs`.
+Its 1908-byte ROM hash is
+`9d7b369fa1aa661ff03692b3d79c6f644b623d72983d0fc890e6d87a0409a3c9`,
+terminal PC is `0x080003c0`, success register is r12 = 0, and the frozen success
+framebuffer hash is
+`59ce42abae9825c2d2579c5cd838e47d88be917e37ea36ff162d46fc5d0991e3`.
+Limits are 50000000 instructions and 168537600 cycles, including complete scanout.
+Guest runtime cycles/instructions/framebuffer and private BIOS identity remain
+not recorded until supplied-file execution.
+
+Manual commands and the five-game evidence table are in
+[compatibility.md](compatibility.md). Slice 20 acceptance remains pending actual
+BIOS diagnostic execution, bounded game observations and user confirmation of
+native/Chrome/Brave sound/input/save behavior. Compilation and synthetic tests do
+not close that gate. No later slice implementation was started.

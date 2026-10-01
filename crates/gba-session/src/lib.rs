@@ -123,6 +123,33 @@ impl Session {
         Ok(())
     }
 
+    /// Installs supplied firmware, then clears pacing, input and staged audio.
+    /// Reset preserves cartridge backup bytes and starts the selected boot route.
+    pub fn load_bios(&mut self, bytes: &[u8]) -> Result<(), CoreError> {
+        let paused = self.paused;
+        self.machine.load_bios(bytes)?;
+        self.reset();
+        if paused {
+            self.toggle_pause();
+        }
+        Ok(())
+    }
+
+    /// Starts a normal cartridge through the BIOS and resets host pacing/input.
+    pub fn boot_rom_with_bios(
+        &mut self,
+        rom: &[u8],
+        manual_override: Option<BackupType>,
+    ) -> Result<(), CoreError> {
+        self.machine.boot_rom_with_bios(rom, manual_override)?;
+        self.machine.release_all_buttons();
+        self.paused = false;
+        self.loaded = true;
+        self.frame_target = Cycle(0);
+        self.reanchor();
+        Ok(())
+    }
+
     /// Exposes cartridge identification independently of emulation and persistence.
     pub fn backup_selection(&self) -> &BackupSelection {
         self.machine.backup_selection()
@@ -312,6 +339,19 @@ impl Session {
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    // BIOS picker completion can arrive while save restoration has paused the
+    // guest. Installing firmware must not release that asynchronous save barrier.
+    #[test]
+    fn loading_bios_preserves_a_paused_save_barrier() {
+        let mut session = Session::new();
+        session
+            .load_rom(include_bytes!("../../../roms/pixels.gba"))
+            .unwrap();
+        session.toggle_pause();
+        session.load_bios(&vec![0; gba_core::BIOS_SIZE]).unwrap();
+        assert!(session.paused());
+    }
 
     // Catches pre-pause PCM being replayed after resume or focus return. Existing
     // input/pacing tests preserve cycles but cannot observe stale sound staging.
