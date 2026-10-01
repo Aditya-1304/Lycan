@@ -267,7 +267,10 @@ impl GbaApp {
         // dirty revision is durable; a failed write remains retryable/exportable.
         if self.storage.busy
             || self.restoring_save
-            || self.session.save_image().is_some_and(|image| image.dirty)
+            || self
+                .session
+                .save_status()
+                .is_some_and(|status| status.dirty)
         {
             self.pending_rom = Some(PendingRom {
                 name: name.to_owned(),
@@ -319,7 +322,7 @@ impl GbaApp {
                 self.save_generation = self.save_generation.wrapping_add(1);
                 self.save_identity = self
                     .session
-                    .save_image()
+                    .save_status()
                     .map(|_| crate::saves::Identity::of(bytes));
                 self.restoring_save = self.save_identity.is_some();
                 self.storage.failed = false;
@@ -427,12 +430,15 @@ impl GbaApp {
                 Outcome::Written(Ok(())) => {
                     self.session.acknowledge_save(completion.revision);
                     self.storage.failed = false;
-                    self.storage.status =
-                        if self.session.save_image().is_some_and(|image| image.dirty) {
-                            "Stored snapshot; newer backup changes remain pending".into()
-                        } else {
-                            format!("Saved revision {}", completion.revision)
-                        };
+                    self.storage.status = if self
+                        .session
+                        .save_status()
+                        .is_some_and(|status| status.dirty)
+                    {
+                        "Stored snapshot; newer backup changes remain pending".into()
+                    } else {
+                        format!("Saved revision {}", completion.revision)
+                    };
                 }
                 Outcome::Written(Err(error)) => {
                     self.storage.failed = true;
@@ -479,8 +485,14 @@ impl GbaApp {
                 if let Some(identity) = self.save_identity.clone() {
                     self.storage.load(ctx, identity, self.save_generation);
                 }
-            } else if let Some(image) = self.session.save_image().filter(|image| image.dirty) {
-                if let Some(identity) = self.save_identity.clone() {
+            } else if self
+                .session
+                .save_status()
+                .is_some_and(|status| status.dirty)
+            {
+                if let (Some(identity), Some(image)) =
+                    (self.save_identity.clone(), self.session.save_image())
+                {
                     self.storage
                         .write(ctx, identity, self.save_generation, image);
                 }
@@ -500,10 +512,10 @@ impl GbaApp {
             return;
         };
         ui.label(format!("Backup: {}", self.storage.status));
-        if let Some(image) = self.session.save_image().filter(|image| image.dirty) {
+        if let Some(status) = self.session.save_status().filter(|status| status.dirty) {
             ui.label(format!(
                 "Revision {} is pending storage acknowledgement",
-                image.revision
+                status.revision
             ));
         }
         ui.horizontal(|ui| {
@@ -535,8 +547,8 @@ impl GbaApp {
                     !self.storage.busy
                         && self
                             .session
-                            .save_image()
-                            .is_some_and(|image| !image.bytes.is_empty()),
+                            .save_status()
+                            .is_some_and(|status| status.len > 0),
                     egui::Button::new("Export save"),
                 )
                 .clicked()
@@ -915,10 +927,7 @@ impl GbaApp {
                     | gba_session::BackupType::Eeprom8k
             )
         ) {
-            let size = self
-                .session
-                .save_image()
-                .map_or(0, |image| image.bytes.len());
+            let size = self.session.save_status().map_or(0, |status| status.len);
             ui.label(if size == 0 {
                 "EEPROM capacity unresolved; serial commands or a validated backup resolve it"
                     .to_owned()
@@ -998,7 +1007,10 @@ impl eframe::App for GbaApp {
         if ctx.input(|input| input.viewport().close_requested())
             && (self.storage.busy
                 || self.restoring_save
-                || self.session.save_image().is_some_and(|image| image.dirty))
+                || self
+                    .session
+                    .save_status()
+                    .is_some_and(|status| status.dirty))
         {
             // Ordinary native close is a save barrier. Failure keeps the window
             // open with pending bytes available for retry or export.
@@ -1099,7 +1111,10 @@ impl eframe::App for GbaApp {
         if self.close_when_saved
             && !self.storage.busy
             && !self.restoring_save
-            && !self.session.save_image().is_some_and(|image| image.dirty)
+            && !self
+                .session
+                .save_status()
+                .is_some_and(|status| status.dirty)
         {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }

@@ -10,6 +10,17 @@ pub struct SaveImage {
     pub dirty: bool,
 }
 
+/// Lightweight backup metadata for polling without copying the cartridge bytes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SaveStatus {
+    /// Backup capacity in bytes, or zero while EEPROM capacity is unresolved.
+    pub len: usize,
+    /// Revision tag used to associate storage acknowledgements with mutations.
+    pub revision: u64,
+    /// Whether this revision is newer than the latest acknowledged revision.
+    pub dirty: bool,
+}
+
 pub(crate) struct Sram {
     bytes: Vec<u8>,
     revision: u64,
@@ -34,6 +45,15 @@ impl Sram {
         if *byte != value {
             *byte = value;
             self.revision += 1;
+        }
+    }
+
+    /// Reports backup metadata without cloning the SRAM bytes.
+    pub fn status(&self) -> SaveStatus {
+        SaveStatus {
+            len: self.bytes.len(),
+            revision: self.revision,
+            dirty: self.revision > self.acknowledged,
         }
     }
 
