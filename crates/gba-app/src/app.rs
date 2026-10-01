@@ -70,6 +70,8 @@ const KEYPAD_AND_ROM: &[u8] = include_bytes!("../../../roms/keypad-and.gba");
 /// The same logical input deadlines are used by the bounded headless runner.
 const KEYPAD_INPUT: &[(Cycle, Button, bool)] = &include!("../../../roms/keypad/input.rs");
 const VBLANK_ROM: &[u8] = include_bytes!("../../../roms/vblank.gba");
+/// Original wave effect scene mixed with pulse voices and Direct Sound.
+const WAVE_ROM: &[u8] = include_bytes!("../../../roms/wave.gba");
 /// Original two-voice pulse scene, using the same explicit firmware as PCM.
 const PULSE_ROM: &[u8] = include_bytes!("../../../roms/pulse.gba");
 const PCM_ROM: &[u8] = include_bytes!("../../../roms/pcm.gba");
@@ -298,6 +300,7 @@ impl GbaApp {
                     || bytes == DMA_ROM
                     || bytes == PCM_ROM
                     || bytes == PULSE_ROM
+                    || bytes == WAVE_ROM
                 {
                     self.session.enable_test_firmware();
                 }
@@ -614,6 +617,10 @@ impl GbaApp {
                 self.load_rom_bytes("sram.gba", SRAM_ROM);
                 ui.ctx().request_repaint();
             }
+            if ui.button("Load wave effect").clicked() {
+                self.load_rom_bytes("wave.gba", WAVE_ROM);
+                self.status = "Wave: Z selects effect + PCM; X selects bank; Backspace selects 64 digits; Up selects 75%; Down mutes".to_owned();
+            }
             if ui.button("Load pulse melody").clicked() {
                 self.load_rom_bytes("pulse.gba", PULSE_ROM);
                 self.status = "Pulse melody: Z adds PCM; X sweeps; Select changes duty; Up fades; Down mutes; release resets".to_owned();
@@ -798,6 +805,10 @@ impl GbaApp {
         ui.label(self.audio.status());
         let (produced, dropped, empty) = self.session.pcm_counters();
         ui.label(format!("Core PCM: 32768 Hz | produced {produced} | staging drops {dropped} | empty FIFO {empty}"));
+        if self.rom_name == "wave.gba" {
+            ui.label("Z: effect + PCM | X: bank 1 | Backspace: 64 digits | Up: 75% | Down: mute | Release: restart");
+            ui.label("Pulse accompaniment left; wave effect right; PCM both sides. Enable audio to listen.");
+        }
         if self.rom_name == "pulse.gba" {
             let lead = self.session.inspect16(0x0300000a).unwrap_or(0);
             let second = self.session.inspect16(0x0300000c).unwrap_or(0);

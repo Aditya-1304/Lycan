@@ -14,6 +14,8 @@ use std::{
 
 #[path = "../../../roms/pulse/contract.rs"]
 mod pulse_contract;
+#[path = "../../../roms/wave/contract.rs"]
+mod wave_contract;
 
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
@@ -2272,22 +2274,36 @@ fn run() -> Result<()> {
     if args.first().map(String::as_str) == Some("build-fixtures") {
         return build_fixtures(&path);
     }
-    if args.first().map(String::as_str) == Some("verify-pulse") {
+    if matches!(
+        args.first().map(String::as_str),
+        Some("verify-pulse" | "verify-wave")
+    ) {
+        let wave = args[0] == "verify-wave";
         #[derive(Deserialize)]
         struct PulseIdentity {
             sha256: String,
         }
-        let expected: PulseIdentity = toml::from_str(&fs::read_to_string(
-            root().join("roms/pulse/manifest.toml"),
-        )?)?;
+        let expected: PulseIdentity = toml::from_str(&fs::read_to_string(root().join(if wave {
+            "roms/wave/manifest.toml"
+        } else {
+            "roms/pulse/manifest.toml"
+        }))?)?;
         let identity = format!(
             "{:x}",
-            Sha256::digest(include_bytes!("../../../roms/pulse.gba"))
+            Sha256::digest(if wave {
+                include_bytes!("../../../roms/wave.gba").as_slice()
+            } else {
+                include_bytes!("../../../roms/pulse.gba").as_slice()
+            })
         );
         if expected.sha256 != identity {
-            return Err(fail("pulse ROM differs from frozen identity"));
+            return Err(fail("audio fixture ROM differs from frozen identity"));
         }
-        let samples = pulse_contract::verify();
+        let samples = if wave {
+            wave_contract::verify()
+        } else {
+            pulse_contract::verify()
+        };
         if let Some(path) = option(&args, "--capture")? {
             // Export accepted stereo samples in standard PCM16 WAV format.
             let bytes = (samples.len() * 4) as u32;
@@ -2320,7 +2336,7 @@ fn run() -> Result<()> {
         && !(args[0] == "fixtures" && args.get(1).map(String::as_str) == Some("run"))
     {
         return Err(fail(
-            "usage: verify-pulse [--capture WAV] | build-fixtures | fixtures run --manifest PATH [--fixture NAME] [--capture PATH] | bench --scenario pixels|tiled|sprites|vblank|irq-sprites|dma|pcm --frames N",
+            "usage: verify-wave [--capture WAV] | verify-pulse [--capture WAV] | build-fixtures | fixtures run --manifest PATH [--fixture NAME] [--capture PATH] | bench --scenario pixels|tiled|sprites|vblank|irq-sprites|dma|pcm --frames N",
         ));
     }
     let scenario = option(&args, "--scenario")?.unwrap_or_else(|| "pixels".to_owned());
