@@ -188,7 +188,7 @@ impl Session {
 
     /// Converts an absolute monotonic host timestamp to an integer cycle deadline.
     /// Fractional cycles survive callbacks, so refresh rate does not change speed.
-    /// At most two frames run per callback; excess host delay is dropped and reported
+    /// At most one frame runs per callback; excess host delay is dropped and reported
     /// as slow emulation rather than building an unbounded catch-up backlog.
     pub fn advance_host_time(&mut self, now: Duration) -> Result<Option<RunReport>, RunError> {
         self.advance_host_time_to(now, None)
@@ -208,6 +208,17 @@ impl Session {
         &mut self,
         now: Duration,
         deadline: Option<Cycle>,
+    ) -> Result<Option<RunReport>, RunError> {
+        self.advance_host_time_with_budget(now, deadline, LIVE_INSTRUCTION_BUDGET)
+    }
+
+    /// Shares live pacing and overload recovery with tests that force a work yield.
+    /// Deterministic headless execution retains its separate, fatal step limit.
+    fn advance_host_time_with_budget(
+        &mut self,
+        now: Duration,
+        deadline: Option<Cycle>,
+        instruction_budget: usize,
     ) -> Result<Option<RunReport>, RunError> {
         if self.paused || !self.active || !self.loaded {
             self.reanchor();
@@ -244,7 +255,7 @@ impl Session {
 
         match self
             .machine
-            .advance_to(self.frame_target, LIVE_INSTRUCTION_BUDGET)
+            .advance_to(self.frame_target, instruction_budget)
         {
             Ok(report) => Ok(Some(report)),
 
@@ -414,6 +425,60 @@ mod tests {
         session.drain_pcm(&mut samples);
         assert!(samples.is_empty());
         assert_eq!(session.pcm_counters(), (0, 0, 0));
+    }
+
+    // Ordinary pacing tests never exhaust the instruction cap. This catches a
+    // live work yield being propagated as a fatal error, retaining catch-up debt,
+    // or preventing the next callback from continuing guest execution.
+    #[test]
+    fn live_work_yield_preserves_progress_and_drops_catch_up_debt() {
+        let mut session = Session::new();
+        session
+            .load_rom(include_bytes!("../../../roms/buttons.gba"))
+            .unwrap();
+        session
+            .advance_host_time_with_budget(Duration::ZERO, None, 1)
+            .unwrap();
+        let before = session.cycles();
+        let report = session
+            .advance_host_time_with_budget(Duration::from_millis(10), None, 1)
+            .unwrap()
+            .expect("bounded work should report guest progress");
+        assert!(report.cycles > before);
+        assert_eq!(report.instructions, 1);
+        assert!(session.slowed());
+        assert!(!session.paused());
+        assert_eq!(session.frame_target, session.cycles());
+        assert_eq!(session.fractional_cycles, 0);
+        assert!(
+            session
+                .advance_host_time_with_budget(Duration::from_millis(10), None, 1)
+                .unwrap()
+                .is_none()
+        );
+        let next = session
+            .advance_host_time_with_budget(Duration::from_millis(11), None, 1)
+            .unwrap()
+            .expect("the next callback should resume guest work");
+        assert!(next.cycles > report.cycles);
+        assert!(!session.paused());
+    }
+
+    // A zero-work result must stay fatal rather than masquerading as slowdown.
+    #[test]
+    fn live_work_limit_without_cycle_progress_remains_fatal() {
+        let mut session = Session::new();
+        session
+            .load_rom(include_bytes!("../../../roms/buttons.gba"))
+            .unwrap();
+        session
+            .advance_host_time_with_budget(Duration::ZERO, None, 0)
+            .unwrap();
+        let before = session.cycles();
+        assert!(
+            matches!(session.advance_host_time_with_budget(Duration::from_millis(10), None, 0),
+            Err(RunError::StepLimitExceeded { cycles, .. }) if cycles == before)
+        );
     }
 
     // Catches a replay running past its declared final checkpoint when a host
