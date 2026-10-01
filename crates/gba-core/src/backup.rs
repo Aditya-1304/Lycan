@@ -1,12 +1,15 @@
 //! Cartridge configuration only; save-bus protocols and persistence are separate.
 
-/// Save hardware family. EEPROM capacity is resolved by its later serial protocol.
+/// Save hardware family. EEPROM capacity is resolved by serial commands or an explicit override.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BackupType {
     /// Explicitly forced cartridge with no save hardware.
     None,
     Sram,
     Eeprom,
+    /// Validated overrides for cartridges whose serial size detection is uncertain.
+    Eeprom512,
+    Eeprom8k,
     Flash64,
     Flash128,
 }
@@ -49,9 +52,11 @@ impl std::str::FromStr for BackupType {
             "none" => Ok(Self::None),
             "sram" => Ok(Self::Sram),
             "eeprom" => Ok(Self::Eeprom),
+            "eeprom512" => Ok(Self::Eeprom512),
+            "eeprom8k" => Ok(Self::Eeprom8k),
             "flash64" => Ok(Self::Flash64),
             "flash128" => Ok(Self::Flash128),
-            _ => Err("backup type must be none, sram, eeprom, flash64 or flash128"),
+            _ => Err("backup type must be none, sram, eeprom, eeprom512, eeprom8k, flash64 or flash128"),
         }
     }
 }
