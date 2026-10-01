@@ -2391,11 +2391,13 @@ Manual commands and the historical five-game evidence table are in
 tested and measured. No later slice implementation is included in this closeout.
 
 
-## Slice 21 — affine background image: automated verification complete
+## Slice 21 — affine background image: complete
 
 Implemented and verified against `plan_final.md` section 21 on 2026-10-02.
-Manual Linux/Chrome/Brave acceptance and millisecond measurements remain pending.
-Existing user timing entries above are preserved.
+The user confirmed all manual verification complete on 2026-10-02, including
+Linux/Chrome/Brave acceptance. Chrome and Brave measurements supplied below
+are recorded exactly for `affine-mode-5.gba`; existing timing entries above
+are preserved. Slice 21 is complete.
 
 The renderer now samples BG2/BG3 through signed integer affine coefficients,
 signed 28-bit reference coordinates and per-line internal origins. Reference
@@ -2465,17 +2467,35 @@ production-WASM oracle. Host: Linux x86_64; rustc 1.98.1
 
 ### Manual performance and platform acceptance
 
-Use each of the five affine ROMs, check rotation/scaling/wrapping/clipping/page
-changes, then pause/resume/reset. In the app, Right rotates, Up toggles scale,
-Z switches bitmap page, and X toggles tiled wrapping. Release between presses.
-F1 shows the diagnostic performance summaries. Record per-ROM mean/p95 core,
-conversion and texture submission timings; timings below remain user-owned.
+The user confirmed all manual checks complete on 2026-10-02: the five affine
+ROMs, rotation/scaling/wrapping/clipping/page changes, input, pause/resume and
+reset on Linux native, Chrome and Brave. This acceptance is attributed to the
+user's confirmation; automated capture evidence remains separately documented.
 
-| Platform | Visual/input/pause/reset acceptance | Core mean/p95 ms | Conversion mean/p95 ms | Texture submission mean/p95 ms | Sustained speed |
-|---|---|---|---|---|---|
-| Linux native | not verified | not measured | not measured | not measured | not measured |
-| Chrome | not verified | not measured | not measured | not measured | not measured |
-| Brave | not verified | not measured | not measured | not measured | not measured |
+The supplied browser snapshots both identify `affine-mode-5.gba`, Running,
+angle 0°, 2x source step, page 0 and wrap=false. Each timing statistic has
+120 samples. These timings apply to that ROM/state, rather than all five ROMs.
+
+| Platform | Visual/input/pause/reset acceptance | Core mean/p95 ms | Conversion mean/p95 ms | Texture submission mean/p95 ms | Samples per metric | Sustained speed |
+|---|---|---|---|---|---:|---|
+| Linux native | complete — user confirmed | not recorded | not recorded | not recorded | not recorded | not recorded |
+| Chrome | complete — user confirmed | 7.197 / 11.700 | 0.122 / 0.200 | 0.031 / 0.100 | 120 | not recorded |
+| Brave | complete — user confirmed | 7.018 / 11.000 | 0.113 / 0.200 | 0.018 / 0.100 | 120 | not recorded |
+
+| Browser snapshot | Instructions | GBA cycles | Core PCM rate | PCM produced | Staging drops | Empty FIFO |
+|---|---:|---:|---|---:|---:|---:|
+| Chrome | 32,171,501 | 384,334,071 | 32768 Hz | 750,652 | 0 | 0 |
+| Brave | 24,229,591 | 289,142,008 | 32768 Hz | 564,730 | 0 | 0 |
+
+Both snapshots report BIOS not loaded, audio off, Backup None, detected Unknown,
+and no backup override. The diagnostic needs neither BIOS nor save hardware;
+the generic unresolved-backup message does not indicate a failed save contract.
+PCM counters describe core production while host playback was disabled.
+Browser versions, native numerical timings, timings for modes 1–4 and a
+sustained speed percentage were not supplied and remain not recorded. Their
+absence does not change the user's explicit manual acceptance confirmation.
+
+Commands retained for reproducing the completed checks:
 
 ```bash
 cd /home/aditya/Projects/GBA/gba-rs
@@ -2502,8 +2522,9 @@ Open `http://127.0.0.1:8080` in Chrome and Brave and repeat the same controls.
 - [x] Mode-5 dimensions/page behavior verified through the same image contract.
 - [x] Rotation, wrapping, clipping and page changes use integer arithmetic and match the source-geometry oracle.
 - [x] Earlier guest regressions and required automated build/check gates pass.
-- [ ] Manual Linux, Chrome and Brave UI acceptance confirmed by the user.
-- [ ] User millisecond performance measurements recorded.
+- [x] Manual Linux, Chrome and Brave UI acceptance complete — user confirmed on 2026-10-02.
+- [x] Supplied Chrome/Brave mode-5 millisecond measurements and 120-sample counts recorded exactly; unavailable measurements explicitly marked not recorded.
 
-Slice 21 implementation and automated acceptance are complete. Full platform
-closeout remains pending the manual rows above; Slice 22 was not started.
+Slice 21 is complete: implemented, automatically verified and manually accepted
+by the user on Linux, Chrome and Brave. Supplied browser performance evidence is
+recorded above. Slice 22 was not started in this closeout.
