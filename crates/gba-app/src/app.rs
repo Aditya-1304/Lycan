@@ -736,12 +736,8 @@ impl GbaApp {
         let background = egui::Color32::from_rgb(12, 12, 14);
         ui.painter().rect_filled(ui.max_rect(), 0.0, background);
 
+        // Place controls first so long cartridge names cannot push them off-screen.
         ui.horizontal(|ui| {
-            ui.heading("gba-rs");
-            if !self.rom_name.is_empty() {
-                ui.separator();
-                ui.label(&self.rom_name);
-            }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui
                     .add_enabled(self.loaded, egui::Button::new("Reset"))
@@ -755,7 +751,7 @@ impl GbaApp {
                 } else {
                     "Pause"
                 };
-                // Match diagnostic pause guards so pending saves cannot be bypassed.
+                // Retain the save barriers used by the diagnostic controls.
                 let can_pause = self.loaded
                     && !self.restoring_save
                     && self.pending_rom.is_none()
@@ -784,39 +780,54 @@ impl GbaApp {
                 {
                     self.pick_bios(ui.ctx());
                 }
+                ui.menu_button("Audio", |ui| {
+                    if ui.button("Enable audio").clicked() {
+                        self.audio.start();
+                    }
+                    ui.checkbox(&mut self.audio.muted, "Mute");
+                    ui.add(egui::Slider::new(&mut self.audio.volume, 0.0..=1.0).text("Volume"));
+                });
+                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                    // Keep product identity visible on hosts without window decorations.
+                    ui.label(egui::RichText::new("Lycan").strong());
+                    ui.separator();
+                    let name = if self.rom_name.is_empty() {
+                        "No ROM loaded"
+                    } else {
+                        &self.rom_name
+                    };
+                    let save_state = if self.save_identity.is_none() {
+                        ""
+                    } else if self.storage.failed {
+                        " · Save failed"
+                    } else if self.restoring_save {
+                        " · Restoring"
+                    } else if self.storage.busy
+                        || self
+                            .session
+                            .save_status()
+                            .is_some_and(|status| status.dirty)
+                    {
+                        " · Saving"
+                    } else {
+                        " · Saved"
+                    };
+                    ui.add(egui::Label::new(format!("{name}{save_state}")).truncate())
+                        .on_hover_text(format!("{name}\n{}", self.storage.status));
+                });
             });
         });
         ui.separator();
-        ui.horizontal_wrapped(|ui| {
-            if ui.button("Enable audio").clicked() {
-                self.audio.start();
-            }
-            ui.checkbox(&mut self.audio.muted, "Mute");
-            ui.add(egui::Slider::new(&mut self.audio.volume, 0.0..=1.0).text("Volume"));
-        });
-        // Loader failures remain actionable without exposing diagnostic scene text.
+        // Display actionable failures and startup guidance without reserving a
+        // permanent status row during normal play. Hover reveals the full error.
         if !self.loaded || self.status.contains("failed") {
-            ui.label(&self.status);
+            ui.add(egui::Label::new(&self.status).truncate())
+                .on_hover_text(&self.status);
         }
-        if self.save_identity.is_some() {
-            let save_label = if self.storage.failed {
-                "Save failed; press F1 for recovery controls"
-            } else if self.restoring_save {
-                "Restoring save…"
-            } else if self.storage.busy
-                || self
-                    .session
-                    .save_status()
-                    .is_some_and(|status| status.dirty)
-            {
-                "Saving…"
-            } else {
-                "Save ready"
-            };
-            ui.small(save_label);
+        if self.storage.failed {
+            ui.add(egui::Label::new("Save failed; press F1 for recovery controls").truncate())
+                .on_hover_text(&self.storage.status);
         }
-        ui.small("Z=A  X=B  A=L  S=R  Enter=Start  Backspace=Select  Arrows=D-pad  F1=Diagnostics");
-        ui.separator();
 
         // Reserve the frame margins before fitting so the framed image also fits.
         let available = ui.available_size();
@@ -849,7 +860,7 @@ impl GbaApp {
             self.capture_requested = true;
         }
 
-        ui.heading("gba-rs");
+        ui.heading("Lycan — Diagnostics");
         self.draw_save_controls(ui);
         ui.horizontal_wrapped(|ui| {
             if ui.add_enabled(!self.bios_picker_open, egui::Button::new("Load BIOS")).clicked() {
@@ -1567,32 +1578,26 @@ impl Measurements {
     }
 }
 
-/// Enlarges by whole pixels up to 3×, using fractional sizing only below 1×.
+/// Fits the framebuffer continuously to the viewport while preserving 3:2.
+/// Nearest-neighbor filtering remains the texture upload policy.
 fn player_screen_size(available: egui::Vec2) -> egui::Vec2 {
-    let fit = (available.x / WIDTH as f32).min(available.y / HEIGHT as f32);
-    let scale = if fit >= 1.0 {
-        fit.floor().min(3.0)
-    } else {
-        fit.max(0.0)
-    };
-    egui::vec2(WIDTH as f32 * scale, HEIGHT as f32 * scale)
+    fitted_screen_size(available)
 }
 
-/// Player presentation must preserve whole-pixel enlargement without overflowing
-/// small windows; diagnostic sizing remains independently available.
+/// Resizing must fill the available area without a scale cap or aspect distortion.
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn player_screen_uses_capped_integer_enlargement_and_small_viewport_fallback() {
+    fn player_screen_fills_resized_viewports_without_distorting_aspect_ratio() {
         assert_eq!(
             player_screen_size(egui::vec2(960.0, 640.0)),
-            egui::vec2(720.0, 480.0)
+            egui::vec2(960.0, 640.0)
         );
         assert_eq!(
-            player_screen_size(egui::vec2(700.0, 470.0)),
-            egui::vec2(480.0, 320.0)
+            player_screen_size(egui::vec2(600.0, 410.0)),
+            egui::vec2(600.0, 400.0)
         );
         assert_eq!(
             player_screen_size(egui::vec2(240.0, 160.0)),

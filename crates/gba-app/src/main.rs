@@ -38,7 +38,7 @@ fn main() -> eframe::Result {
     };
 
     eframe::run_native(
-        "gba-rs",
+        "Lycan",
         native_options,
         Box::new(move |cc| Ok(Box::new(GbaApp::new(cc, debug_ui)))),
     )
