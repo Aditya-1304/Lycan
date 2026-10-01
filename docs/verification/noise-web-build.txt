@@ -1,0 +1,9 @@
+$ env -u NO_COLOR trunk --config web/Trunk.toml build --release
+2026-10-01T09:15:51.783204Z  INFO 🚀 Starting trunk 0.21.14
+2026-10-01T09:15:51.783431Z  INFO 📦 starting build
+   Compiling gba-app v0.1.0 (/home/aditya/Projects/GBA/gba-rs/crates/gba-app)
+    Finished `release` profile [optimized] target(s) in 15.99s
+2026-10-01T09:16:13.613834Z  INFO applying new distribution
+2026-10-01T09:16:13.614812Z  INFO ✅ success
+
+exit_code=0

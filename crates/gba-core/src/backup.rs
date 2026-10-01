@@ -56,7 +56,9 @@ impl std::str::FromStr for BackupType {
             "eeprom8k" => Ok(Self::Eeprom8k),
             "flash64" => Ok(Self::Flash64),
             "flash128" => Ok(Self::Flash128),
-            _ => Err("backup type must be none, sram, eeprom, eeprom512, eeprom8k, flash64 or flash128"),
+            _ => Err(
+                "backup type must be none, sram, eeprom, eeprom512, eeprom8k, flash64 or flash128",
+            ),
         }
     }
 }

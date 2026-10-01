@@ -1,0 +1,5 @@
+$ cargo check --locked -p gba-app --target wasm32-unknown-unknown
+    Checking gba-app v0.1.0 (/home/aditya/Projects/GBA/gba-rs/crates/gba-app)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 0.54s
+
+exit_code=0

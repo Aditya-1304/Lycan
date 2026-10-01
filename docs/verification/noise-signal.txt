@@ -1,0 +1,9 @@
+$ python3 roms/noise/verify.py
+    Finished `release` profile [optimized] target(s) in 0.06s
+     Running `target/release/gba-tools verify-noise --capture /tmp/gba-noise-recording-twyu9hxf/noise.wav`
+PASS noise chunk=280896 frames=1800 cycles=505612800 instructions=54506 samples=987525 dropped=0 underruns=0
+PASS noise chunk=997 frames=1800 cycles=505612800 instructions=54506 samples=987525 dropped=0 underruns=0
+    Finished `release` profile [optimized] target(s) in 0.06s
+WASM noise PASS: noise scene, four timer cascades, DMA1/DMA2 FIFOs, sustained mixing and chunk invariance
+
+exit_code=0

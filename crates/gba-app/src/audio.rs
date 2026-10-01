@@ -142,10 +142,14 @@ impl Audio {
 /// CLI-only device probe uses the real guest/session/resampler/output path.
 /// It exercises lifecycle discontinuities without opening a native window.
 #[cfg(not(target_arch = "wasm32"))]
-pub fn probe() -> Result<(), String> {
+pub fn probe(scene: &str) -> Result<(), String> {
     use gba_session::Button;
     use std::time::{Duration, Instant};
-    let rom = include_bytes!("../../../roms/pcm.gba");
+    let rom: &[u8] = match scene {
+        "pcm" => include_bytes!("../../../roms/pcm.gba"),
+        "noise" => include_bytes!("../../../roms/noise.gba"),
+        _ => return Err("Audio probe scene must be pcm or noise".to_owned()),
+    };
     let mut session = Session::new();
     session.load_rom(rom).map_err(|e| e.to_string())?;
     session.enable_test_firmware();
@@ -156,7 +160,10 @@ pub fn probe() -> Result<(), String> {
     }
     let origin = Instant::now();
     let mut phase = 0;
-    while origin.elapsed() < Duration::from_secs(6) {
+    // The noise scene retains the existing lifecycle probes, then sustains
+    // mixed playback long enough to expose refill or host-buffer rate drift.
+    let duration = if scene == "noise" { 30 } else { 6 };
+    while origin.elapsed() < Duration::from_secs(duration) {
         let now = origin.elapsed();
         let next = now.as_millis() / 1000;
         if next != phase {
@@ -175,11 +182,16 @@ pub fn probe() -> Result<(), String> {
                     session.set_active(false);
                     audio.set_playing(false);
                 }
+                6 if scene == "noise" => {
+                    session.set_active(true);
+                    audio.clear();
+                }
                 _ => {}
             }
             println!("AUDIO phase={phase} {}", audio.status());
         }
         session.set_button(Button::A, phase % 2 == 1);
+        session.set_button(Button::B, scene == "noise" && phase % 4 >= 2);
         session.set_button(Button::Left, phase == 1);
         session.set_button(Button::Right, phase == 3);
         audio.set_playing(phase != 5 && !session.paused());

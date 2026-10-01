@@ -1,7 +1,7 @@
 //! Timers, Direct Sound FIFOs and the stereo PWM mixer on the machine clock.
 //! Host adapters consume fixed-rate frames and never own device registers.
 
-use crate::{pulse::Pulse, wave::Wave};
+use crate::{noise::Noise, pulse::Pulse, wave::Wave};
 use std::collections::VecDeque;
 
 /// Fixed core output cadence; host adapters resample this stream continuously.
@@ -36,6 +36,7 @@ impl Timer {
 pub(super) struct Audio {
     pulses: [Pulse; 2],
     wave: Wave,
+    noise: Noise,
     next_sequence: u64,
     sequence_step: u8,
     timers: [Timer; 4],
@@ -60,6 +61,7 @@ impl Audio {
         Self {
             pulses: std::array::from_fn(|_| Pulse::default()),
             wave: Wave::default(),
+            noise: Noise::default(),
             next_sequence: 32768,
             sequence_step: 0,
             timers: [Timer::default(); 4],
@@ -111,6 +113,7 @@ impl Audio {
     /// disable resets PSG control storage, but preserves Direct Sound devices.
     pub fn write_control(&mut self, offset: usize, value: u16) {
         match offset {
+            0x78 | 0x7c if self.master => self.noise.write(offset, value),
             0x90..=0x9e => self.wave.write(offset, value),
             0x70 | 0x72 | 0x74 if self.master => self.wave.write(offset, value),
             0x60 | 0x62 | 0x64 | 0x68 | 0x6c if self.master => {
@@ -143,6 +146,7 @@ impl Audio {
                     self.control_l = 0;
                     self.pulses = std::array::from_fn(|_| Pulse::default());
                     self.wave.reset();
+                    self.noise = Noise::default();
                     self.sequence_step = 0;
                 }
             }
@@ -155,6 +159,8 @@ impl Audio {
     /// particular, a high-byte trigger must retain the write-only frequency low byte.
     pub fn pulse_latch(&self, offset: usize) -> Option<u16> {
         match offset {
+            0x78 => Some(self.noise.envelope),
+            0x7c => Some(self.noise.control),
             0x70 => Some(self.wave.select),
             0x72 => Some(self.wave.volume),
             0x74 => Some(self.wave.control),
@@ -177,6 +183,8 @@ impl Audio {
             (0x64, self.pulses[0].control & 0x4000),
             (0x68, self.pulses[1].envelope & 0xffc0),
             (0x6c, self.pulses[1].control & 0x4000),
+            (0x78, self.noise.envelope & 0xff00),
+            (0x7c, self.noise.control),
             (0x80, self.control_l),
             (0x82, self.control_h),
             (
@@ -184,7 +192,8 @@ impl Audio {
                 (u16::from(self.master) << 7)
                     | u16::from(self.pulses[0].active)
                     | (u16::from(self.pulses[1].active) << 1)
-                    | (u16::from(self.wave.active) << 2),
+                    | (u16::from(self.wave.active) << 2)
+                    | (u16::from(self.noise.active) << 3),
             ),
             (0x88, self.bias),
         ] {
@@ -213,6 +222,9 @@ impl Audio {
         if let Some(edge) = self.wave.next_edge() {
             next = next.min(now + edge);
         }
+        if let Some(edge) = self.noise.next_edge() {
+            next = next.min(now + edge);
+        }
         for pulse in &self.pulses {
             if let Some(edge) = pulse.next_edge() {
                 next = next.min(now + edge);
@@ -232,6 +244,7 @@ impl Audio {
     /// Returns ordinary timer IF bits and the FIFO DMA request level.
     pub fn advance(&mut self, elapsed: u64, now: u64) -> (u16, [bool; 2]) {
         self.wave.advance(elapsed);
+        self.noise.advance(elapsed);
         for pulse in &mut self.pulses {
             pulse.advance(elapsed);
         }
@@ -241,6 +254,7 @@ impl Audio {
                     pulse.sequence(self.sequence_step, index == 0);
                 }
                 self.wave.sequence(self.sequence_step);
+                self.noise.sequence(self.sequence_step);
                 self.sequence_step = (self.sequence_step + 1) & 7;
             }
             self.next_sequence += 32768;
@@ -347,6 +361,7 @@ impl Audio {
             self.pulses[0].level(),
             self.pulses[1].level(),
             self.wave.level(),
+            self.noise.level(),
         ]
         .into_iter()
         .enumerate()
@@ -378,6 +393,84 @@ impl Audio {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Existing pulse/wave checks cannot catch absent noise register dispatch,
+    // short-mode periodicity, envelope expiry, or drain-induced LFSR resets.
+    #[test]
+    fn noise_registers_drive_timed_signal_across_drains() {
+        fn render(chunk: u64, short: bool) -> Vec<[f32; 2]> {
+            let mut audio = Audio::new();
+            audio.write_control(0x84, 0x80);
+            audio.write_control(0x80, 0x8877);
+            audio.write_control(0x82, 2);
+            audio.write_control(0x78, if short { 0xa000 } else { 0xa100 });
+            audio.write_control(0x7c, if short { 0xc04c } else { 0xc044 });
+            let mut io = vec![0; 0xa0];
+            audio.refresh_controls(&mut io);
+            assert_eq!(io[0x84], 0x88, "trigger must activate channel four");
+            assert_eq!(io[0x78], 0, "length is write-only");
+            assert_eq!(io[0x7d], 0x40, "trigger self-clears");
+            let mut now = 0;
+            let mut output = Vec::new();
+            while now < 4_194_304 {
+                let next = audio.next_event(now);
+                audio.advance(next - now, next);
+                now = next;
+                if now % chunk == 0 {
+                    audio.drain_stereo(&mut output);
+                }
+            }
+            audio.drain_stereo(&mut output);
+            assert!(output.iter().any(|f| f[0] > 0.0));
+            assert!(output.iter().any(|f| f[0] < 0.0));
+            // 64 length ticks at 256 Hz stop the effect; the envelope has
+            // already decayed to zero before this boundary.
+            audio.refresh_controls(&mut io);
+            assert_eq!(io[0x84], 0x80);
+            if !short {
+                assert_eq!(
+                    output[600][0].abs(),
+                    9.0 / 64.0,
+                    "first envelope tick decreases volume"
+                );
+                assert!(output[6144..].iter().all(|f| *f == [0.0; 2]));
+            }
+            if short {
+                // Divider 4, shift 4: 4096 master cycles per LFSR step.
+                // The independent seven-bit polynomial repeats after 127 steps.
+                assert_eq!(&output[8..1008], &output[1024..2024]);
+            }
+            output
+        }
+        for short in [false, true] {
+            assert_eq!(render(512, short), render(8192, short));
+        }
+        let mut audio = Audio::new();
+        audio.write_control(0x84, 0x80);
+        audio.write_control(0x78, 0xf03f);
+        audio.write_control(0x7c, 0xc044);
+        let next = audio.next_sequence;
+        let mut now = 0;
+        while now < next {
+            let edge = audio.next_event(now);
+            audio.advance(edge - now, edge);
+            now = edge;
+        }
+        let mut io = vec![0; 0xa0];
+        audio.refresh_controls(&mut io);
+        assert_eq!(io[0x84], 0x80, "one length tick must expire length 63");
+        audio.write_control(0x7c, 0x8044);
+        audio.write_control(0x78, 0);
+        audio.refresh_controls(&mut io);
+        assert_eq!(io[0x84], 0x80, "DAC disable stops noise immediately");
+        audio.write_control(0x84, 0);
+        audio.write_control(0x78, 0xf000);
+        audio.write_control(0x7c, 0x8044);
+        let mut io = vec![0; 0xa0];
+        audio.refresh_controls(&mut io);
+        assert_eq!(io[0x78], 0, "master-off writes must be ignored");
+        assert_eq!(io[0x7c], 0);
+    }
 
     // Pulse/FIFO tests cannot detect missing wave synthesis or writes reaching
     // the playing bank. Exercise the public register and PCM paths together.

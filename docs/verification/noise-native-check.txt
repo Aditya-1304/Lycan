@@ -1,0 +1,7 @@
+$ cargo check --locked -p gba-app
+    Checking gba-core v0.1.0 (/home/aditya/Projects/GBA/gba-rs/crates/gba-core)
+    Checking gba-session v0.1.0 (/home/aditya/Projects/GBA/gba-rs/crates/gba-session)
+    Checking gba-app v0.1.0 (/home/aditya/Projects/GBA/gba-rs/crates/gba-app)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 0.56s
+
+exit_code=0

@@ -2115,3 +2115,196 @@ Slice 18 is complete against the plan: implementation and automated checks pass,
 and all manual native/Chrome/Brave acceptance checks are user confirmed. The
 reported timing and audio snapshots are recorded above; unavailable environment
 and sustained-speed measurements remain explicitly marked.
+
+## Slice 19: Noise effect and paired timer/FIFO scene events
+
+Implemented and checked against `plan_final.md` section 19 on 2026-10-01.
+Automated native/WASM signal checks and the native device probe pass. The user
+explicitly confirmed that all manual checks work on native Linux, Chrome and
+Brave. Slice 19 is accepted with that user-attributed manual evidence.
+Earlier user-entered millisecond measurements are preserved.
+
+### Implementation and fixture evidence
+
+Channel four now implements seven-/fifteen-stage polynomial noise, divisor/shift
+clocking, trigger, envelope, length, DAC/master disable, readable masks, byte-write
+latches and the PSG activity flag. It participates in the existing event-clocked
+PWM mixer alongside both pulse voices, wave and both Direct Sound FIFOs. Device
+history survives ordinary PCM drains. Noise parameters follow the
+[GBATEK channel-four register specification](https://mgba-emu.github.io/gbatek/#gba-sound-channel-4---noise).
+
+DMA2 now uses the same sound-mode descriptor and independent FIFO request path
+as DMA1. The original `noise.gba` scene primes both FIFOs, keeps all implemented
+voices running, and uses timer 0 at /2048 followed by timer 1 /2, timer 2 /3 and
+timer 3 /4 cascades. Paired red/green square events trigger timed noise and swap
+FIFO A/B timer selection. Z changes the event immediately; X selects seven-bit
+noise; Backspace isolates noise while all device clocks continue.
+
+| Bounded guest evidence | Result |
+| --- | --- |
+| Startup | Skip BIOS with explicit test firmware; no Slice 20 work |
+| ROM bytes / SHA-256 | 772 / `6a66651b77d105b4d1bc646c4dc5bd2df8c881dc8aa51bc3e9a3741a5daa0de0` |
+| Mailbox | ID `0x79`; exact VBlank count; latched input/phase and selected FIFO clocks |
+| Terminal state | HALT, PC within `0x08000198..=0x080001a8` |
+| Frames / cycles / instructions | 1,800 / 505,612,800 / 54,506 |
+| Emulated duration | About 30.137 seconds |
+| Core rate / produced stereo frames | 32,768 Hz / 987,525 |
+| Staging drops / empty FIFO reads | 0 / 0 |
+| Timer cascades | All four counters checked as a mixed-radix clock; all timer IF flags latch |
+| DMA1/DMA2 | Independent repeat refill; both FIFO destinations checked in core regression |
+| Alternate FIFO clocks | Recorded sign-transition spacing swaps 8/16 PCM samples between sides |
+| Noise | Envelope decay, one-tick/full-length expiry, both widths, DAC/master disable and masks checked |
+| Short-mode recorded period | 127 noise edges × 4,096 cycles = 1,016 PCM samples |
+| Scanout | All 38,400 pixels checked at paired-event/control checkpoints |
+| Drain schedules | Exact stereo equality at frame-sized and 997-cycle advances |
+| Host resampler rates | 44,100 / 48,000 / 96,000 Hz; exact counts and whole/137-sample chunk equality |
+| PCM16 stereo WAV SHA-256 | `eae8cd550ab304a0e533d9bde88299a9da717ed71ccee62634b4336dc1712792` |
+
+The WAV is a core signal recording. It does not prove audible host playback or
+absence of audible aliasing. Scripted effects use a 4,096 Hz noise edge clock;
+manual listening is user-confirmed on all three platforms at the reported
+48,000 Hz host rate. Separate live-device runs at 44.1/96 kHz were not recorded.
+No chunk discontinuity or audible aliasing problem was reported, so no unrelated
+resampler or mixer rewrite was made.
+
+One focused noise regression was added and the existing FIFO regression was
+extended to DMA2. RED failed because the noise activity flag was absent and
+DMA2 never supplied PCM; GREEN now checks the real signal and device behavior.
+No artificial failures or redundant per-function tests were added.
+
+### Verification
+
+- PASS: [core/session tests](verification/noise-tests.txt): 20 core tests including the integration test, 9 session tests.
+- PASS: [workspace Clippy, all targets, warnings denied](verification/noise-clippy.txt).
+- PASS: [native app check](verification/noise-native-check.txt) and [WASM app check](verification/noise-wasm-check.txt).
+- PASS: [native and production WASM guest/signal contract](verification/noise-signal.txt), including frozen ROM/WAV identities and supported-rate streaming.
+- PASS: [release web build](verification/noise-web-build.txt).
+- PASS: existing `fixtures run`, including CPU, display, timers/PCM, mixer and Flash diagnostics; existing pulse and wave native/WASM contracts retain their frozen WAV identities.
+- PASS: final scoped diff and whitespace check; no BIOS/startup implementation or unrelated changes.
+
+### Native device probe and manual measurements
+
+The [headless native probe](verification/noise-native-audio.txt) exercises the
+actual session, resampler, CPAL output and sound device for 30 seconds plus two
+seconds of resumed playback. It includes pause/resume, reset and focus
+suspension. It does not open or verify a native window.
+
+The probe's final/max queue was 67.6/72.6 ms, with 1,428,480 host output frames,
+zero underruns/overflows/device errors, and core counters 884,619/0/0
+(produced/staging drops/empty FIFO). These automated probe values are retained
+separately from the user's application snapshots below.
+
+PASS — user confirmed all manual Slice 19 checks on native Linux, Chrome and
+Brave. This includes paired red/green events, fading noise with pulse/wave/PCM
+mixing, Z alternate events, X short-mode noise, Backspace isolation, ordinary
+playback continuity, mute, pause/resume, focus loss/return and reset. The user
+reported that everything works; no audible aliasing, clicks or growing delay
+were reported. Session durations and a measured long-session trend were not
+supplied.
+
+All values below are transcribed from the user's platform snapshots. Each of
+the three timing series contains 120 samples; mean/p95 values are milliseconds.
+
+| Field | Native Linux | Chrome | Brave |
+| --- | --- | --- | --- |
+| Manual scene/listening/lifecycle acceptance | PASS — user confirmed | PASS — user confirmed | PASS — user confirmed |
+| Core execution mean / p95 (ms) | 1.006 / 1.287 | 1.268 / 1.600 | 1.269 / 1.800 |
+| Pixel conversion mean / p95 (ms) | 0.126 / 0.151 | 0.234 / 0.300 | 0.224 / 0.300 |
+| Texture submission mean / p95 (ms) | 0.026 / 0.038 | 0.037 / 0.100 | 0.037 / 0.100 |
+| Samples per timing series | 120 | 120 | 120 |
+| Host sample rate (Hz) | 48000 | 48000 (running) | 48000 (running) |
+| Current audio queue (ms) | 65.9 | 57.8 | 70.6 |
+| Maximum audio queue (ms) | 71.2 | 70.9 | 74.8 |
+| Audio queue capacity (ms) | 80 | 80 | 80 |
+| Host underrun frames | 0 | 0 | 30 |
+| Host overflow frames | 0 | 0 | 0 |
+| Host output frames | 1142784 | 1437184 | 2640354 |
+| Native device errors | 0 | Not applicable | Not applicable |
+| Core PCM rate (Hz) | 32768 | 32768 | 32768 |
+| Produced core PCM frames | 442913 | 1055018 | 1861656 |
+| Core staging drops / empty FIFO | 0 / 0 | 0 / 0 | 0 / 0 |
+| Executed instructions | 24422 | Not recorded | 106478 |
+| GBA cycles | 226771912 | Not recorded | 953168025 |
+| Execution state | Running | Not recorded | Running |
+| Backup selection / detection / override | None / Unknown / None | None / Unknown / None | None / Unknown / None |
+| Output device name | Not recorded | Not recorded | Not recorded |
+| Browser version | Not applicable | Not recorded | Not recorded |
+| Sustained unthrottled speed | Not measured | Not measured | Not measured |
+| 30-minute queue/memory/latency measurement | Not measured | Not measured | Not measured |
+
+All three reported core p95 values are below the plan's 12 ms target. Current
+and maximum queue depths are within the planned 40–80 ms range. Brave has 30
+host underrun frames; that counter is preserved even though the user confirmed
+working playback. All host overflow, core staging-drop and empty-FIFO counters
+are zero. These snapshots are not described as zero-loss Brave playback.
+
+Capture durations, starting counters and lifecycle histories were not supplied,
+so cumulative host output/underrun counters are not compared as rates or directly
+against produced core frames. Manual acceptance is attributed to the user's
+explicit confirmation; the snapshots alone do not establish a measured
+30-minute latency/memory trend, physical playback latency, or sustained
+unthrottled speed. Browser versions, output device names and separate live
+44.1/96 kHz results remain unavailable. Reference hardware metadata at the top
+of this document was not refreshed for these measurements. All earlier slice
+measurements and the separate native probe evidence are preserved.
+
+The supplied UI also showed the noise-scene status and its Z/X/Backspace help,
+the all-channel mixing/Enable audio guidance, and unresolved-backup guidance.
+Backup state is recorded above. The generic Load ROM/drop-file prompt and
+arrow-key demo hint were visible in the native and Brave snapshots; these
+interface messages are not additional Slice 19 measurements.
+
+### Manual commands and acceptance
+
+All manual checks are user-confirmed; these commands are retained for reproduction.
+
+Native scene:
+
+```bash
+cd /home/aditya/Projects/GBA/gba-rs
+cargo run --locked -p gba-app --release
+```
+
+Chrome/Brave server:
+
+```bash
+cd /home/aditya/Projects/GBA/gba-rs
+env -u NO_COLOR trunk --config web/Trunk.toml serve --release --address 127.0.0.1 --port 8080
+```
+
+Open `http://127.0.0.1:8080` in each browser. Click **Load noise scene**, then
+**Enable audio**. Confirm the red/green square events have fading noise bursts
+while pulse/wave/PCM continue. Press/release Z for an immediate alternate event,
+X for short-mode noise and Backspace to isolate noise. Listen for chunk-boundary
+clicks, unwanted aliasing, or accumulating delay. Check mute, pause/resume,
+focus loss/return and reset. Run sustained mixing for 30 minutes, record starting
+and ending queue/counter values, and supply app mean/p95 millisecond readings,
+sample counts, browser version and device rate/name. Where available, repeat at
+44.1/48/96 kHz; headless resampler proof alone does not imply live-device acceptance.
+
+Recorded-signal and device reproduction:
+
+```bash
+cd /home/aditya/Projects/GBA/gba-rs
+python3 roms/noise/build.py
+python3 roms/noise/verify.py
+cargo run --locked -p gba-tools --release -- verify-noise --capture /tmp/noise.wav
+cargo run --locked -p gba-app --release -- --audio-probe noise
+```
+
+### Plan acceptance checklist
+
+- [x] A visible scene event triggers noise with generation, envelope and length behavior.
+- [x] Paired events exercise all four timer cascades, both FIFOs, DMA1/DMA2 refill and alternate timer selection.
+- [x] Native/WASM recorded timing and sustained mixed signal pass at supported resampler rates without chunk discontinuities.
+- [x] Actual native-device bounded playback probe passes with zero loss/error counters.
+- [x] Manual native/Chrome/Brave scene, sound and lifecycle acceptance — user confirmed.
+- [x] Manual mixed-playback continuity and latency acceptance at the reported 48 kHz rate — user confirmed; no audible aliasing/discontinuity reported.
+
+Separate live 44.1/96 kHz runs and quantitative 30-minute measurements were not
+recorded; automated resampler checks at all three rates remain passing.
+
+Slice 19 is complete against the plan with automated checks passing and manual
+native/Chrome/Brave acceptance explicitly confirmed by the user. Supplied
+performance/audio snapshots are recorded above; unavailable measurements remain
+marked as such.

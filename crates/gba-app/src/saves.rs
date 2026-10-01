@@ -1,7 +1,7 @@
 //! Platform storage boundary. The app dispatches at most one operation at a time;
 //! every completion carries ROM identity, session generation and snapshot revision.
 
-use gba_session::{EEPROM512_BYTES, EEPROM8K_BYTES, FLASH64_BYTES, FLASH128_BYTES, SRAM_BYTES};
+use gba_session::{EEPROM8K_BYTES, EEPROM512_BYTES, FLASH64_BYTES, FLASH128_BYTES, SRAM_BYTES};
 use sha2::{Digest, Sha256};
 use std::sync::mpsc::{self, Receiver, Sender};
 

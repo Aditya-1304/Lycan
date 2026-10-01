@@ -1,0 +1,6 @@
+$ cargo clippy --locked --workspace --all-targets -- -D warnings
+    Checking gba-app v0.1.0 (/home/aditya/Projects/GBA/gba-rs/crates/gba-app)
+    Checking gba-tools v0.1.0 (/home/aditya/Projects/GBA/gba-rs/crates/gba-tools)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 0.46s
+
+exit_code=0

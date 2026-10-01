@@ -1,0 +1,35 @@
+$ cargo run --locked -p gba-app --release -- --audio-probe noise
+AUDIO phase=1 48000 Hz | queue 60.5 ms (max 63.5, cap 80) | underrun frames 0 | overflow frames 0 | output frames 45056 | device errors 0
+AUDIO phase=2 48000 Hz | queue 56.9 ms (max 63.7, cap 80) | underrun frames 0 | overflow frames 0 | output frames 93184 | device errors 0
+AUDIO phase=3 48000 Hz | queue 0.0 ms (max 63.7, cap 80) | underrun frames 0 | overflow frames 0 | output frames 93184 | device errors 0
+AUDIO phase=4 48000 Hz | queue 49.4 ms (max 63.7, cap 80) | underrun frames 0 | overflow frames 0 | output frames 138752 | device errors 0
+AUDIO phase=5 48000 Hz | queue 59.5 ms (max 63.7, cap 80) | underrun frames 0 | overflow frames 0 | output frames 183808 | device errors 0
+AUDIO phase=6 48000 Hz | queue 0.0 ms (max 63.7, cap 80) | underrun frames 0 | overflow frames 0 | output frames 183808 | device errors 0
+AUDIO phase=7 48000 Hz | queue 57.7 ms (max 68.1, cap 80) | underrun frames 0 | overflow frames 0 | output frames 228864 | device errors 0
+AUDIO phase=8 48000 Hz | queue 66.1 ms (max 68.2, cap 80) | underrun frames 0 | overflow frames 0 | output frames 276480 | device errors 0
+AUDIO phase=9 48000 Hz | queue 63.7 ms (max 68.4, cap 80) | underrun frames 0 | overflow frames 0 | output frames 324608 | device errors 0
+AUDIO phase=10 48000 Hz | queue 61.0 ms (max 68.5, cap 80) | underrun frames 0 | overflow frames 0 | output frames 372736 | device errors 0
+AUDIO phase=11 48000 Hz | queue 58.8 ms (max 69.0, cap 80) | underrun frames 0 | overflow frames 0 | output frames 420864 | device errors 0
+AUDIO phase=12 48000 Hz | queue 56.7 ms (max 69.1, cap 80) | underrun frames 0 | overflow frames 0 | output frames 468992 | device errors 0
+AUDIO phase=13 48000 Hz | queue 63.5 ms (max 69.1, cap 80) | underrun frames 0 | overflow frames 0 | output frames 516608 | device errors 0
+AUDIO phase=14 48000 Hz | queue 59.9 ms (max 69.5, cap 80) | underrun frames 0 | overflow frames 0 | output frames 564736 | device errors 0
+AUDIO phase=15 48000 Hz | queue 59.4 ms (max 69.6, cap 80) | underrun frames 0 | overflow frames 0 | output frames 612864 | device errors 0
+AUDIO phase=16 48000 Hz | queue 67.3 ms (max 69.8, cap 80) | underrun frames 0 | overflow frames 0 | output frames 660480 | device errors 0
+AUDIO phase=17 48000 Hz | queue 64.5 ms (max 69.8, cap 80) | underrun frames 0 | overflow frames 0 | output frames 708608 | device errors 0
+AUDIO phase=18 48000 Hz | queue 60.4 ms (max 70.2, cap 80) | underrun frames 0 | overflow frames 0 | output frames 756736 | device errors 0
+AUDIO phase=19 48000 Hz | queue 58.1 ms (max 70.4, cap 80) | underrun frames 0 | overflow frames 0 | output frames 804864 | device errors 0
+AUDIO phase=20 48000 Hz | queue 66.0 ms (max 70.4, cap 80) | underrun frames 0 | overflow frames 0 | output frames 852480 | device errors 0
+AUDIO phase=21 48000 Hz | queue 64.3 ms (max 70.9, cap 80) | underrun frames 0 | overflow frames 0 | output frames 900608 | device errors 0
+AUDIO phase=22 48000 Hz | queue 61.9 ms (max 71.0, cap 80) | underrun frames 0 | overflow frames 0 | output frames 948736 | device errors 0
+AUDIO phase=23 48000 Hz | queue 68.2 ms (max 71.0, cap 80) | underrun frames 0 | overflow frames 0 | output frames 996352 | device errors 0
+AUDIO phase=24 48000 Hz | queue 66.2 ms (max 71.4, cap 80) | underrun frames 0 | overflow frames 0 | output frames 1044480 | device errors 0
+AUDIO phase=25 48000 Hz | queue 62.8 ms (max 71.4, cap 80) | underrun frames 0 | overflow frames 0 | output frames 1092608 | device errors 0
+AUDIO phase=26 48000 Hz | queue 61.9 ms (max 71.6, cap 80) | underrun frames 0 | overflow frames 0 | output frames 1140736 | device errors 0
+AUDIO phase=27 48000 Hz | queue 59.2 ms (max 72.0, cap 80) | underrun frames 0 | overflow frames 0 | output frames 1188864 | device errors 0
+AUDIO phase=28 48000 Hz | queue 66.9 ms (max 72.0, cap 80) | underrun frames 0 | overflow frames 0 | output frames 1236480 | device errors 0
+AUDIO phase=29 48000 Hz | queue 63.4 ms (max 72.3, cap 80) | underrun frames 0 | overflow frames 0 | output frames 1284608 | device errors 0
+AUDIO resumed 48000 Hz | queue 67.6 ms (max 72.6, cap 80) | underrun frames 0 | overflow frames 0 | output frames 1428480 | device errors 0
+AUDIO core_counters=(884619, 0, 0)
+
+exit_code=0
+
