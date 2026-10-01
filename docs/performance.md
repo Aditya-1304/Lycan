@@ -1806,3 +1806,154 @@ Slice 16 is complete against the plan: automated checks pass and the user
 confirmed all manual platform acceptance checks for both EEPROM sizes.
 Unsupplied measurements/environment fields remain explicitly unavailable.
 No Slice 17 implementation was included.
+
+## Slice 17 — Pulse melody (2026-10-01)
+
+Implementation, automated plan checks and user-performed native/Chrome/Brave
+acceptance pass. The user explicitly confirmed all manual checks complete and
+supplied the runtime snapshots and timings below. Earlier slice records are preserved.
+
+### Implementation and acceptance evidence
+
+Both pulse voices run on the master clock, with eight-step duty oscillators,
+length counters and 64 Hz envelopes. Channel 1 adds 128 Hz sweep scheduling,
+frequency-overflow shutdown and trigger state. The 512 Hz sequencer and duty
+edges participate in the existing hardware event scheduler. PSG routing and
+volume are mixed with Direct Sound before DAC saturation/PWM sampling. PCM
+output drains preserve oscillator, envelope, sweep, PWM and resampler history.
+Master disable clears PSG state while preserving the Direct Sound devices.
+Byte writes merge against writable pulse latches, retaining write-only frequency
+bits when the high trigger byte is written.
+
+The original `roms/pulse.gba` scene changes notes every 32 VBlanks and shows a
+red/green/blue/white square. The lead plays on the right and the accompaniment
+on the left. Z adds the existing FIFO/DMA PCM tone to both sides. The app exposes
+**Load pulse melody**, source note values and the control legend.
+
+| Evidence | Result |
+|---|---|
+| ROM identity / size | `be3429a0ec75d688765fce04cae070df3369367fb2f8f685815dcd5d1b4f1eed` / 756 bytes |
+| Startup | Skip BIOS; explicit existing test firmware enabled in app and contract |
+| Guest completion | Mailbox `0x03000000 = 0x77`; 184 VBlanks; HALT in declared `0x080000fc..=0x0800010c` range |
+| Bounded run | 51,684,864 cycles; 7,810 instructions (budget below 500,000) |
+| Recorded signal | 100,947 stereo frames at 32,768 Hz; zero staging drops and FIFO underruns |
+| PCM16 WAV SHA-256 | `7edf6d0743f84a87166ac13322b2337bde407009965e44dd5829579db3fa641e` |
+| Lead source frequencies | 1536 / 1642 / 1707 / 1792: 256 / approximately 322.8 / 384.4 / 512 Hz |
+| Second voice source frequencies | 1024 / 1236 / 1366 / 1536: 128 / approximately 161.4 / 192.2 / 256 Hz |
+| Note timing / scanout | Exact mailbox/VBlank counts, note latches, both measured signal periods and all 38,400 pixels checked at frames 4/36/68/100 |
+| Scripted controls | Recorded decreasing sweep, 25% duty and fading envelope; master silence and release/retrigger status checked |
+| Chunk invariance | Exact sample equality for 280,896-cycle and 997-cycle execution/drain chunks |
+| Resampler history | Exact whole/137-sample chunk equality for both voices at 44,100 / 48,000 / 96,000 Hz |
+| Native / WASM signal contracts | PASS, same production core and guest contract |
+| Focused RED → GREEN | One new test failed because pulse voices were absent; passes with independent routing, FIFO mixing, two sweep/envelope steps and identical drain schedules |
+| Regression gates | Core/session tests, complete existing fixture suite, workspace Clippy with warnings denied, native/WASM app checks, release Trunk build: PASS |
+| Environment | Linux 7.2.7-arch1-1; Rust/Cargo 1.98.1; browser versions not recorded |
+
+Evidence: [ROM rebuild](verification/pulse-build.txt),
+[native/WASM guest and signal contract](verification/pulse-contract.txt),
+[core/session tests](verification/pulse-tests.txt),
+[Clippy](verification/pulse-clippy.txt),
+[native app check](verification/pulse-app-native.txt),
+[WASM app check](verification/pulse-app-wasm.txt),
+[existing fixtures](verification/pulse-fixtures.txt), and
+[release web build](verification/pulse-web-build.txt).
+The retained [fixture manifest](../roms/pulse/manifest.toml) freezes identity,
+startup, completion bounds, frequencies and recording identity. Recreate a WAV
+with the command below; `/tmp/pulse.wav` is temporary, not retained evidence.
+
+### Timing and manual acceptance fields
+
+| Field | Linux | Chrome | Brave |
+|---|---|---|---|
+| Core frame mean / p95 (ms) | 0.852 / 1.096 | 1.375 / 1.900 | 1.326 / 1.800 |
+| Pixel conversion mean / p95 (ms) | 0.118 / 0.149 | 0.271 / 0.400 | 0.261 / 0.400 |
+| Texture submission mean / p95 (ms) | 0.024 / 0.030 | 0.046 / 0.100 | 0.040 / 0.100 |
+| Samples core / conversion / submission | 120 / 120 / 120 | 120 / 120 / 120 | 120 / 120 / 120 |
+| Sustained unthrottled speed | Not measured | Not measured | Not measured |
+| Audible two-voice tune alongside PCM | PASS, user confirmed | PASS, user confirmed | PASS, user confirmed |
+| Duty, envelope, sweep, disable/reset controls | PASS, user confirmed | PASS, user confirmed | PASS, user confirmed |
+| Audible chunk continuity / pause-resume and focus loss/return | PASS, user confirmed | PASS, user confirmed | PASS, user confirmed |
+| Browser version / output device / sample rate | Not applicable / not recorded / 48,000 Hz | Not recorded / not recorded / 48,000 Hz | Not recorded / not recorded / 48,000 Hz |
+
+### User-supplied runtime snapshots
+
+| Field | Linux native | Chrome | Brave |
+|---|---|---|---|
+| Scene | Pulse melody | Pulse melody | Pulse melody |
+| Host output rate / state | 48,000 Hz; output active | 48,000 Hz; running | 48,000 Hz; running |
+| Audio queue current / maximum / cap (ms) | 74.1 / 78.5 / 80 | 68.2 / 80.0 / 80 | 69.1 / 80.0 / 80 |
+| Host underrun frames | 0 | 25 | 51 |
+| Host overflow frames | 0 | 2,894 | 1,961 |
+| Host output frames | 1,192,448 | 7,094,503 | 1,457,357 |
+| Device errors | 0 | Not recorded | Not recorded |
+| Core PCM rate | 32,768 Hz | 32,768 Hz | 32,768 Hz |
+| Produced core PCM samples | 758,101 | 4,915,508 | 389,218 |
+| Core staging drops / empty FIFO | 0 / 0 | 0 / 0 | 0 / 0 |
+| Pulse source notes: lead / second | 1792 / 1536 | 1792 / 1536 | 1707 / 1366 |
+| Instructions | 55,701 | Not recorded | Not recorded |
+| GBA cycles | 388,147,895 | Not recorded | Not recorded |
+| Execution state | Running | Not recorded | Not recorded |
+| Backup selection / detection / override | None / Unknown / None | None / Unknown / None | None / Unknown / None |
+
+Manual acceptance is based on the user's explicit confirmation that every check
+was performed on all three platforms. The snapshots record nonzero browser host
+underrun/overflow counters; those values are preserved and are not described as
+zero-loss playback. Core staging drops and empty FIFO counts are zero on all
+three platforms. The snapshots have different run durations and lifecycle
+histories, so cumulative counts are not treated as directly comparable rates.
+Browser versions, output device names, elapsed capture durations and sustained
+unthrottled speed were not supplied and remain unavailable.
+
+### Manual commands
+
+PASS: all manual checks are user confirmed. Commands and checks below are
+retained for reproducing acceptance.
+
+Native app:
+
+```bash
+cd /home/aditya/Projects/GBA/gba-rs
+cargo run --locked -p gba-app --release
+```
+
+Chrome/Brave server:
+
+```bash
+cd /home/aditya/Projects/GBA/gba-rs
+env -u NO_COLOR trunk --config web/Trunk.toml serve --release --address 127.0.0.1 --port 8080
+```
+
+Open `http://127.0.0.1:8080` in each browser. Click **Load pulse melody**, then
+**Enable audio**. Use headphones to distinguish lead right and second voice
+left. Confirm repeating red/green/blue/white note changes and a steady tune.
+Hold Z to add PCM without disrupting the melody. While holding Z, exercise X
+(sweep), Backspace (25% duty), Up (fade) and Down (mute), one at a time. Release
+each control to restart the voices. Confirm no unexpected clicks at ordinary
+output chunks, and stable behavior through pause/resume and focus loss/return.
+Record millisecond timings, browser version, output device and host sample rate
+when available; report manual acceptance separately from those measurements.
+
+Optional recorded-signal reproduction:
+
+```bash
+cd /home/aditya/Projects/GBA/gba-rs
+python3 roms/pulse/build.py
+python3 roms/pulse/verify.py
+cargo run --locked -p gba-tools --release -- verify-pulse --capture /tmp/pulse.wav
+```
+
+### Plan acceptance checklist
+
+- [x] Both pulse channels play a melody and second voice through an original guest scene.
+- [x] Duty/envelope, enable/retrigger and channel-1 sweep have visible app controls and scripted signal checks.
+- [x] Note timing and recorded frequency changes checked independently from synthesis.
+- [x] Pulse synthesis stays correct alongside the existing FIFO PCM signal.
+- [x] Synthesis and production resampler history preserved across output chunks.
+- [x] Existing regression/build gates pass; performance evidence updated with user-supplied timings.
+- [x] User-performed audible native acceptance (user confirmed).
+- [x] User-performed Chrome and Brave audible/control acceptance (user confirmed).
+
+Slice 17 is complete against the plan: automated checks pass and the user
+confirmed all manual native, Chrome and Brave checks. Unreported environment
+and sustained-speed fields remain explicitly unavailable. No wave-channel or
+noise-channel implementation is included.

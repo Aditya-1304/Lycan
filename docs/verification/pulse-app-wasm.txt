@@ -1,0 +1,5 @@
+    Blocking waiting for file lock on build directory
+    Checking gba-core v0.1.0 (/home/aditya/Projects/GBA/gba-rs/crates/gba-core)
+    Checking gba-session v0.1.0 (/home/aditya/Projects/GBA/gba-rs/crates/gba-session)
+    Checking gba-app v0.1.0 (/home/aditya/Projects/GBA/gba-rs/crates/gba-app)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 4.92s

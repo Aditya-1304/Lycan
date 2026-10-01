@@ -70,7 +70,8 @@ const KEYPAD_AND_ROM: &[u8] = include_bytes!("../../../roms/keypad-and.gba");
 /// The same logical input deadlines are used by the bounded headless runner.
 const KEYPAD_INPUT: &[(Cycle, Button, bool)] = &include!("../../../roms/keypad/input.rs");
 const VBLANK_ROM: &[u8] = include_bytes!("../../../roms/vblank.gba");
-/// Original DMA tile scene; firmware is mapped only for these recognized bytes.
+/// Original two-voice pulse scene, using the same explicit firmware as PCM.
+const PULSE_ROM: &[u8] = include_bytes!("../../../roms/pulse.gba");
 const PCM_ROM: &[u8] = include_bytes!("../../../roms/pcm.gba");
 const PCM_INPUT: &[(Cycle, Button, bool)] = &include!("../../../roms/pcm/input.rs");
 
@@ -296,6 +297,7 @@ impl GbaApp {
                     || bytes == IRQ_SPRITES_ROM
                     || bytes == DMA_ROM
                     || bytes == PCM_ROM
+                    || bytes == PULSE_ROM
                 {
                     self.session.enable_test_firmware();
                 }
@@ -612,6 +614,10 @@ impl GbaApp {
                 self.load_rom_bytes("sram.gba", SRAM_ROM);
                 ui.ctx().request_repaint();
             }
+            if ui.button("Load pulse melody").clicked() {
+                self.load_rom_bytes("pulse.gba", PULSE_ROM);
+                self.status = "Pulse melody: Z adds PCM; X sweeps; Select changes duty; Up fades; Down mutes; release resets".to_owned();
+            }
             if ui.button("Load PCM scene").clicked() {
                 self.load_rom_bytes("pcm.gba", PCM_ROM);
                 self.status = "PCM: hold Z for a green square and tone; release for red and silence".to_owned();
@@ -792,6 +798,14 @@ impl GbaApp {
         ui.label(self.audio.status());
         let (produced, dropped, empty) = self.session.pcm_counters();
         ui.label(format!("Core PCM: 32768 Hz | produced {produced} | staging drops {dropped} | empty FIFO {empty}"));
+        if self.rom_name == "pulse.gba" {
+            let lead = self.session.inspect16(0x0300000a).unwrap_or(0);
+            let second = self.session.inspect16(0x0300000c).unwrap_or(0);
+            ui.label(format!(
+                "Pulse source notes: lead {lead}, second {second}; square color follows each note"
+            ));
+            ui.label("Z: PCM | X: sweep | Backspace: duty | Up: envelope | Down: mute | Release: restart");
+        }
         if self.rom_name == "pcm.gba" {
             ui.label("Mixer while holding Z: Left/Right = route, Down = sound off, Backspace = half volume, Up = bias/PWM, X = FIFO reset");
         }

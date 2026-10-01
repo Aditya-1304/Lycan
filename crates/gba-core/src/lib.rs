@@ -10,6 +10,7 @@ pub use flash::{FLASH64_BYTES, FLASH128_BYTES};
 pub use sram::{SRAM_BYTES, SaveImage};
 
 mod audio;
+mod pulse;
 pub use audio::PCM_RATE;
 
 use std::collections::VecDeque;
@@ -1770,7 +1771,10 @@ impl System {
                 self.audio.refresh_timers(&mut self.io);
                 return Ok(());
             }
-            if matches!(offset, 0x80 | 0x82 | 0x84 | 0x88) {
+            if matches!(
+                offset,
+                0x60 | 0x62 | 0x64 | 0x68 | 0x6c | 0x80 | 0x82 | 0x84 | 0x88
+            ) {
                 self.audio.write_control(offset, value);
                 if offset == 0x84 && value & 0x80 == 0 {
                     self.io[0x60..0x82].fill(0);
@@ -2047,7 +2051,9 @@ impl CpuBus for System {
             } else {
                 let aligned = offset & !1;
                 let shift = (offset & 1) * 8;
-                let old = u16::from_le_bytes([self.io[aligned], self.io[aligned + 1]]);
+                let old = self.audio.pulse_latch(aligned).unwrap_or_else(|| {
+                    u16::from_le_bytes([self.io[aligned], self.io[aligned + 1]])
+                });
                 let merged = if aligned == 0x202 {
                     u16::from(value) << shift
                 } else {

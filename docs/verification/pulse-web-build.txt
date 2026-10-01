@@ -1,0 +1,6 @@
+2026-10-01T07:31:11.199448Z  INFO 🚀 Starting trunk 0.21.14
+2026-10-01T07:31:11.199984Z  INFO 📦 starting build
+   Compiling gba-app v0.1.0 (/home/aditya/Projects/GBA/gba-rs/crates/gba-app)
+    Finished `release` profile [optimized] target(s) in 27.36s
+2026-10-01T07:31:48.928556Z  INFO applying new distribution
+2026-10-01T07:31:48.930103Z  INFO ✅ success
