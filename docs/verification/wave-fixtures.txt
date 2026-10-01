@@ -1,0 +1,105 @@
+    Finished `release` profile [optimized] target(s) in 0.08s
+     Running `target/release/gba-tools fixtures run`
+PASS counter frame=1 count=1 image_count=0 return=ARM pixels=38400
+PASS counter frame=3 count=3 image_count=2 return=ARM pixels=38400
+PASS counter frame=5 count=3 image_count=3 return=ARM pixels=38400
+PASS counter frame=7 count=5 image_count=4 return=ARM pixels=38400
+PASS counter frame=8 count=5 image_count=5 return=ARM pixels=38400
+PASS counter frame=24 count=16 image_count=16 return=ARM pixels=38400
+PASS counter cycles=6741508 instructions=668215
+PASS pixels pixels=38400 terminal=0x08000200 cycles=1905956 generation=7 execution_ms=12.864
+PASS pixels guest-store mutation changed the first band
+PASS buttons frame=1 guest=(113,72) scanout=(112,72) pixels=38400
+PASS buttons frame=3 guest=(115,72) scanout=(114,72) pixels=38400
+PASS buttons frame=5 guest=(115,74) scanout=(115,73) pixels=38400
+PASS buttons frame=8 guest=(114,73) scanout=(114,74) pixels=38400
+PASS buttons frame=9 guest=(114,73) scanout=(114,73) pixels=38400
+PASS palette frame=4 page=0 palette_changed=0 pixels=38400
+PASS palette frame=6 page=1 palette_changed=0 pixels=38400
+PASS palette frame=8 page=1 palette_changed=1 pixels=38400
+PASS hello terminal=0x08000160 cycles=561807 framebuffer_sha256=56cd131fb3915fe7e410be228a8c09e99132064799f148583636ca75745bedf7
+PASS calculations mailbox id=0x005d result=1 first_failing_case=0
+PASS calculations pixels=38400 terminal=0x08001000 cycles=1907495 generation=7 execution_ms=12.827
+PASS copy pixels=38400 terminal=0x0800a000 cycles=1687892 generation=6 execution_ms=11.537
+PASS timing WS0 width=32 WAITCNT=0x0000 cycles=121
+PASS timing WS0 width=16 WAITCNT=0x0000 cycles=88
+PASS timing WS1 width=32 WAITCNT=0x0000 cycles=155
+PASS timing WS1 width=16 WAITCNT=0x0000 cycles=100
+PASS timing WS2 width=32 WAITCNT=0x0000 cycles=223
+PASS timing WS2 width=16 WAITCNT=0x0000 cycles=124
+PASS timing WS0 width=32 WAITCNT=0x06da cycles=88
+PASS timing WS0 width=16 WAITCNT=0x06da cycles=66
+PASS timing WS1 width=32 WAITCNT=0x06da cycles=88
+PASS timing WS1 width=16 WAITCNT=0x06da cycles=66
+PASS timing WS2 width=32 WAITCNT=0x06da cycles=88
+PASS timing WS2 width=16 WAITCNT=0x06da cycles=66
+PASS timing WS0 width=32 WAITCNT=0x4000 cycles=85
+PASS timing WS0 width=16 WAITCNT=0x4000 cycles=64
+PASS timing WS1 width=32 WAITCNT=0x4000 cycles=127
+PASS timing WS1 width=16 WAITCNT=0x4000 cycles=72
+PASS timing WS2 width=32 WAITCNT=0x4000 cycles=211
+PASS timing WS2 width=16 WAITCNT=0x4000 cycles=112
+PASS timing WS0 width=32 WAITCNT=0x46da cycles=60
+PASS timing WS0 width=16 WAITCNT=0x46da cycles=54
+PASS timing WS1 width=32 WAITCNT=0x46da cycles=60
+PASS timing WS1 width=16 WAITCNT=0x46da cycles=54
+PASS timing WS2 width=32 WAITCNT=0x46da cycles=60
+PASS timing WS2 width=16 WAITCNT=0x46da cycles=54
+PASS arm terminal=0x08001ec4 r12=0 cpsr=0x6000001f cycles=244803 instructions=22887 completion_ms=2.084
+PASS thumb terminal=0x08000aac r7=0 cpsr=0x600000df cycles=244771 instructions=22944 completion_ms=2.023
+PASS services terminal=0x08000400 r12=0 cpsr=0x600000df cycles=1513 instructions=529 completion_ms=0.155
+tiled initialization cycles=416681
+PASS tiled frame=10 scroll=(510,510) image=(510,510) pixels=38400
+PASS tiled frame=11 scroll=(0,510) image=(510,510) pixels=38400
+PASS tiled frame=13 scroll=(4,510) image=(2,510) pixels=38400
+PASS tiled frame=15 scroll=(4,2) image=(4,0) pixels=38400
+PASS tiled frame=18 scroll=(2,0) image=(2,2) pixels=38400
+PASS tiled frame=19 scroll=(2,0) image=(2,0) pixels=38400
+PASS tiled cycles=5337027 instructions=467886
+PASS stripes terminal=0x08000140 cycles=561808 pixels=38400
+PASS memory terminal=0x080004c8 r12=0 cpsr=0x600000df cycles=244787 instructions=22539 completion_ms=2.136
+sprites initialization cycles=425827
+PASS sprites frame=10 player=(112,72) image=(112,72) priority=0/0 mapping_1d=true/true pixels=38400
+PASS sprites frame=13 player=(118,72) image=(116,72) priority=0/0 mapping_1d=true/true pixels=38400
+PASS sprites frame=15 player=(118,76) image=(118,74) priority=1/1 mapping_1d=true/true pixels=38400
+PASS sprites frame=18 player=(116,74) image=(116,76) priority=0/0 mapping_1d=false/false pixels=38400
+PASS sprites frame=20 player=(116,74) image=(116,74) priority=0/0 mapping_1d=true/true pixels=38400
+PASS sprites cycles=5617935 instructions=491556
+PASS vblank configuration=6 wakes=0 expected-stall
+PASS vblank configuration=5 wakes=8 masked-delivery
+PASS vblank configuration=3 wakes=8 masked-delivery
+PASS vblank configuration=15 wakes=8 Thumb-exception-return
+PASS vblank frames=8 cycles=2247168 instructions=274 mapped-vector-required
+sprites initialization cycles=425957
+PASS sprites frame=10 player=(112,72) image=(112,72) priority=0/0 mapping_1d=true/true pixels=38400
+PASS sprites frame=13 player=(118,72) image=(116,72) priority=0/0 mapping_1d=true/true pixels=38400
+PASS sprites frame=15 player=(118,76) image=(118,74) priority=1/1 mapping_1d=true/true pixels=38400
+PASS sprites frame=18 player=(116,74) image=(116,76) priority=0/0 mapping_1d=false/false pixels=38400
+PASS sprites frame=20 player=(116,74) image=(116,74) priority=0/0 mapping_1d=true/true pixels=38400
+PASS sprites cycles=5617920 instructions=59833
+PASS keypad-or wake_cycle=20000 IF=0x1000 callbacks=1 cycles=561792 instructions=56 acknowledgement=0 halted=true
+PASS keypad-and wake_cycle=30000 IF=0x1000 callbacks=1 cycles=561792 instructions=56 acknowledgement=0 halted=true
+PASS dma frame=4 tile=0x1111 color=0x001f vblank=3 completions=2 pixels=38400
+PASS dma frame=6 tile=0x2222 color=0x001f vblank=5 completions=4 pixels=38400
+PASS dma frame=7 tile=0x2222 color=0x03e0 vblank=6 completions=5 pixels=38400
+PASS dma frame=9 tile=0x1111 color=0x03e0 vblank=8 completions=7 pixels=38400
+PASS dma frame=10 tile=0x1111 color=0x001f vblank=9 completions=8 pixels=38400
+PASS dma setup_cycles=221638 cycles=2808960 instructions=402
+PASS pcm frame=4 samples=549 sha256=c936ab1da7ef4314182c8edabaeae90f8d51ed45bc48848d35670adf5b470d31 square=0x001f transitions=0 pixels=38400
+PASS pcm frame=6 samples=548 sha256=b02b7e2e8368750e561445dd001edf603bd7b9af8428390c9945a9476681b822 square=0x03e0 transitions=1 pixels=38400
+PASS pcm frame=7 samples=549 sha256=57bd1145de283c37af2cf66bf565e001fc17767463bb549d1733ef0f7f67b903 square=0x03e0 transitions=1 pixels=38400
+PASS pcm frame=9 samples=548 sha256=73f10e16a57e80fcd212b6629685e2e19a1d19bf13d34dda6c866b528b098684 square=0x001f transitions=2 pixels=38400
+PASS pcm frame=10 samples=549 sha256=c936ab1da7ef4314182c8edabaeae90f8d51ed45bc48848d35670adf5b470d31 square=0x001f transitions=2 pixels=38400
+PASS pcm setup_cycles=997 cycles=2808960 instructions=571 produced=5486 dropped=0 fifo_underruns=0 rate=32768
+PASS mixer frame=12 samples=549 sha256=ab1bdbaa250b0b0c29cab6ee05dd485bbb32ace3d2f5c55805b4e0ec03984ed3 control_h=0x0304 master=0x80 bias=0x0200
+PASS mixer frame=14 samples=548 sha256=1d17b23de2b859038d0d24e3dd859b6a0afd792bc2f73afd4d45f772fae0962c control_h=0x0204 master=0x80 bias=0x0200
+PASS mixer frame=16 samples=549 sha256=71fe9a2898b6a75976b5145c66dcd3b328c7f589b6f1104d32f2cc3319b64ac2 control_h=0x0104 master=0x80 bias=0x0200
+PASS mixer frame=18 samples=549 sha256=47585db1c41fc8970c838bf60827198974f8bed7ae1958e222b6debe66d5e0c1 control_h=0x0304 master=0x00 bias=0x0200
+PASS mixer frame=20 samples=549 sha256=2e971d144fc028d3666c10feb864519037b0fc70f63e2d87709985f0712bcc17 control_h=0x0304 master=0x80 bias=0x0200
+PASS mixer frame=22 samples=548 sha256=4f105a8df78053e4e1f3aeee86b394a7a6e960a830f4196f4cac02569e975522 control_h=0x0300 master=0x80 bias=0x0200
+PASS mixer frame=24 samples=549 sha256=7b69d7c4a448056bcb524d0f5d97ced61765138c94d568d23577652f52925ae4 control_h=0x0304 master=0x80 bias=0xc240
+PASS mixer frame=26 samples=549 sha256=11db43986e80ab2e5852966aecc7c995227c258bca10c142fd9d8a8f1a83ca4a control_h=0x0304 master=0x80 bias=0x0200
+PASS mixer frame=28 samples=549 sha256=216050410791b4138eb80335b20c2903c4eae779253bed66b99f1b216ad904fa control_h=0x0304 master=0x80 bias=0x0200
+PASS mixer cycles=7865088 instructions=1399 produced=15361 dropped=0 fifo_underruns=2
+PASS flash64 terminal=0x08000ac8 r12=0 cpsr=0x600000df cycles=20750192 instructions=1760344 completion_ms=181.866
+PASS flash128 terminal=0x08000c4c r12=0 cpsr=0x600000df cycles=20750196 instructions=1760348 completion_ms=184.008

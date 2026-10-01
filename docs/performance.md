@@ -1957,3 +1957,161 @@ Slice 17 is complete against the plan: automated checks pass and the user
 confirmed all manual native, Chrome and Brave checks. Unreported environment
 and sustained-speed fields remain explicitly unavailable. No wave-channel or
 noise-channel implementation is included.
+
+
+## Slice 18 — Wave-channel effect (2026-10-01)
+
+### Scope and behavior
+
+Channel 3 now shares the existing master-clock event scheduler, 512 Hz PSG
+sequencer and stereo PWM mixer with both pulse channels and Direct Sound.
+It plays high-nibble-first wave RAM, supports 32/64-digit playback and live
+opposite-bank CPU access, frequency/restart, length, DAC disable, normal
+volume codes and forced 75% volume. Master disable clears PSG controls while
+preserving wave RAM. Byte writes merge against writable frequency/length
+latches. Oscillator, PWM and resampler history survives output drains.
+Bank/access and register masks follow the channel-3 section of
+[GBATEK](https://mgba-emu.github.io/gbatek/).
+
+The original `roms/wave.gba` guest fills both wave banks and selects effects
+through scripted buttons. Pulse accompaniment plays left, wave plays right,
+and Z adds the existing DMA/FIFO PCM to both sides. The app offers
+**Load wave effect**, enables the fixture's explicit test firmware, and shows
+the control legend. The visible square follows accompaniment notes.
+No noise channel or Slice 19 work is included.
+
+### Automated acceptance evidence
+
+| Check | Result |
+| --- | --- |
+| Focused RED → GREEN | One new regression first failed with `bank zero must play` because wave synthesis was absent; GREEN covers bank isolation/alternation, drain continuity, gain, length, DAC/master disable and RAM retention |
+| Native and production WASM guest contract | PASS, same bounded 48-frame script |
+| Execution partitions | Frame-sized versus 997-cycle chunks: exactly identical stereo PCM |
+| Recorded frequencies | 8192 Hz first effect, 4096 Hz second effect/bank; exact rising-edge spacing |
+| Registers and controls | PASS: bank readback, 64-digit mode, volume/status/masks, nonzero low-frequency byte retained by high-byte trigger, mute/restart |
+| Mixed channels | PASS: pulse accompaniment and wave, plus existing timer/DMA FIFO PCM |
+| Full scanout and completion | PASS: expected full-frame square/background, mailbox 0x77, VBlank count 48, HALT PC 0x08000100–0x08000110 |
+| Execution | 13,483,008 cycles; 3,629 instructions (limit 200,000) |
+| PCM | 26,334 stereo frames at 32,768 Hz; zero staging drops and zero empty FIFO pops |
+| Production resampling | Exact whole/137-sample-chunk equality at 44.1, 48 and 96 kHz on both sides |
+| Core/session tests | PASS: 28 tests; one new focused test |
+| Existing pulse contract | PASS: both 184-frame execution partitions, zero staging drops/empty FIFO |
+| Existing fixture suite | PASS; mixer fixture retains its two deliberately induced empty FIFO pops |
+| Workspace Clippy | PASS with warnings denied |
+| Native/WASM app checks | PASS |
+| Release web build | PASS |
+
+Frozen ROM SHA-256: `e3d7e45940c70aef8897984d9690a9ff90dc5d58da00f271f201b073c05020e4`.
+Frozen accepted PCM16 WAV SHA-256: `9add02cf4f7939f791550be69656a345a4a01368872dbf1a4225f03711c96b55`.
+The [manifest](../roms/wave/manifest.toml) records startup, mailbox, completion,
+bounds and scripted controls. WAV capture is reproducible with the command
+below; `/tmp/wave.wav` is temporary.
+
+Retained evidence: [ROM rebuild](verification/wave-build.txt),
+[native/WASM guest and signal contract](verification/wave-contract.txt),
+[core/session tests](verification/wave-tests.txt),
+[pulse regression](verification/wave-pulse-regression.txt),
+[existing fixtures](verification/wave-fixtures.txt),
+[Clippy](verification/wave-clippy.txt),
+[native check](verification/wave-app-native.txt),
+[WASM check](verification/wave-app-wasm.txt),
+and [release web build](verification/wave-web-build.txt).
+
+### Manual acceptance and performance
+
+PASS: the user explicitly confirmed all manual Slice 18 checks on native Linux,
+Chrome and Brave. This includes audible effect selection, bank/64-digit/volume
+controls, pulse/PCM mixing, mute/restart, ordinary playback continuity, the
+visible scene, pause/resume and focus loss/return.
+
+The following measurements are transcribed from the user's platform snapshots.
+Each timing series contains 120 samples; mean and p95 are reported in milliseconds.
+
+| Field | Native Linux | Chrome | Brave |
+| --- | --- | --- | --- |
+| Audible wave controls/mixing and ordinary chunk continuity | PASS — user confirmed | PASS — user confirmed | PASS — user confirmed |
+| Pause/resume and focus loss/return | PASS — user confirmed | PASS — user confirmed | PASS — user confirmed |
+| Core execution mean / p95 (ms) | 1.042 / 1.262 | 1.241 / 1.500 | 1.237 / 1.500 |
+| Pixel conversion mean / p95 (ms) | 0.133 / 0.159 | 0.231 / 0.300 | 0.229 / 0.300 |
+| Texture submission mean / p95 (ms) | 0.027 / 0.043 | 0.031 / 0.100 | 0.035 / 0.100 |
+| Samples per timing series | 120 | 120 | 120 |
+| Host sample rate (Hz) | 48000 | 48000 (running) | 48000 (running) |
+| Current audio queue (ms) | 74.0 | 55.0 | 64.4 |
+| Maximum audio queue (ms) | 80.0 | 75.4 | 80.0 |
+| Audio queue capacity (ms) | 80 | 80 | 80 |
+| Host underrun frames | 0 | 0 | 118 |
+| Host overflow frames | 236 | 0 | 15125 |
+| Host output frames | 834560 | 857600 | 2523786 |
+| Native device errors | 0 | Not applicable | Not applicable |
+| Core PCM rate (Hz) | 32768 | 32768 | 32768 |
+| Produced core PCM frames | 390749 | 674568 | 1800086 |
+| Core staging drops / empty FIFO | 0 / 0 | 0 / 0 | 0 / 0 |
+| Executed instructions | 34542 | Not recorded | 177761 |
+| GBA cycles | 200063749 | Not recorded | 921644125 |
+| Execution state | Running | Not recorded | Running |
+| Backup selection / detection / override | None / Unknown / None | None / Unknown / None | None / Unknown / None |
+| Output device name | Not recorded | Not recorded | Not recorded |
+| Browser version | Not applicable | Not recorded | Not recorded |
+| Sustained unthrottled speed / 30-minute measurement | Not measured | Not measured | Not measured |
+
+All three reported core p95 values are below the plan's 12 ms target. Current
+queue depths are within the planned 40–80 ms range. These snapshots do not
+establish sustained unthrottled speed or a measured 30-minute latency result.
+
+Manual acceptance is attributed to the user's explicit confirmation. Native
+and Brave have nonzero host overflow counters, and Brave also has nonzero host
+underruns; these are preserved and are not described as zero-loss playback.
+Core staging drops and empty FIFO counts are zero on all three platforms.
+Capture durations and lifecycle histories were not supplied, so cumulative
+host counters are not compared as rates. Browser versions and device names
+remain unavailable. All earlier slice timing entries are preserved.
+
+### Manual commands
+
+All manual checks are user confirmed; commands below are retained for reproduction.
+
+Native:
+
+```bash
+cd /home/aditya/Projects/GBA/gba-rs
+cargo run --locked -p gba-app --release
+```
+
+Chrome/Brave server:
+
+```bash
+cd /home/aditya/Projects/GBA/gba-rs
+env -u NO_COLOR trunk --config web/Trunk.toml serve --release --address 127.0.0.1 --port 8080
+```
+
+Open `http://127.0.0.1:8080` in each browser. Click **Load wave effect**, then
+**Enable audio**. With headphones, confirm pulse accompaniment left and wave
+right. Hold Z for the second waveform plus PCM on both sides; while held,
+exercise X (bank 1), Backspace (64 digits), Up (75% wave volume) and Down
+(master mute). Release each control to restart. Check the changing square,
+continuous ordinary playback, pause/resume and focus loss/return. Record app
+millisecond values and report acceptance separately; provide browser version,
+audio device/rate and host queue counters if available.
+
+Recorded-signal reproduction:
+
+```bash
+cd /home/aditya/Projects/GBA/gba-rs
+python3 roms/wave/build.py
+python3 roms/wave/verify.py
+cargo run --locked -p gba-tools --release -- verify-wave --capture /tmp/wave.wav
+```
+
+### Plan acceptance checklist
+
+- [x] A button selects an effect whose guest writes wave RAM.
+- [x] Wave playback and applicable bank/access rules are implemented and checked.
+- [x] Wave output mixes with both existing pulse voices and PCM.
+- [x] Scripted register changes and recorded signal are checked natively and in WASM.
+- [x] Core output and supported-rate resampling preserve history across chunks.
+- [x] Native/Chrome/Brave listening and lifecycle acceptance — user confirmed.
+
+Slice 18 is complete against the plan: implementation and automated checks pass,
+and all manual native/Chrome/Brave acceptance checks are user confirmed. The
+reported timing and audio snapshots are recorded above; unavailable environment
+and sustained-speed measurements remain explicitly marked.

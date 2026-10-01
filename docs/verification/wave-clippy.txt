@@ -1,0 +1,3 @@
+    Checking gba-tools v0.1.0 (/home/aditya/Projects/GBA/gba-rs/crates/gba-tools)
+    Checking gba-app v0.1.0 (/home/aditya/Projects/GBA/gba-rs/crates/gba-app)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 0.70s

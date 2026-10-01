@@ -11,6 +11,7 @@ pub use sram::{SRAM_BYTES, SaveImage};
 
 mod audio;
 mod pulse;
+mod wave;
 pub use audio::PCM_RATE;
 
 use std::collections::VecDeque;
@@ -1773,7 +1774,8 @@ impl System {
             }
             if matches!(
                 offset,
-                0x60 | 0x62 | 0x64 | 0x68 | 0x6c | 0x80 | 0x82 | 0x84 | 0x88
+                0x60 | 0x62 | 0x64 | 0x68 | 0x6c | 0x70 | 0x72 | 0x74 | 0x90
+                    ..=0x9e | 0x80 | 0x82 | 0x84 | 0x88
             ) {
                 self.audio.write_control(offset, value);
                 if offset == 0x84 && value & 0x80 == 0 {

@@ -1,0 +1,5 @@
+   Compiling gba-tools v0.1.0 (/home/aditya/Projects/GBA/gba-rs/crates/gba-tools)
+    Finished `release` profile [optimized] target(s) in 12.34s
+     Running `target/release/gba-tools verify-pulse`
+PASS pulse chunk=280896 frames=184 cycles=51684864 instructions=7810 samples=100947 dropped=0 underruns=0
+PASS pulse chunk=997 frames=184 cycles=51684864 instructions=7810 samples=100947 dropped=0 underruns=0

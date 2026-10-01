@@ -1,7 +1,7 @@
 //! Timers, Direct Sound FIFOs and the stereo PWM mixer on the machine clock.
 //! Host adapters consume fixed-rate frames and never own device registers.
 
-use crate::pulse::Pulse;
+use crate::{pulse::Pulse, wave::Wave};
 use std::collections::VecDeque;
 
 /// Fixed core output cadence; host adapters resample this stream continuously.
@@ -35,6 +35,7 @@ impl Timer {
 /// never allocated per sample; a consumer that stops draining cannot grow it.
 pub(super) struct Audio {
     pulses: [Pulse; 2],
+    wave: Wave,
     next_sequence: u64,
     sequence_step: u8,
     timers: [Timer; 4],
@@ -58,6 +59,7 @@ impl Audio {
     pub fn new() -> Self {
         Self {
             pulses: std::array::from_fn(|_| Pulse::default()),
+            wave: Wave::default(),
             next_sequence: 32768,
             sequence_step: 0,
             timers: [Timer::default(); 4],
@@ -109,6 +111,8 @@ impl Audio {
     /// disable resets PSG control storage, but preserves Direct Sound devices.
     pub fn write_control(&mut self, offset: usize, value: u16) {
         match offset {
+            0x90..=0x9e => self.wave.write(offset, value),
+            0x70 | 0x72 | 0x74 if self.master => self.wave.write(offset, value),
             0x60 | 0x62 | 0x64 | 0x68 | 0x6c if self.master => {
                 let (index, register) = match offset {
                     0x60 => (0, 0),
@@ -138,6 +142,7 @@ impl Audio {
                 if !self.master {
                     self.control_l = 0;
                     self.pulses = std::array::from_fn(|_| Pulse::default());
+                    self.wave.reset();
                     self.sequence_step = 0;
                 }
             }
@@ -150,6 +155,9 @@ impl Audio {
     /// particular, a high-byte trigger must retain the write-only frequency low byte.
     pub fn pulse_latch(&self, offset: usize) -> Option<u16> {
         match offset {
+            0x70 => Some(self.wave.select),
+            0x72 => Some(self.wave.volume),
+            0x74 => Some(self.wave.control),
             0x60 => Some(self.pulses[0].sweep),
             0x62 => Some(self.pulses[0].envelope),
             0x64 => Some(self.pulses[0].control),
@@ -162,6 +170,7 @@ impl Audio {
     /// Exposes readable PSG fields and activity flags; trigger and frequency
     /// fields are write-only. Direct Sound does not set PSG activity flags.
     pub fn refresh_controls(&self, io: &mut [u8]) {
+        self.wave.refresh(io);
         for (offset, value) in [
             (0x60, self.pulses[0].sweep),
             (0x62, self.pulses[0].envelope & 0xffc0),
@@ -174,7 +183,8 @@ impl Audio {
                 0x84,
                 (u16::from(self.master) << 7)
                     | u16::from(self.pulses[0].active)
-                    | (u16::from(self.pulses[1].active) << 1),
+                    | (u16::from(self.pulses[1].active) << 1)
+                    | (u16::from(self.wave.active) << 2),
             ),
             (0x88, self.bias),
         ] {
@@ -200,6 +210,9 @@ impl Audio {
             .next_sample
             .min((now / period + 1) * period)
             .min(self.next_sequence);
+        if let Some(edge) = self.wave.next_edge() {
+            next = next.min(now + edge);
+        }
         for pulse in &self.pulses {
             if let Some(edge) = pulse.next_edge() {
                 next = next.min(now + edge);
@@ -218,6 +231,7 @@ impl Audio {
     /// Each FIFO consumes its selected timer, independently of master enable.
     /// Returns ordinary timer IF bits and the FIFO DMA request level.
     pub fn advance(&mut self, elapsed: u64, now: u64) -> (u16, [bool; 2]) {
+        self.wave.advance(elapsed);
         for pulse in &mut self.pulses {
             pulse.advance(elapsed);
         }
@@ -226,6 +240,7 @@ impl Audio {
                 for (index, pulse) in self.pulses.iter_mut().enumerate() {
                     pulse.sequence(self.sequence_step, index == 0);
                 }
+                self.wave.sequence(self.sequence_step);
                 self.sequence_step = (self.sequence_step + 1) & 7;
             }
             self.next_sequence += 32768;
@@ -328,7 +343,14 @@ impl Audio {
             }
         }
         let ratio = [1, 2, 4, 4][(self.control_h & 3) as usize];
-        for (channel, pulse) in self.pulses.iter().enumerate() {
+        for (channel, signal) in [
+            self.pulses[0].level(),
+            self.pulses[1].level(),
+            self.wave.level(),
+        ]
+        .into_iter()
+        .enumerate()
+        {
             for (side, level) in levels.iter_mut().enumerate() {
                 let route = if side == 0 { 12 } else { 8 };
                 let volume = if side == 0 {
@@ -337,7 +359,7 @@ impl Audio {
                     self.control_l & 7
                 };
                 if self.control_l & (1 << (route + channel)) != 0 {
-                    *level += pulse.level() * i32::from(volume + 1) * ratio / 4;
+                    *level += signal * i32::from(volume + 1) * ratio / 4;
                 }
             }
         }
@@ -356,6 +378,78 @@ impl Audio {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Pulse/FIFO tests cannot detect missing wave synthesis or writes reaching
+    // the playing bank. Exercise the public register and PCM paths together.
+    #[test]
+    fn wave_bank_access_and_streaming_signal() {
+        fn render(chunk: u64) -> Vec<[f32; 2]> {
+            let mut audio = Audio::new();
+            audio.write_control(0x84, 0x80);
+            audio.write_control(0x80, 0x4477);
+            audio.write_control(0x82, 2);
+            audio.write_control(0x70, 0x40);
+            for offset in (0x90..0xa0).step_by(2) {
+                audio.write_control(offset, 0xffff);
+            }
+            audio.write_control(0x70, 0);
+            for offset in (0x90..0xa0).step_by(2) {
+                audio.write_control(offset, 0);
+            }
+            audio.write_control(0x70, 0xa0);
+            audio.write_control(0x72, 0x2000);
+            audio.write_control(0x74, 0x87c0);
+            let mut output = Vec::new();
+            let mut now = 0;
+            while now < 16384 {
+                let next = audio.next_event(now);
+                audio.advance(next - now, next);
+                now = next;
+                if now % chunk == 0 {
+                    audio.drain_stereo(&mut output);
+                }
+            }
+            audio.drain_stereo(&mut output);
+            assert!(output.iter().any(|f| f[0] > 0.0), "bank zero must play");
+            assert!(
+                output.iter().any(|f| f[0] < 0.0),
+                "64-sample playback must reach bank one"
+            );
+            output
+        }
+        assert_eq!(render(512), render(8192));
+        let mut audio = Audio::new();
+        audio.write_control(0x84, 0x80);
+        audio.write_control(0x70, 0x40);
+        audio.write_control(0x90, 0xffff);
+        audio.write_control(0x70, 0x80);
+        audio.write_control(0x72, 0x20ff);
+        audio.write_control(0x74, 0xc700);
+        assert_eq!(audio.wave.level(), 15);
+        audio.write_control(0x72, 0x80ff);
+        assert_eq!(audio.wave.level(), 11, "forced 75% ignores volume code");
+        audio.write_control(0x72, 0x40ff);
+        assert_eq!(audio.wave.level(), 7);
+        audio.write_control(0x72, 0x60ff);
+        assert_eq!(audio.wave.level(), 3);
+        audio.wave.sequence(0);
+        assert!(!audio.wave.active, "one length tick expires 256-255");
+        audio.write_control(0x74, 0x8700);
+        assert!(audio.wave.active);
+        audio.write_control(0x70, 0);
+        assert!(!audio.wave.active, "DAC disable stops playback");
+        audio.write_control(0x84, 0);
+        audio.write_control(0x70, 0x80);
+        audio.write_control(0x74, 0x8700);
+        assert!(!audio.wave.active, "master-disabled PSG writes are ignored");
+        let mut io = vec![0; 0xa0];
+        audio.refresh_controls(&mut io);
+        assert_eq!(&io[0x90..0x92], &[0, 0]);
+        audio.write_control(0x84, 0x80);
+        audio.write_control(0x70, 0x40);
+        audio.refresh_controls(&mut io);
+        assert_eq!(&io[0x90..0x92], &[255, 255], "wave RAM survives PSG reset");
+    }
 
     // FIFO regressions cannot detect absent PSG synthesis or a drain resetting
     // oscillator history. Compare actual mixed samples across two drain schedules.
@@ -454,7 +548,7 @@ mod tests {
             timers
         );
         assert_eq!(audio.held[0], 64);
-        let mut io = vec![0; 0x90];
+        let mut io = vec![0; 0xa0];
         audio.refresh_controls(&mut io);
         assert_eq!(io[0x84], 0); // Direct Sound never sets PSG status flags.
         audio.write_control(0x84, 0x80);

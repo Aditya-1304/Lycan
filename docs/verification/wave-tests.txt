@@ -1,0 +1,61 @@
+   Compiling gba-core v0.1.0 (/home/aditya/Projects/GBA/gba-rs/crates/gba-core)
+   Compiling gba-session v0.1.0 (/home/aditya/Projects/GBA/gba-rs/crates/gba-session)
+    Finished `test` profile [optimized + debuginfo] target(s) in 0.81s
+     Running unittests src/lib.rs (target/debug/deps/gba_core-af081fb725f63726)
+
+running 18 tests
+test audio::tests::disabled_master_silences_output_without_stopping_fifo ... ok
+test audio::tests::wave_bank_access_and_streaming_signal ... ok
+test tests::controlled_startup_is_arm_system_with_interrupts_masked ... ok
+test tests::cartridge_windows_use_programmed_waitstates ... ok
+test tests::display_status_tracks_line_blank_and_compare_boundaries ... ok
+test audio::tests::pulse_voices_mix_with_fifo_and_preserve_chunk_history ... ok
+test tests::keypad_is_active_low_and_hardware_status_is_read_only ... ok
+test tests::repeating_dma_reloads_destination_without_rewinding_source ... ok
+test tests::prefetch_consumes_halfwords_and_resets_on_cartridge_data ... ok
+test tests::flash_read_cancels_partial_unlock ... ok
+test tests::sram_byte_bus_survives_reset ... ok
+test tests::flash_banks_preserve_and_restore_independent_bytes ... ok
+test tests::eeprom_dma_detects_capacity_and_restores_serial_blocks ... ok
+test tests::timer_fifo_dma_sound_is_identical_across_bounded_advances ... ok
+test tests::dma_upload_resumes_at_deadlines_and_latches_vblank_irq ... ok
+test tests::counter_returns_from_thumb_with_architectural_pc_values ... ok
+test tests::vblank_guest_sleeps_dispatches_and_acknowledges ... ok
+test tests::guest_stores_are_published_only_after_display_scanout ... ok
+
+test result: ok. 18 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+     Running tests/backup.rs (target/debug/deps/backup-67e3c25a0b5ee7da)
+
+running 1 test
+test cartridge_load_selects_backup_hardware ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/gba_session-148a6a4a4839684a)
+
+running 9 tests
+test tests::logical_buttons_can_be_pressed_and_released ... ok
+test tests::release_all_clears_every_button ... ok
+test resampler::tests::uneven_chunks_match_continuous_resampling_at_device_rates ... ok
+test tests::paused_session_preserves_guest_time_and_resume_produces_a_frame ... ok
+test tests::pause_and_focus_loss_release_input_and_reanchor_host_time ... ok
+test tests::lifecycle_boundaries_discard_staged_audio ... ok
+test tests::held_button_reaches_guest_and_moves_once_per_emulated_frame ... ok
+test tests::host_pacing_stops_at_the_replay_deadline ... ok
+test tests::host_refresh_rates_produce_the_same_guest_position_and_timeline ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.85s
+
+   Doc-tests gba_core
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests gba_session
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

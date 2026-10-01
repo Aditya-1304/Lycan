@@ -1,0 +1,8 @@
+   Compiling gba-tools v0.1.0 (/home/aditya/Projects/GBA/gba-rs/crates/gba-tools)
+    Finished `release` profile [optimized] target(s) in 5.82s
+     Running `target/release/gba-tools verify-wave --capture /tmp/gba-wave-recording-793na239/wave.wav`
+PASS wave chunk=280896 frames=48 cycles=13483008 instructions=3629 samples=26334 dropped=0 underruns=0
+PASS wave chunk=997 frames=48 cycles=13483008 instructions=3629 samples=26334 dropped=0 underruns=0
+    Blocking waiting for file lock on build directory
+    Finished `release` profile [optimized] target(s) in 21.08s
+WASM wave PASS: wave RAM banks, scripted controls, recorded signal, pulse/FIFO mixing and chunk invariance

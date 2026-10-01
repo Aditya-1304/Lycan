@@ -1,0 +1,2 @@
+    Checking gba-app v0.1.0 (/home/aditya/Projects/GBA/gba-rs/crates/gba-app)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 1.11s
