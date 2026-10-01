@@ -1,0 +1,31 @@
+# Frozen original ROM identities; controlled direct ARM startup, no BIOS.
+max_instructions_per_checkpoint = 2000000
+max_frames = 44
+mailbox_address = 0x03000000
+completion_id = 0x00a1
+checkpoint_frames = [20, 24, 28, 32, 36, 40, 44]
+[mode_1]
+checkpoint_pc_start = 0x08000174
+checkpoint_pc_end = 0x08000188
+bytes = 476
+sha256 = "b5723f206ec371bc4f7d7dcbe8f2b055ac833408d9519d30c1233aeec0f9f921"
+[mode_2]
+checkpoint_pc_start = 0x08000170
+checkpoint_pc_end = 0x08000184
+bytes = 472
+sha256 = "0b944fb0e370d613395ab88030cbf2dbe151b41751f77077c6da6dd396aa542a"
+[mode_3]
+checkpoint_pc_start = 0x08000184
+checkpoint_pc_end = 0x08000198
+bytes = 480
+sha256 = "a1cd65ffe0c172f32e204587ddad98ca50c370af756d913bfae8586018a08b26"
+[mode_4]
+checkpoint_pc_start = 0x08000198
+checkpoint_pc_end = 0x080001ac
+bytes = 504
+sha256 = "33fcfcb54a4f724558112344740943b58571ea507f0e9051345ed46063c21234"
+[mode_5]
+checkpoint_pc_start = 0x08000190
+checkpoint_pc_end = 0x080001a4
+bytes = 496
+sha256 = "dfcfac1a230bdf17e6328f33a5275e6790d17423a7ead46c4e5afe1aef97ee4f"

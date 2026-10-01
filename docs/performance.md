@@ -2389,3 +2389,121 @@ Manual commands and the historical five-game evidence table are in
 [compatibility.md](compatibility.md). Its earlier pending entries predate the
 2026-10-02 user confirmation recorded here. Slice 20 is complete: implemented,
 tested and measured. No later slice implementation is included in this closeout.
+
+
+## Slice 21 — affine background image: automated verification complete
+
+Implemented and verified against `plan_final.md` section 21 on 2026-10-02.
+Manual Linux/Chrome/Brave acceptance and millisecond measurements remain pending.
+Existing user timing entries above are preserved.
+
+The renderer now samples BG2/BG3 through signed integer affine coefficients,
+signed 28-bit reference coordinates and per-line internal origins. Reference
+writes reload the affected coordinate; PB/PD advance the internal coordinates;
+the next frame reloads the MMIO reference values. Mode 1 combines text BG0/BG1
+with affine BG2; mode 2 supports affine BG2/BG3. Modes 3/4 now use BG2 transforms,
+and mode 5 clips to 160x128 with direct-color pages at 0 and 0xa000. Tiled affine
+backgrounds honor wrapping and index-zero transparency. Layer composition retains
+BG priority/tie order and normal objects. No affine-object implementation is included.
+
+Controlled direct startup supplies identity matrices for earlier diagnostics;
+supplied-BIOS startup clears them so firmware owns initialization. The existing
+scanline drawing approximation remains: within-line rendering is not verified.
+
+### Guest and capture evidence
+
+Original source: [affine image assembly](../roms/affine/image.s).
+Reproducible build and manual commands: [affine README](../roms/affine/README.md).
+Frozen ROM identities and PC windows: [manifest](../roms/affine/manifest.toml).
+Frozen full-frame PPM SHA-256 values: [capture identities](../roms/affine/captures.json).
+The shared [geometry oracle](../roms/affine/contract.rs) checks source geometry
+independently of renderer addressing and internal affine accumulators.
+
+- Five ROM variants exercise mode-1 BG2, mode-2 BG3, and bitmap modes 3/4/5.
+- Seven complete 240x160 captures per mode, at frames 20/24/28/32/36/40/44:
+  35 captures, 1,344,000 pixel comparisons per platform, all pass natively and
+  with the production WASM core in Node. Headless WASM is separate from browser UI acceptance.
+- Four quarter-turn angles, 1x/2x source steps, centered reference origins,
+  negative-coordinate clipping/wrapping, both mode-4/5 pages and mode-3 page-ignore behavior pass.
+- Checkpoints require mailbox ID 0x00a1 at 0x03000000 plus angle/scale/page/wrap,
+  the source-defined VCOUNT polling PC window and the completed-frame generation.
+  The interactive guest has no terminal stop; a polling branch alone cannot pass.
+- Each advance is limited to 2,000,000 instructions. The final target is
+  12,359,424 cycles (44 frames), with at most 32 cycles of permitted instruction
+  overshoot. Native observed completion evidence follows.
+
+| Mode | ROM bytes | Final PC | Cycles | Instructions | Native/WASM captures |
+|---|---:|---|---:|---:|---|
+| 1 | 476 | `0x0800017c` | 12,359,430 | 1,031,600 | 7/7 pass each |
+| 2 | 472 | `0x08000170` | 12,359,432 | 1,031,577 | 7/7 pass each |
+| 3 | 480 | `0x0800018c` | 12,359,430 | 1,130,812 | 7/7 pass each |
+| 4 | 504 | `0x08000198` | 12,359,424 | 1,169,504 | 7/7 pass each |
+| 5 | 496 | `0x08000190` | 12,359,441 | 1,137,618 | 7/7 pass each |
+
+Captures regenerate under `target/affine-captures/`; their 35 named identities
+are frozen in `captures.json`. The native capture contact sheet was inspected;
+that is headless image evidence, not native-window or browser acceptance.
+
+### Focused RED/GREEN and regression gates
+
+Only two focused core regressions were added in the existing test module:
+
+- Mode-5 transformed page sampling/clipping: RED returned zero instead of
+  0x1234 on the old renderer; GREEN samples the transformed alternate page
+  and clips after the 128th source row.
+- Mid-frame reference reload/line progression: RED returned row-1 color 992
+  instead of reloaded row-0 color 31; GREEN also checks signed negative X
+  clipping and the following source texel.
+
+Verification passed: 48 workspace tests (33 core unit, 1 core backup integration,
+13 session and 1 app), earlier manifest guest fixtures, pulse/wave/noise guest
+contracts, workspace/all-targets Clippy with warnings denied, formatting,
+native app check, WASM app check and Trunk release build. The affine verifier
+also passes native full-frame captures, frozen capture hashes and the same
+production-WASM oracle. Host: Linux x86_64; rustc 1.98.1
+(48a229cea 2026-09-01). Browser versions and sustained UI speed are not recorded.
+
+### Manual performance and platform acceptance
+
+Use each of the five affine ROMs, check rotation/scaling/wrapping/clipping/page
+changes, then pause/resume/reset. In the app, Right rotates, Up toggles scale,
+Z switches bitmap page, and X toggles tiled wrapping. Release between presses.
+F1 shows the diagnostic performance summaries. Record per-ROM mean/p95 core,
+conversion and texture submission timings; timings below remain user-owned.
+
+| Platform | Visual/input/pause/reset acceptance | Core mean/p95 ms | Conversion mean/p95 ms | Texture submission mean/p95 ms | Sustained speed |
+|---|---|---|---|---|---|
+| Linux native | not verified | not measured | not measured | not measured | not measured |
+| Chrome | not verified | not measured | not measured | not measured | not measured |
+| Brave | not verified | not measured | not measured | not measured | not measured |
+
+```bash
+cd /home/aditya/Projects/GBA/gba-rs
+python3 roms/affine/build.py
+python3 roms/affine/verify.py
+cargo run --locked -p gba-app --release -- --debug-ui
+```
+
+Load `roms/affine-mode-1.gba` through `roms/affine-mode-5.gba` with Load ROM;
+these original diagnostics do not need a BIOS. Resume if paused.
+
+```bash
+cd /home/aditya/Projects/GBA/gba-rs
+env -u NO_COLOR trunk --config web/Trunk.toml serve --release --address 127.0.0.1 --port 8080
+```
+
+Open `http://127.0.0.1:8080` in Chrome and Brave and repeat the same controls.
+
+### Plan acceptance checklist
+
+- [x] Buttons rotate/scale the original guest image through affine registers.
+- [x] Affine sampling and reference-point behavior implemented; focused RED/GREEN evidence retained.
+- [x] Modes 1/2 and bitmap transforms match complete expected captures in native and production WASM execution.
+- [x] Mode-5 dimensions/page behavior verified through the same image contract.
+- [x] Rotation, wrapping, clipping and page changes use integer arithmetic and match the source-geometry oracle.
+- [x] Earlier guest regressions and required automated build/check gates pass.
+- [ ] Manual Linux, Chrome and Brave UI acceptance confirmed by the user.
+- [ ] User millisecond performance measurements recorded.
+
+Slice 21 implementation and automated acceptance are complete. Full platform
+closeout remains pending the manual rows above; Slice 22 was not started.
