@@ -27,6 +27,9 @@ pub const BUTTONS: [Button; 10] = [
     Button::L,
 ];
 
+const LIVE_CYCLE_BUDGET: u128 = CYCLES_PER_FRAME as u128;
+const LIVE_INSTRUCTION_BUDGET: usize = 400_000;
+
 /// Owns one core machine and session-level input and pause state.
 ///
 /// This layer translates no host key codes; frontend adapters update logical buttons
@@ -220,21 +223,51 @@ impl Session {
         let numerator = elapsed.as_nanos() * u128::from(GBA_CLOCK_HZ) + self.fractional_cycles;
         let due = numerator / 1_000_000_000;
         self.fractional_cycles = numerator % 1_000_000_000;
-        let budget = u128::from(2 * CYCLES_PER_FRAME);
-        self.slowed = due > budget;
+        self.slowed = due > LIVE_CYCLE_BUDGET;
+
         if self.slowed {
             self.fractional_cycles = 0;
         }
-        self.frame_target.0 = self.frame_target.0.saturating_add(due.min(budget) as u64);
+
+        self.frame_target.0 = self
+            .frame_target
+            .0
+            .saturating_add(due.min(LIVE_CYCLE_BUDGET) as u64);
+
         if let Some(deadline) = deadline {
             self.frame_target = self.frame_target.min(deadline);
         }
         if self.machine.cycles() >= self.frame_target {
             return Ok(None);
         }
-        self.machine
-            .advance_to(self.frame_target, 200_000)
-            .map(Some)
+        let before = self.machine.cycles();
+
+        match self
+            .machine
+            .advance_to(self.frame_target, LIVE_INSTRUCTION_BUDGET)
+        {
+            Ok(report) => Ok(Some(report)),
+
+            Err(RunError::StepLimitExceeded {
+                limit,
+                last_pc,
+                cycles,
+            }) if cycles > before => {
+                // This is a live-work budget, not a guest correctness failure.
+                // Drop the catch-up backlog and continue from actual guest time.
+                self.slowed = true;
+                self.fractional_cycles = 0;
+                self.frame_target = cycles;
+
+                Ok(Some(RunReport {
+                    instructions: limit,
+                    instruction_address: last_pc,
+                    cycles,
+                }))
+            }
+
+            Err(error) => Err(error),
+        }
     }
 
     /// Clears the host time anchor at lifecycle boundaries, retaining guest time.
