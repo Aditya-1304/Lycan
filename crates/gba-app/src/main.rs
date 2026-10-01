@@ -23,6 +23,8 @@ fn main() -> eframe::Result {
         return audio::probe(arguments.get(index + 1).map_or("pcm", String::as_str))
             .map_err(|error| eframe::Error::AppCreation(Box::new(std::io::Error::other(error))));
     }
+    let debug_ui = arguments.iter().any(|argument| argument == "--debug-ui");
+
     // Native platforms use eframe's Glow renderer and the configured winit backend.
     let native_options = eframe::NativeOptions {
         renderer: eframe::Renderer::Glow,
@@ -33,7 +35,7 @@ fn main() -> eframe::Result {
     eframe::run_native(
         "gba-rs",
         native_options,
-        Box::new(|cc| Ok(Box::new(GbaApp::new(cc)))),
+        Box::new(move |cc| Ok(Box::new(GbaApp::new(cc, debug_ui)))),
     )
 }
 
@@ -60,7 +62,7 @@ fn main() {
             .start(
                 canvas,
                 web_options,
-                Box::new(|cc| Ok(Box::new(GbaApp::new(cc)))),
+                Box::new(|cc| Ok(Box::new(GbaApp::new(cc, false)))),
             )
             .await
             .expect("failed to start eframe");

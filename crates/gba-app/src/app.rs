@@ -119,6 +119,8 @@ const KEY_BINDINGS: [(Button, egui::Key); 10] = [
 
 /// Shared native/browser application displaying pixels produced by guest execution.
 pub struct GbaApp {
+    /// Presentation mode only; switching modes preserves the active session.
+    debug_ui: bool,
     session: Session,
     bios_hash: Option<String>,
     bios_picker_open: bool,
@@ -163,11 +165,12 @@ pub struct GbaApp {
 }
 
 impl GbaApp {
-    /// Creates a session and loads the assembled guest artifact without executing in startup.
-    pub fn new(_cc: &eframe::CreationContext<'_>) -> Self {
+    /// Starts a clean player session, or loads the PCM fixture for diagnostics.
+    pub fn new(_cc: &eframe::CreationContext<'_>, debug_ui: bool) -> Self {
         let (rom_sender, rom_receiver) = std::sync::mpsc::channel();
         let (bios_sender, bios_receiver) = std::sync::mpsc::channel();
         let mut app = Self {
+            debug_ui,
             session: Session::new(),
             bios_hash: None,
             bios_picker_open: false,
@@ -196,7 +199,11 @@ impl GbaApp {
             texture: None,
             image_generation: 0,
             uploaded_generation: None,
-            status: "Loading pcm.gba".to_owned(),
+            status: if debug_ui {
+                "Loading pcm.gba".to_owned()
+            } else {
+                "Load a BIOS and ROM".to_owned()
+            },
             #[cfg(not(target_arch = "wasm32"))]
             capture_path: std::env::var_os("GBA_CAPTURE_PATH").map(Into::into),
             #[cfg(not(target_arch = "wasm32"))]
@@ -206,7 +213,9 @@ impl GbaApp {
             load_generation: 0,
             picker_open: false,
         };
-        app.load_rom_bytes("pcm.gba", PCM_ROM);
+        if debug_ui {
+            app.load_rom_bytes("pcm.gba", PCM_ROM);
+        }
         app
     }
 
@@ -712,8 +721,126 @@ impl GbaApp {
         self.image_generation = self.image_generation.wrapping_add(1);
     }
 
-    /// Draws controls, guest status, input state, and the aspect-preserving framebuffer.
+    /// Selects presentation without altering cartridge, input, or persistence state.
     fn draw_ui(&mut self, ui: &mut egui::Ui) {
+        if self.debug_ui {
+            self.draw_debug_ui(ui);
+        } else {
+            self.draw_player_ui(ui);
+        }
+    }
+
+    /// Presents essential player controls using the existing loader and save barriers.
+    fn draw_player_ui(&mut self, ui: &mut egui::Ui) {
+        self.sync_texture(ui.ctx());
+        let background = egui::Color32::from_rgb(12, 12, 14);
+        ui.painter().rect_filled(ui.max_rect(), 0.0, background);
+
+        ui.horizontal(|ui| {
+            ui.heading("gba-rs");
+            if !self.rom_name.is_empty() {
+                ui.separator();
+                ui.label(&self.rom_name);
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui
+                    .add_enabled(self.loaded, egui::Button::new("Reset"))
+                    .clicked()
+                {
+                    self.reset_demo();
+                    ui.ctx().request_repaint();
+                }
+                let pause_label = if self.session.paused() {
+                    "Resume"
+                } else {
+                    "Pause"
+                };
+                // Match diagnostic pause guards so pending saves cannot be bypassed.
+                let can_pause = self.loaded
+                    && !self.restoring_save
+                    && self.pending_rom.is_none()
+                    && !self.save_import_open
+                    && !self.close_pending();
+                if ui
+                    .add_enabled(can_pause, egui::Button::new(pause_label))
+                    .clicked()
+                {
+                    self.replay_deadline = None;
+                    self.session.toggle_pause();
+                    self.audio.set_playing(!self.session.paused());
+                    self.host_origin = Instant::now();
+                    ui.ctx().request_repaint();
+                }
+                if ui
+                    .add_enabled(!self.picker_open, egui::Button::new("Load ROM"))
+                    .clicked()
+                {
+                    self.pick_rom(ui.ctx());
+                }
+                if self.bios_hash.is_none()
+                    && ui
+                        .add_enabled(!self.bios_picker_open, egui::Button::new("Load BIOS"))
+                        .clicked()
+                {
+                    self.pick_bios(ui.ctx());
+                }
+            });
+        });
+        ui.separator();
+        ui.horizontal_wrapped(|ui| {
+            if ui.button("Enable audio").clicked() {
+                self.audio.start();
+            }
+            ui.checkbox(&mut self.audio.muted, "Mute");
+            ui.add(egui::Slider::new(&mut self.audio.volume, 0.0..=1.0).text("Volume"));
+        });
+        // Loader failures remain actionable without exposing diagnostic scene text.
+        if !self.loaded || self.status.contains("failed") {
+            ui.label(&self.status);
+        }
+        if self.save_identity.is_some() {
+            let save_label = if self.storage.failed {
+                "Save failed; press F1 for recovery controls"
+            } else if self.restoring_save {
+                "Restoring save…"
+            } else if self.storage.busy
+                || self
+                    .session
+                    .save_status()
+                    .is_some_and(|status| status.dirty)
+            {
+                "Saving…"
+            } else {
+                "Save ready"
+            };
+            ui.small(save_label);
+        }
+        ui.small("Z=A  X=B  A=L  S=R  Enter=Start  Backspace=Select  Arrows=D-pad  F1=Diagnostics");
+        ui.separator();
+
+        // Reserve the frame margins before fitting so the framed image also fits.
+        let available = ui.available_size();
+        let size = player_screen_size((available - egui::vec2(12.0, 12.0)).max(egui::Vec2::ZERO));
+        ui.allocate_ui_with_layout(
+            available,
+            egui::Layout::top_down(egui::Align::Center),
+            |ui| {
+                ui.add_space(((available.y - size.y - 12.0) * 0.5).max(0.0));
+                egui::Frame::NONE
+                    .fill(egui::Color32::BLACK)
+                    .inner_margin(6)
+                    .corner_radius(4)
+                    .show(ui, |ui| {
+                        if let Some(texture) = &self.texture {
+                            ui.add(egui::Image::from_texture(texture).fit_to_exact_size(size));
+                        }
+                    });
+            },
+        );
+    }
+
+    /// Retains all fixture controls and detailed diagnostics for development.
+    fn draw_debug_ui(&mut self, ui: &mut egui::Ui) {
         self.sync_texture(ui.ctx());
         #[cfg(not(target_arch = "wasm32"))]
         if self.capture_path.is_some() && !self.capture_requested && self.core_times.count == 120 {
@@ -1097,6 +1224,10 @@ impl GbaApp {
 impl eframe::App for GbaApp {
     /// Executes bounded guest work while running and schedules the next host wake.
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        if ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::F1)) {
+            self.debug_ui = !self.debug_ui;
+            ctx.request_repaint();
+        }
         #[cfg(not(target_arch = "wasm32"))]
         if ctx.input(|input| input.viewport().close_requested())
             && (self.storage.busy
@@ -1433,5 +1564,48 @@ impl Measurements {
             "{name}: mean {mean:.3} ms | p95 {p95:.3} ms | samples {}",
             self.count
         )
+    }
+}
+
+/// Enlarges by whole pixels up to 3×, using fractional sizing only below 1×.
+fn player_screen_size(available: egui::Vec2) -> egui::Vec2 {
+    let fit = (available.x / WIDTH as f32).min(available.y / HEIGHT as f32);
+    let scale = if fit >= 1.0 {
+        fit.floor().min(3.0)
+    } else {
+        fit.max(0.0)
+    };
+    egui::vec2(WIDTH as f32 * scale, HEIGHT as f32 * scale)
+}
+
+/// Player presentation must preserve whole-pixel enlargement without overflowing
+/// small windows; diagnostic sizing remains independently available.
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn player_screen_uses_capped_integer_enlargement_and_small_viewport_fallback() {
+        assert_eq!(
+            player_screen_size(egui::vec2(960.0, 640.0)),
+            egui::vec2(720.0, 480.0)
+        );
+        assert_eq!(
+            player_screen_size(egui::vec2(700.0, 470.0)),
+            egui::vec2(480.0, 320.0)
+        );
+        assert_eq!(
+            player_screen_size(egui::vec2(240.0, 160.0)),
+            egui::vec2(240.0, 160.0)
+        );
+        assert_eq!(
+            player_screen_size(egui::vec2(120.0, 100.0)),
+            egui::vec2(120.0, 80.0)
+        );
+        assert_eq!(
+            player_screen_size(egui::vec2(300.0, 80.0)),
+            egui::vec2(120.0, 80.0)
+        );
+        assert_eq!(player_screen_size(egui::Vec2::ZERO), egui::Vec2::ZERO);
     }
 }
