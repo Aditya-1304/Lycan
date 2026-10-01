@@ -97,6 +97,9 @@ const EWRAM_START: u32 = 0x0200_0000;
 const IWRAM_START: u32 = 0x0300_0000;
 const IO_START: u32 = 0x0400_0000;
 const IO_BYTES: usize = 0x400;
+/// Undocumented write-only location touched by the retail BIOS during
+/// RegisterRamReset. The written value has no modeled observable effect.
+const BIOS_UNDOCUMENTED_IO_410: u32 = IO_START + 0x410;
 const PALETTE_START: u32 = 0x0500_0000;
 const PALETTE_BYTES: usize = 1024;
 const VRAM_START: u32 = 0x0600_0000;
@@ -2150,6 +2153,12 @@ impl CpuBus for System {
         if self.backup_write(address, value) {
             return Ok(());
         }
+        // RegisterRamReset writes a byte to this undocumented write-only
+        // location. Accept the timed access without backing unused MMIO space;
+        // neighboring addresses retain their existing unmapped behavior.
+        if address == BIOS_UNDOCUMENTED_IO_410 {
+            return Ok(());
+        }
         if let Some(range) = ram_range(address, EWRAM_START, self.ewram.len(), 1) {
             self.ewram[range.start] = value;
         } else if let Some(range) = ram_range(address, IWRAM_START, self.iwram.len(), 1) {
@@ -3020,6 +3029,29 @@ fn range_for(address: u32, start: u32, length: usize, width: usize) -> Option<Ra
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn retail_bios_undocumented_0410_byte_write_is_accepted() {
+        let mut bus = System::new();
+        let data = Access {
+            kind: AccessKind::Data,
+            sequential: false,
+        };
+        let before = bus.cycles;
+
+        bus.write8(BIOS_UNDOCUMENTED_IO_410, 0xff, data)
+            .expect("retail BIOS 0x04000410 byte write must be accepted");
+
+        // The write still occupies a real bus access.
+        assert!(bus.cycles > before);
+
+        // Keep neighboring unused addresses outside the ordinary I/O bank.
+        assert!(matches!(
+            bus.write8(BIOS_UNDOCUMENTED_IO_410 + 1, 0xff, data),
+            Err(CoreError::UnmappedAddress { address, width: 1 })
+                if address == BIOS_UNDOCUMENTED_IO_410 + 1
+        ));
+    }
 
     /// DMA command lengths select the EEPROM address width. A high block must
     /// survive serial readback and restore without aliasing a smaller device.
