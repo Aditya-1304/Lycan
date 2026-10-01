@@ -1,6 +1,6 @@
 //! Guest-driven full-frame oracle. Expected pixels use source geometry rather
 //! than the renderer's tile-addressing or affine-state implementation.
-use gba_core::{Button, CYCLES_PER_FRAME, Cycle, Machine};
+use gba_core::{Button, Cycle, Machine, CYCLES_PER_FRAME};
 
 /// Executes all bounded guest checkpoints and emits only fully verified images.
 pub fn verify_with_capture(mut capture: impl FnMut(usize, u64, &[u16])) {
@@ -45,7 +45,9 @@ pub fn verify_with_capture(mut capture: impl FnMut(usize, u64, &[u16])) {
                     .unwrap();
                 match button {
                     Button::Right => angle = (angle + 1) % 4,
-                    Button::Up => scale = 2,
+                    Button::Up => {
+                        scale = if scale == 1 { 2 } else { 1 };
+                    }
                     Button::A => page = true,
                     Button::B => wrap = true,
                     _ => unreachable!(),

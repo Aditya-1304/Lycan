@@ -1108,6 +1108,35 @@ impl GbaApp {
             } else {
                 "Running"
             });
+
+            if self.rom_name.starts_with("affine-mode-")
+                && let (
+                    Ok(0x00a1),
+                    Ok(angle),
+                    Ok(scale),
+                    Ok(page),
+                    Ok(wrap),
+                ) = (
+                    self.session.inspect16(0x0300_0000),
+                    self.session.inspect16(0x0300_0002),
+                    self.session.inspect16(0x0300_0004),
+                    self.session.inspect16(0x0300_0006),
+                    self.session.inspect16(0x0300_0008),
+                )
+            {
+                let scale = match scale {
+                    0x0100 => "1x source step",
+                    0x0200 => "2x source step",
+                    _ => "unexpected",
+                };
+
+                ui.monospace(format!(
+                    "Affine: angle={}° | {scale} | page={} | wrap={}",
+                    angle * 90,
+                    if page != 0 { 1 } else { 0 },
+                    wrap != 0,
+                ));
+            }
         });
 
         ui.horizontal(|ui| {
