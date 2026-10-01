@@ -28,7 +28,12 @@ fn main() -> eframe::Result {
     // Native platforms use eframe's Glow renderer and the configured winit backend.
     let native_options = eframe::NativeOptions {
         renderer: eframe::Renderer::Glow,
-        viewport: eframe::egui::ViewportBuilder::default().with_inner_size([960.0, 640.0]),
+        centered: true,
+        viewport: eframe::egui::ViewportBuilder::default()
+            .with_title("Lycan")
+            .with_inner_size([760.0, 540.0])
+            .with_min_inner_size([360.0, 280.0])
+            .with_resizable(true),
         ..Default::default()
     };
 
