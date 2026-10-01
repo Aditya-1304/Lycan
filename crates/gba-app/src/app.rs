@@ -788,8 +788,10 @@ impl GbaApp {
                     ui.add(egui::Slider::new(&mut self.audio.volume, 0.0..=1.0).text("Volume"));
                 });
                 ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                    ui.add_space(10.0);
                     // Keep product identity visible on hosts without window decorations.
-                    ui.label(egui::RichText::new("Lycan").strong());
+                    ui.label(egui::RichText::new("Lycan").size(18.0).strong());
+                    ui.add_space(4.0);
                     ui.separator();
                     let name = if self.rom_name.is_empty() {
                         "No ROM loaded"

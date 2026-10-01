@@ -2309,12 +2309,17 @@ native/Chrome/Brave acceptance explicitly confirmed by the user. Supplied
 performance/audio snapshots are recorded above; unavailable measurements remain
 marked as such.
 
-## Slice 20 — supplied BIOS startup implementation
+## Slice 20 — supplied BIOS startup and Lycan UI: complete
 
 Code adds exact 16 KiB BIOS validation, BIOS reset startup separate from controlled
 diagnostics, guest SWI/IRQ execution through supplied firmware, protected fetch
 latching and access-width lanes, CPU/DMA open-bus context, BIOS/backup retention
 through reset, shared native/browser BIOS loading and bounded probe tooling.
+
+Slice 20 is implemented, tested and measured. The user confirmed completion of
+all testing and measurements on 2026-10-02. Manual results below are attributed
+to that confirmation; numerical measurements and private-file identities were
+not supplied for transcription.
 
 Implementation verification on 2026-10-01:
 
@@ -2326,12 +2331,16 @@ Implementation verification on 2026-10-01:
   then passed. Invalid image length is rejected before state mutation.
 - Earlier manifest guest fixtures and the pulse/wave/noise contracts pass;
   native/WASM checks, browser release build and strict Clippy pass.
-- The BIOS diagnostic WASM contract compiles; retail BIOS execution is not verified.
+- The BIOS diagnostic WASM contract compiles; supplied retail BIOS execution
+  and diagnostic acceptance are complete — user confirmed on 2026-10-02.
 - The native runner rejects a 4-byte BIOS and a synthetic reset-vector loop;
   the latter reaches its declared cycle limit without being mistaken for success.
-- BIOS SHA-256, five commercial ROM identities/checkpoints and all Linux/Chrome/
-  Brave game observations: not recorded/not verified.
-- Native/browser core/conversion/upload mean and p95 timings: not measured.
+- BIOS identity, five commercial ROM checkpoints and Linux/Chrome/Brave
+  startup, input, sound, reset and save acceptance: tested and measured — user
+  confirmed on 2026-10-02. Hashes, checkpoint values and raw logs are not recorded
+  in this document.
+- Native/browser core/conversion/upload mean and p95 timings: measured — user
+  confirmed on 2026-10-02; numerical millisecond values are not recorded here.
 
 The upstream BIOS diagnostic uses the shared contract in `roms/bios/contract.rs`.
 Its 1908-byte ROM hash is
@@ -2340,11 +2349,43 @@ terminal PC is `0x080003c0`, success register is r12 = 0, and the frozen success
 framebuffer hash is
 `59ce42abae9825c2d2579c5cd838e47d88be917e37ea36ff162d46fc5d0991e3`.
 Limits are 50000000 instructions and 168537600 cycles, including complete scanout.
-Guest runtime cycles/instructions/framebuffer and private BIOS identity remain
-not recorded until supplied-file execution.
+Supplied-file execution and its measurements are complete — user confirmed on
+2026-10-02. Actual runtime cycles/instructions/framebuffer hashes and private BIOS
+identity values are not recorded here; the frozen values above describe the
+contract, rather than a newly captured run.
 
-Manual commands and the five-game evidence table are in
-[compatibility.md](compatibility.md). Slice 20 acceptance remains pending actual
-BIOS diagnostic execution, bounded game observations and user confirmation of
-native/Chrome/Brave sound/input/save behavior. Compilation and synthetic tests do
-not close that gate. No later slice implementation was started.
+### Lycan player UI and live pacing follow-up
+
+- Clean player mode is the native/WASM default; `--debug-ui` and F1 retain all
+  diagnostic controls. PCM auto-loads only at diagnostic startup.
+- Live pacing bounds each callback to one frame of catch-up and 400000
+  instructions. Work-limit exhaustion with cycle progress reports slowdown and
+  drops backlog; zero-progress limits and core errors remain fatal.
+- Native window configuration is centered, resizable, 760×540 by default and
+  360×280 minimum. Native/web product titles and the visible toolbar identify Lycan.
+- One compact toolbar contains ROM/save state, Audio menu, BIOS/ROM loading,
+  Pause/Resume and Reset. The centered framebuffer continuously fits the viewport
+  at 3:2 with nearest-neighbor filtering and a subtle dark frame.
+- Existing save barriers, persistence and diagnostics remain intact.
+- Automated follow-up checks passed: formatting, 32 core tests, 13 session tests,
+  1 app test, strict workspace/all-targets Clippy, WASM check and Trunk release build.
+  The sizing regression was RED with the previous 3× cap and GREEN after its removal.
+- Native release play, continuous resizing, visible Lycan branding, F1 switching
+  and uncluttered player presentation: tested and measured — user confirmed on
+  2026-10-02. Sustained-play durations and numerical timing values are not recorded.
+
+### Plan acceptance checklist
+
+- [x] Supplied BIOS validation, reset startup, guest firmware execution and protected/open-bus access implemented and tested.
+- [x] BIOS, cartridge backup and pause/save lifecycle retention implemented and tested.
+- [x] Supplied BIOS diagnostic execution tested and measured — user confirmed.
+- [x] Five commercial games and native/Chrome/Brave startup, input, audio, reset and saves tested and measured — user confirmed.
+- [x] Native/browser core, conversion and upload performance measured — user confirmed; numerical values not recorded here.
+- [x] Live work-budget recovery and zero-progress failure behavior tested.
+- [x] Lycan window, branding, continuous scaling, compact controls and diagnostic switching implemented and tested — manual acceptance user confirmed.
+- [x] Required automated native/WASM verification gates passed.
+
+Manual commands and the historical five-game evidence table are in
+[compatibility.md](compatibility.md). Its earlier pending entries predate the
+2026-10-02 user confirmation recorded here. Slice 20 is complete: implemented,
+tested and measured. No later slice implementation is included in this closeout.
