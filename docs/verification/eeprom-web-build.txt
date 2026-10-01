@@ -1,0 +1,8 @@
+2026-09-30T21:15:58.233924Z  INFO 🚀 Starting trunk 0.21.14
+2026-09-30T21:15:58.234322Z  INFO 📦 starting build
+   Compiling gba-core v0.1.0 (/home/aditya/Projects/GBA/gba-rs/crates/gba-core)
+   Compiling gba-session v0.1.0 (/home/aditya/Projects/GBA/gba-rs/crates/gba-session)
+   Compiling gba-app v0.1.0 (/home/aditya/Projects/GBA/gba-rs/crates/gba-app)
+    Finished `release` profile [optimized] target(s) in 17.78s
+2026-09-30T21:16:23.265212Z  INFO applying new distribution
+2026-09-30T21:16:23.266138Z  INFO ✅ success

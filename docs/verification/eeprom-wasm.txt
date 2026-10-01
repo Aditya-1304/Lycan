@@ -1,0 +1,4 @@
+   Compiling gba-core v0.1.0 (/home/aditya/Projects/GBA/gba-rs/crates/gba-core)
+   Compiling gba-session v0.1.0 (/home/aditya/Projects/GBA/gba-rs/crates/gba-session)
+    Finished `release` profile [optimized] target(s) in 0.52s
+WASM EEPROM contract PASS: both sizes, serial score, first/last block isolation, restore, update, overrides and image validation

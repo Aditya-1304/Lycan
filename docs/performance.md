@@ -1625,4 +1625,184 @@ Open `http://127.0.0.1:8080` in Chrome and Brave. For each target:
 
 Slice 15 is complete against the plan: automated checks pass and the user
 confirmed all manual target checks. Unreported measurements/environment fields
-remain explicitly unavailable. EEPROM (Slice 16) was not started.
+remain explicitly unavailable. Slice 16 EEPROM evidence is recorded below.
+
+## Slice 16 — EEPROM score recovery (2026-10-01)
+
+The cartridge now implements the EEPROM serial bus for 512-byte and 8-KiB
+hardware. Halfword accesses clock bit zero, with MSB-first command, address and
+data fields. Read responses contain four dummy clocks followed by 64 data
+clocks; writes replace one eight-byte block and return ready. Programming is
+synchronous, as in the current Flash abstraction; physical write-busy duration
+is not modeled. EEPROM is mapped in region `0D`; ROMs larger than 16 MiB retain
+ordinary ROM reads except in the final 256-byte EEPROM window.
+
+`EEPROM_V` retains family-identification evidence. Valid DMA3 command lengths
+resolve six versus fourteen address clocks (9/73 versus 17/81 halfwords).
+Only a complete command with a valid stop bit resolves capacity or changes
+bytes. Large EEPROM uses the low ten address bits for 1024 physical blocks.
+`Eeprom512` and `Eeprom8k` are explicit typed overrides, also parsed as
+`eeprom512` and `eeprom8k`. Already resolved capacity cannot silently change.
+A validated 512-byte or 8192-byte initial save can resolve an unknown capacity
+before guest execution. Until resolution, the clean, empty snapshot exposes
+initial-load/import storage but portable export remains disabled.
+
+The existing serialized disk/IndexedDB route is reused. Portable `GBAEEPR1`
+exports contain the original ROM SHA-256 and exactly 512 or 8192 backup bytes
+(552 or 8232 total). Core imports reject truncation or a mismatch with the
+resolved/overridden capacity before mutation. Imported bytes remain dirty;
+stale acknowledgments cannot clean newer revisions. Earlier save envelopes
+remain compatible.
+
+The two [original score cartridges](../roms/eeprom/README.md) use one assembly
+source with six/fourteen address clocks. They store distinct records in the
+first and last physical blocks. Green cells show the last-block score, blue
+cells show the independently restored first-block score. The contract checks
+all 38,400 pixels and every save byte, including untouched erased blocks.
+
+One focused core regression was added. It catches EEPROM DMA stores being
+unmapped, capacity/address aliasing, broken serial readback and lost restored
+blocks. RED failed at the first serial write with `UnmappedAddress` at
+`0x0d000000`, width 2. GREEN passes for both address widths. Original guest
+contracts supply the slice acceptance checks rather than additional duplicate
+unit tests. The first host probe also rejected the EEPROM-sized export through
+the prior decoder; the new envelope and production probes pass.
+
+### Fixture and automated evidence
+
+| Field | 512-byte cartridge | 8-KiB cartridge |
+|---|---|---|
+| ROM | `eeprom512-score.gba` | `eeprom8k-score.gba` |
+| ROM SHA-256 | `0d755a8bc3fd69600304d5115a234c6356c51d1b36faecf68e9f4bf95cd65c60` | `28629d0241c6861acdb38227f47a7af5926bc1ae12a64880c01a4c08263bce58` |
+| ROM bytes / save bytes | 1044 / 512 | 1048 / 8192 |
+| Startup / identification | Direct ARM, no BIOS; `EEPROM_V124`, automatic six-bit detection | Direct ARM, no BIOS; `EEPROM_V124`, automatic fourteen-bit detection |
+| Fresh score 1: PC / cycles / instructions | `0x0800020c` / 842,693 / 86,168 | `0x08000218` / 842,689 / 86,185 |
+| Fresh revision / dirty | 4 / true | 4 / true |
+| Reopened score 1: PC / cycles / instructions | `0x08000218` / 842,701 / 85,974 | `0x08000208` / 842,693 / 85,973 |
+| Reopened revision / dirty | 1 / false | 1 / false |
+| Updated score 2: PC / cycles / instructions | `0x0800020c` / 842,689 / 86,072 | `0x08000218` / 842,691 / 86,080 |
+| Updated revision / dirty | 3 / true | 3 / true |
+| Exact restored records | First `5a 11 00 00 00 00 00 00`; last `a5 01 00 00 00 00 00 00` | Same records at physical offsets 0 and 8184 |
+| Bounds | Three frames; 200,000 instructions/frame; 843,000 cycles | Same |
+| Completion evidence | `0x03000000 = 0x76`; score at `0x03000002`; encoded first-block score at `0x03000004`; exact pixels/bytes | Same |
+| Boundary PC | Source-defined polling `0x08000134..0x0800018c` or drawing `0x0800019c..0x0800022c` | Same |
+| Native persistence | PASS: production write and separate-process reopen; portable identity round-trip and failed replacement rejection | PASS: same |
+| Production WASM guest | PASS: serial read/write, restore/update, distinct blocks and import/override validation | PASS: same |
+| Live Linux visual / Chrome / Brave | PASS: user confirmed all manual checks | PASS: user confirmed all manual checks |
+
+Shared validation: PASS, 16 core unit tests, one backup integration test and
+nine session tests (26 total); workspace Clippy with all targets and warnings
+denied; all prior release fixtures; reproducible prior fixture build and both
+original EEPROM rebuilds; native release app; WASM app check; Trunk release
+bundle. The WASM contract executes production core/session code in Node,
+without launching a browser or proving IndexedDB behavior.
+
+Evidence: [core/session tests](verification/eeprom-tests.txt),
+[Clippy](verification/eeprom-clippy.txt),
+[prior builds](verification/eeprom-build-fixtures.txt),
+[EEPROM rebuilds](verification/eeprom-build.txt),
+[prior fixtures](verification/eeprom-fixtures.txt),
+[WASM contract](verification/eeprom-wasm.txt),
+[512-byte native write](verification/eeprom-native-write.txt),
+[512-byte reopen](verification/eeprom-native-reopen.txt),
+[8-KiB native write](verification/eeprom-native-large-write.txt),
+[8-KiB reopen](verification/eeprom-native-large-reopen.txt),
+[WASM app check](verification/eeprom-app-wasm.txt), and
+[Trunk release](verification/eeprom-web-build.txt).
+Native probe data is in `/tmp/gba-eeprom-20261001` (temporary).
+
+### Timing and environment fields
+
+The user supplied the following Chrome and Brave timings for
+`eeprom512-score.gba`, with 120 samples per metric. Earlier timing entries are
+preserved. Native and 8-KiB cartridge timings were not supplied; CLI diagnostic
+completion durations are not sustained app measurements.
+
+| Field | Linux | Chrome | Brave |
+|---|---|---|---|
+| 512-byte ROM core frame mean / p95 (ms) | Not measured | 6.703 / 10.000 | 7.257 / 9.600 |
+| 512-byte ROM pixel conversion mean / p95 (ms) | Not measured | 0.142 / 0.300 | 0.150 / 0.300 |
+| 512-byte ROM texture submission mean / p95 (ms) | Not measured | 0.030 / 0.100 | 0.017 / 0.100 |
+| 512-byte ROM samples core / conversion / submission | Not recorded | 120 / 120 / 120 | 120 / 120 / 120 |
+| 8-KiB ROM core / conversion / submission timings | Not measured | Not measured | Not measured |
+| 8-KiB ROM sample counts | Not recorded | Not recorded | Not recorded |
+| Sustained unthrottled speed | Not measured | Not measured | Not measured |
+| Both sizes: save/reopen, both bands, import/export, failure/retry | PASS, user confirmed | PASS, user confirmed | PASS, user confirmed |
+| Environment | Linux 7.2.7-arch1-1; Rust/Cargo 1.98.1; ARM assembler 2.47.20260726; Node v26.10.0 | Version/environment not recorded | Version/environment not recorded |
+
+### User-supplied runtime snapshots
+
+| Field | Chrome | Brave |
+|---|---|---|
+| Loaded cartridge | eeprom512-score.gba | eeprom512-score.gba |
+| Backup selection / detection / override | Some(Eeprom) / Identified(Eeprom) / None | Some(Eeprom) / Identified(Eeprom) / None |
+| EEPROM capacity | 512 bytes | 512 bytes |
+| Storage status | Backup restored | Saved revision 28 |
+| Instructions | 13,831,834 | 36,753,045 |
+| GBA cycles | 140,135,053 | 372,391,632 |
+| Execution state | Running | Running |
+| Core PCM rate | 32,768 Hz | 32,768 Hz |
+| Produced PCM samples | 273,701 | 727,327 |
+| Staging drops / empty FIFO | 0 / 0 | 0 / 0 |
+| Host audio | Off; Enable audio available | Off; Enable audio available |
+
+These snapshots identify the 512-byte cartridge and its measured timings.
+Acceptance for both EEPROM sizes, including native visual checks, browser
+reopening, import/export, overrides and failure/retry, is based on the user's
+explicit confirmation that everything was checked manually. No timing from
+the 512-byte cartridge is attributed to the 8-KiB cartridge.
+
+### Manual commands and acceptance
+
+PASS: the user confirmed all manual checks complete for both EEPROM sizes.
+Commands and checks below are retained for reproducing acceptance.
+
+Native app:
+
+```bash
+cd /home/aditya/Projects/GBA/gba-rs
+cargo run --locked -p gba-app --release
+```
+
+Browser server (keep the same origin across save/reopen):
+
+```bash
+cd /home/aditya/Projects/GBA/gba-rs
+env -u NO_COLOR trunk --config web/Trunk.toml serve --release --address 127.0.0.1 --port 8080
+```
+
+Open `http://127.0.0.1:8080` in Chrome and Brave. Repeat for **Load EEPROM
+512-byte score** and **Load EEPROM 8-KiB score**:
+
+1. Choose **Auto detect**, load the score, and confirm EEPROM capacity is 512
+   or 8192 bytes. Tap/release Z several times; both bands must have equal counts.
+2. Wait for the saved revision acknowledgment. Close the entire app/tab, reopen
+   on the same origin and load the same ROM. Both bands must retain their counts.
+3. Export, increment again and wait for saved acknowledgment. Import the older
+   export, resume, and confirm both bands return to the exported count. Reopen
+   again to check the imported state was stored.
+4. Reject a truncated export and an export from the other EEPROM ROM without
+   changing the score. Select the matching `Eeprom512`/`Eeprom8k` override,
+   reload, and confirm correct restore. Return to **Auto detect** afterward.
+5. Use the Slice 14 IndexedDB transaction-abort procedure to fail a save. It
+   must remain pending; restore the method and click **Retry**, then reopen to
+   confirm only the successful write was acknowledged.
+6. Enter separate millisecond measurements for each ROM, and report browser
+   versions when available. Manual acceptance is complete; unsupplied
+   measurements and environment details remain explicitly unavailable.
+
+### Plan acceptance checklist
+
+- [x] EEPROM command/address/data behavior for both supported sizes.
+- [x] Tested automatic size detection, signature evidence and validated explicit overrides.
+- [x] Original fixtures with frozen identities and bounded exact-output contracts.
+- [x] Both capacities pass serial read/write, restore/update and separate-process native reopening.
+- [x] Existing persistence route reused; imports validate capacity before mutation.
+- [x] Previous regression gates pass; performance evidence and manual commands updated.
+- [x] User-performed native visual acceptance (user confirmed).
+- [x] Chrome and Brave persistence, visual, import/export and failed-save/retry acceptance for both sizes (user confirmed).
+
+Slice 16 is complete against the plan: automated checks pass and the user
+confirmed all manual platform acceptance checks for both EEPROM sizes.
+Unsupplied measurements/environment fields remain explicitly unavailable.
+No Slice 17 implementation was included.

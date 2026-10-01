@@ -1,0 +1,8 @@
+EEPROM guest PASS: capacity=512 score=1 PC=0x0800020c cycles=842693 instructions=86168 revision=4 dirty=true
+EEPROM guest PASS: capacity=512 score=1 PC=0x08000218 cycles=842701 instructions=85974 revision=1 dirty=false
+EEPROM guest PASS: capacity=512 score=2 PC=0x0800020c cycles=842689 instructions=86072 revision=3 dirty=true
+EEPROM guest PASS: capacity=8192 score=1 PC=0x08000218 cycles=842689 instructions=86185 revision=4 dirty=true
+EEPROM guest PASS: capacity=8192 score=1 PC=0x08000208 cycles=842693 instructions=85973 revision=1 dirty=false
+EEPROM guest PASS: capacity=8192 score=2 PC=0x08000218 cycles=842691 instructions=86080 revision=3 dirty=true
+EEPROM guest PASS: capacity=512 score=1 PC=0x08000218 cycles=842701 instructions=85974 revision=1 dirty=false
+Native backup read PASS: ROM=0d755a8bc3fd69600304d5115a234c6356c51d1b36faecf68e9f4bf95cd65c60, save=/tmp/gba-eeprom-20261001/0d755a8bc3fd69600304d5115a234c6356c51d1b36faecf68e9f4bf95cd65c60.gbasav, export/import validated, failed replacement rejected

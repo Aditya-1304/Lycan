@@ -1,10 +1,11 @@
 //! Platform storage boundary. The app dispatches at most one operation at a time;
 //! every completion carries ROM identity, session generation and snapshot revision.
 
-use gba_session::{FLASH64_BYTES, FLASH128_BYTES, SRAM_BYTES};
+use gba_session::{EEPROM512_BYTES, EEPROM8K_BYTES, FLASH64_BYTES, FLASH128_BYTES, SRAM_BYTES};
 use sha2::{Digest, Sha256};
 use std::sync::mpsc::{self, Receiver, Sender};
 
+const EEPROM_MAGIC: &[u8; 8] = b"GBAEEPR1";
 const MAGIC: &[u8; 8] = b"GBASRAM1";
 const FLASH128_MAGIC: &[u8; 8] = b"GBAFL128";
 const FLASH_MAGIC: &[u8; 8] = b"GBAFLS64";
@@ -26,9 +27,11 @@ impl Identity {
 /// Raw saves are deliberately rejected because their cartridge cannot be verified.
 pub fn encode(identity: &Identity, bytes: &[u8]) -> Vec<u8> {
     let mut output = Vec::with_capacity(40 + bytes.len());
-    // Keep the existing SRAM envelope byte-for-byte compatible. Flash exports
-    // declare their own capacity; the core validates it against the loaded chip.
-    output.extend_from_slice(if bytes.len() == FLASH128_BYTES {
+    // Keep prior envelopes compatible. EEPROM declares a supported capacity;
+    // the core additionally validates it against detected or overridden hardware.
+    output.extend_from_slice(if matches!(bytes.len(), EEPROM512_BYTES | EEPROM8K_BYTES) {
+        EEPROM_MAGIC
+    } else if bytes.len() == FLASH128_BYTES {
         FLASH128_MAGIC
     } else if bytes.len() == FLASH64_BYTES {
         FLASH_MAGIC
@@ -44,9 +47,10 @@ pub fn decode(identity: &Identity, bytes: &[u8]) -> Result<Vec<u8>, String> {
     let valid_sram = bytes.len() == 40 + SRAM_BYTES && &bytes[..8] == MAGIC;
     let valid_flash = bytes.len() == 40 + FLASH64_BYTES && &bytes[..8] == FLASH_MAGIC;
     let valid_banked = bytes.len() == 40 + FLASH128_BYTES && &bytes[..8] == FLASH128_MAGIC;
-    if !valid_sram && !valid_flash && !valid_banked {
+    let valid_eeprom = matches!(bytes.len(), 552 | 8232) && &bytes[..8] == EEPROM_MAGIC;
+    if !valid_sram && !valid_flash && !valid_banked && !valid_eeprom {
         return Err(
-            "Expected a GBASRAM1 (32768 bytes), GBAFLS64 (65536 bytes), or GBAFL128 (131072 bytes) backup export".into(),
+            "Expected a GBASRAM1 (32768 bytes), GBAFLS64 (65536 bytes), GBAFL128 (131072 bytes), or GBAEEPR1 (512 or 8192 bytes) backup export".into(),
         );
     }
     if bytes[8..40] != identity.0 {
@@ -374,8 +378,16 @@ pub fn probe(mode: &str) -> Result<(), String> {
     mod flash_contract;
     #[path = "../../../roms/flash-banked/contract.rs"]
     mod banked_contract;
+    #[path = "../../../roms/eeprom/contract.rs"]
+    mod eeprom_contract;
     type GuestRun = fn(Option<&[u8]>, bool, u16) -> gba_session::SaveImage;
-    let (rom, run): (&[u8], GuestRun) = if mode.starts_with("banked-") {
+    let (rom, run): (&[u8], GuestRun) = if mode.starts_with("eeprom512-") {
+        eeprom_contract::verify();
+        (eeprom_contract::SMALL_ROM, eeprom_contract::run_small)
+    } else if mode.starts_with("eeprom8k-") {
+        eeprom_contract::verify();
+        (eeprom_contract::LARGE_ROM, eeprom_contract::run_large)
+    } else if mode.starts_with("banked-") {
         banked_contract::verify();
         (banked_contract::ROM, banked_contract::run)
     } else if mode.starts_with("flash-") {
@@ -386,7 +398,9 @@ pub fn probe(mode: &str) -> Result<(), String> {
         (contract::ROM, contract::run)
     };
     let mode = mode
-        .strip_prefix("banked-")
+        .strip_prefix("eeprom512-")
+        .or_else(|| mode.strip_prefix("eeprom8k-"))
+        .or_else(|| mode.strip_prefix("banked-"))
         .or_else(|| mode.strip_prefix("flash-"))
         .unwrap_or(mode);
     let identity = Identity::of(rom);
@@ -404,7 +418,7 @@ pub fn probe(mode: &str) -> Result<(), String> {
             let bytes = saved.ok_or("Probe expected an existing saved score")?;
             run(Some(&bytes), false, 1)
         }
-        _ => return Err("Use --save-probe [flash-|banked-]write or [flash-|banked-]read".into()),
+        _ => return Err("Use --save-probe [flash-|banked-|eeprom512-|eeprom8k-]write or [flash-|banked-|eeprom512-|eeprom8k-]read".into()),
     };
     let portable = encode(&identity, &image.bytes);
     assert_eq!(decode(&identity, &portable)?, image.bytes);

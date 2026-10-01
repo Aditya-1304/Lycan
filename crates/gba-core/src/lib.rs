@@ -1,6 +1,8 @@
 #![forbid(unsafe_code)]
 
 mod backup;
+mod eeprom;
+pub use eeprom::{EEPROM512_BYTES, EEPROM8K_BYTES};
 mod flash;
 mod sram;
 pub use backup::{BackupDetection, BackupSelection, BackupType, detect_backup};
@@ -1461,6 +1463,8 @@ struct System {
     sram: Option<crate::sram::Sram>,
     /// Flash commands and bytes share the cartridge lifecycle, not host storage.
     flash: Option<crate::flash::Flash>,
+    /// Serial cartridge backup occupies the EEPROM window in ROM waitstate two.
+    eeprom: Option<eeprom::Eeprom>,
     /// Explicitly mapped original test firmware; absent for normal ROM loads.
     test_firmware: bool,
     ewram: Vec<u8>,
@@ -1489,6 +1493,7 @@ impl System {
             rom: Vec::new(),
             sram: None,
             flash: None,
+            eeprom: None,
             test_firmware: false,
             ewram: vec![0; 256 * 1024],
             iwram: vec![0; 32 * 1024],
@@ -1595,6 +1600,13 @@ impl System {
             self.gamepak = GamePak::default();
             self.advance_time(2);
         }
+        if channel == 3
+            && width == 2
+            && !self.dma[channel].sequential
+            && self.eeprom_address(self.dma[channel].destination)
+        {
+            self.eeprom.as_mut().unwrap().begin_dma(self.dma[channel].count);
+        }
         let access = Access {
             kind: AccessKind::Data,
             sequential: self.dma[channel].sequential,
@@ -1669,6 +1681,11 @@ impl System {
             return Err(CoreError::InvalidAccessAlignment { address, width: 2 });
         }
         self.charge(address, 2, access);
+        if self.eeprom_address(address) && matches!(access.kind, AccessKind::Data) {
+            let value = self.eeprom.as_mut().unwrap().read();
+            self.open_bus = u32::from(value) * 0x0001_0001;
+            return Ok(value);
+        }
         if let Some(value) = self.backup_read(address) {
             let value = u16::from(value) * 0x0101;
             self.open_bus = u32::from(value) * 0x0001_0001;
@@ -1725,6 +1742,10 @@ impl System {
     /// Applies a bus beat after its access time has synchronized scanout. Word
     /// transfers reuse this path without charging the hardware clock twice.
     fn write_halfword(&mut self, address: u32, value: u16) -> Result<(), CoreError> {
+        if self.eeprom_address(address) {
+            self.eeprom.as_mut().unwrap().write(value);
+            return Ok(());
+        }
         let bytes = value.to_le_bytes();
 
         if let Some(range) = ram_range(address, EWRAM_START, self.ewram.len(), 2) {
@@ -1837,6 +1858,14 @@ impl System {
 
         self.write_halfword(address, value as u16)?;
         self.write_halfword(address.wrapping_add(2), (value >> 16) as u16)
+    }
+
+    /// EEPROM uses all of region 0D for ROMs up to 16 MiB, and only the
+    /// final 256 bytes for larger cartridges. Other ROM mirrors remain intact.
+    fn eeprom_address(&self, address: u32) -> bool {
+        self.eeprom.is_some()
+            && (0x0d000000..0x0e000000).contains(&address)
+            && (self.rom.len() <= 0x01000000 || address >= 0x0dffff00)
     }
 
     /// The eight-bit save bus delegates mirroring and commands to the selected chip.
@@ -2459,6 +2488,17 @@ impl Machine {
                 self.backup.selected() == Some(BackupType::Flash128),
             ));
         }
+        if matches!(
+            self.backup.selected(),
+            Some(BackupType::Eeprom | BackupType::Eeprom512 | BackupType::Eeprom8k)
+        ) {
+            let capacity = match self.backup.selected() {
+                Some(BackupType::Eeprom512) => Some(EEPROM512_BYTES),
+                Some(BackupType::Eeprom8k) => Some(EEPROM8K_BYTES),
+                _ => None,
+            };
+            self.system.eeprom = Some(eeprom::Eeprom::new(capacity));
+        }
         self.system.rom.extend_from_slice(rom);
         Ok(())
     }
@@ -2475,6 +2515,7 @@ impl Machine {
             .as_ref()
             .map(sram::Sram::image)
             .or_else(|| self.system.flash.as_ref().map(flash::Flash::image))
+            .or_else(|| self.system.eeprom.as_ref().map(eeprom::Eeprom::image))
     }
 
     /// Loads validated initial bytes before execution, without making them dirty.
@@ -2483,6 +2524,8 @@ impl Machine {
             sram.load(bytes)
         } else if let Some(flash) = &mut self.system.flash {
             flash.load(bytes)
+        } else if let Some(eeprom) = &mut self.system.eeprom {
+            eeprom.load(bytes)
         } else {
             Err("cartridge has no supported backup hardware")
         }
@@ -2494,6 +2537,8 @@ impl Machine {
             sram.import(bytes)
         } else if let Some(flash) = &mut self.system.flash {
             flash.import(bytes)
+        } else if let Some(eeprom) = &mut self.system.eeprom {
+            eeprom.import(bytes)
         } else {
             Err("cartridge has no supported backup hardware")
         }
@@ -2505,6 +2550,8 @@ impl Machine {
             sram.acknowledge(revision);
         } else if let Some(flash) = &mut self.system.flash {
             flash.acknowledge(revision);
+        } else if let Some(eeprom) = &mut self.system.eeprom {
+            eeprom.acknowledge(revision);
         }
     }
 
@@ -2699,6 +2746,10 @@ impl Machine {
         let firmware = self.system.test_firmware;
         let backup = self.backup.clone();
         let sram = self.system.sram.take();
+        let mut eeprom = self.system.eeprom.take();
+        if let Some(chip) = &mut eeprom {
+            chip.reset();
+        }
         let mut flash = self.system.flash.take();
         if let Some(chip) = &mut flash {
             chip.reset();
@@ -2708,6 +2759,7 @@ impl Machine {
         self.backup = backup;
         self.system.sram = sram;
         self.system.flash = flash;
+        self.system.eeprom = eeprom;
         if firmware {
             self.enable_test_firmware();
         }
@@ -2776,6 +2828,82 @@ fn range_for(address: u32, start: u32, length: usize, width: usize) -> Option<Ra
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// DMA command lengths select the EEPROM address width. A high block must
+    /// survive serial readback and restore without aliasing a smaller device.
+    #[test]
+    fn eeprom_dma_detects_capacity_and_restores_serial_blocks() {
+        let access = Access {
+            kind: AccessKind::Data,
+            sequential: false,
+        };
+        for (address_bits, block, capacity) in [(6, 63, 512), (14, 1023, 8192)] {
+            let mut machine = Machine::new();
+            machine
+                .load_rom(include_bytes!("../../../roms/backup/eeprom.gba"))
+                .unwrap();
+            let data = 0xa501_2345_6789_abcd_u64;
+            let transfer = |machine: &mut Machine, bits: &[u16]| {
+                for (index, bit) in bits.iter().enumerate() {
+                    machine
+                        .system
+                        .write16_impl(0x02000000 + index as u32 * 2, *bit, access)
+                        .unwrap();
+                }
+                for (address, value) in [(0x040000d4, 0x02000000), (0x040000d8, 0x0d000000)] {
+                    machine.system.write32_impl(address, value, access).unwrap();
+                }
+                machine
+                    .system
+                    .write16_impl(0x040000dc, bits.len() as u16, access)
+                    .unwrap();
+                machine
+                    .system
+                    .write16_impl(0x040000de, 0x8000, access)
+                    .unwrap();
+                while machine.system.dma[3].active {
+                    machine.system.dma_beat(3).unwrap();
+                }
+            };
+            let address: Vec<u16> = (0..address_bits)
+                .rev()
+                .map(|shift| ((block >> shift) & 1) as u16)
+                .collect();
+            let mut write = vec![1, 0];
+            write.extend_from_slice(&address);
+            write.extend((0..64).rev().map(|shift| ((data >> shift) & 1) as u16));
+            write.push(0);
+            transfer(&mut machine, &write);
+            let saved = machine
+                .save_image()
+                .expect("EEPROM must expose persistence");
+            assert_eq!(saved.bytes.len(), capacity);
+            assert_eq!(&saved.bytes[block * 8..block * 8 + 8], &data.to_be_bytes());
+            assert!(saved.dirty);
+            machine.load_save(&saved.bytes).unwrap();
+            machine.reset();
+            let mut read = vec![1, 1];
+            read.extend_from_slice(&address);
+            read.push(0);
+            transfer(&mut machine, &read);
+            for _ in 0..4 {
+                machine.system.read16_impl(0x0d000000, access).unwrap();
+            }
+            let mut actual = 0_u64;
+            for _ in 0..64 {
+                actual = (actual << 1)
+                    | u64::from(machine.system.read16_impl(0x0d000000, access).unwrap() & 1);
+            }
+            assert_eq!(actual, data);
+            assert!(!machine.save_image().unwrap().dirty);
+            assert!(
+                machine
+                    .import_save(&vec![0; if capacity == 512 { 8192 } else { 512 }])
+                    .is_err()
+            );
+            assert_eq!(machine.save_image().unwrap().bytes, saved.bytes);
+        }
+    }
 
     /// Bank-local programming and sector erase must preserve the other bank.
     /// A complete persisted image restores both banks after protocol reset.

@@ -15,6 +15,8 @@ struct RomRead {
 /// Original score cartridges use the normal loader and persistence route.
 const FLASH_DIAGNOSTIC_ROM: &[u8] = include_bytes!("../../../roms/gba-tests/save/flash64.gba");
 const BANKED_DIAGNOSTIC_ROM: &[u8] = include_bytes!("../../../roms/gba-tests/save/flash128.gba");
+const EEPROM512_ROM: &[u8] = include_bytes!("../../../roms/eeprom512-score.gba");
+const EEPROM8K_ROM: &[u8] = include_bytes!("../../../roms/eeprom8k-score.gba");
 const BANKED_ROM: &[u8] = include_bytes!("../../../roms/flash-banked-score.gba");
 const FLASH_ROM: &[u8] = include_bytes!("../../../roms/flash-score.gba");
 const SRAM_ROM: &[u8] = include_bytes!("../../../roms/sram.gba");
@@ -473,7 +475,12 @@ impl GbaApp {
                 self.save_import_open = self.storage.busy;
             }
             if ui
-                .add_enabled(!self.storage.busy, egui::Button::new("Export save"))
+                // An unresolved EEPROM exposes storage for restore/import, but has
+                // no capacity-bearing snapshot suitable for portable export yet.
+                .add_enabled(
+                    !self.storage.busy && self.session.save_image().is_some_and(|image| !image.bytes.is_empty()),
+                    egui::Button::new("Export save"),
+                )
                 .clicked()
                 && let Some(image) = self.session.save_image()
             {
@@ -580,6 +587,12 @@ impl GbaApp {
             if ui.button("Reset").clicked() {
                 self.reset_demo();
                 ui.ctx().request_repaint();
+            }
+            if ui.button("Load EEPROM 512-byte score").clicked() {
+                self.load_rom_bytes("eeprom512-score.gba", EEPROM512_ROM);
+            }
+            if ui.button("Load EEPROM 8-KiB score").clicked() {
+                self.load_rom_bytes("eeprom8k-score.gba", EEPROM8K_ROM);
             }
             if ui.button("Load Flash128 test").clicked() {
                 self.load_rom_bytes("flash128.gba", BANKED_DIAGNOSTIC_ROM);
@@ -793,6 +806,8 @@ impl GbaApp {
                     gba_session::BackupType::None,
                     gba_session::BackupType::Sram,
                     gba_session::BackupType::Eeprom,
+                    gba_session::BackupType::Eeprom512,
+                    gba_session::BackupType::Eeprom8k,
                     gba_session::BackupType::Flash64,
                     gba_session::BackupType::Flash128,
                 ] {
@@ -806,6 +821,17 @@ impl GbaApp {
             backup.detection,
             backup.manual_override
         ));
+        if matches!(
+            backup.selected(),
+            Some(gba_session::BackupType::Eeprom | gba_session::BackupType::Eeprom512 | gba_session::BackupType::Eeprom8k)
+        ) {
+            let size = self.session.save_image().map_or(0, |image| image.bytes.len());
+            ui.label(if size == 0 {
+                "EEPROM capacity unresolved; serial commands or a validated backup resolve it".to_owned()
+            } else {
+                format!("EEPROM capacity: {size} bytes")
+            });
+        }
         if backup.selected().is_none() {
             ui.label("Backup unresolved: choose an override and reload the cartridge if save hardware is needed.");
         }
