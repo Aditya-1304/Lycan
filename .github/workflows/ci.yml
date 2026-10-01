@@ -51,20 +51,58 @@ jobs:
           node --check web/audio.js
           node --check web/pcm-worklet.js
 
+      - name: Backup contracts
+        run: |
+          python3 roms/backup/verify.py
+          python3 roms/sram/verify.py
+          python3 roms/flash/verify.py
+          python3 roms/flash-banked/verify.py
+          python3 roms/eeprom/verify.py
+
+      - name: PSG audio contracts
+        run: |
+          python3 roms/pulse/verify.py
+          python3 roms/wave/verify.py
+          python3 roms/noise/verify.py
+
       - name: Formatting
         run: |
           cargo fmt --all -- --check
 
-      - name: Core tests
-        run: |
-          cargo test --locked -p gba-core
-
-      - name: Session tests
-        run: |
-          cargo test --locked -p gba-session
-
       - name: Workspace tests
         run: cargo test --locked --workspace
+
+      - name: Native persistence reopen
+        shell: bash
+        run: |
+          set -euo pipefail
+          ROOT="$(mktemp -d)"
+          trap 'rm -rf "$ROOT"' EXIT
+
+          GBA_SAVE_DIR="$ROOT/sram" \
+            cargo run --locked -p gba-app --release -- --save-probe write
+          GBA_SAVE_DIR="$ROOT/sram" \
+            cargo run --locked -p gba-app --release -- --save-probe read
+
+          GBA_SAVE_DIR="$ROOT/flash" \
+            cargo run --locked -p gba-app --release -- --save-probe flash-write
+          GBA_SAVE_DIR="$ROOT/flash" \
+            cargo run --locked -p gba-app --release -- --save-probe flash-read
+
+          GBA_SAVE_DIR="$ROOT/flash128" \
+            cargo run --locked -p gba-app --release -- --save-probe banked-write
+          GBA_SAVE_DIR="$ROOT/flash128" \
+            cargo run --locked -p gba-app --release -- --save-probe banked-read
+
+          GBA_SAVE_DIR="$ROOT/eeprom512" \
+            cargo run --locked -p gba-app --release -- --save-probe eeprom512-write
+          GBA_SAVE_DIR="$ROOT/eeprom512" \
+            cargo run --locked -p gba-app --release -- --save-probe eeprom512-read
+
+          GBA_SAVE_DIR="$ROOT/eeprom8k" \
+            cargo run --locked -p gba-app --release -- --save-probe eeprom8k-write
+          GBA_SAVE_DIR="$ROOT/eeprom8k" \
+            cargo run --locked -p gba-app --release -- --save-probe eeprom8k-read
 
       - name: Headless fixture
         run: |
