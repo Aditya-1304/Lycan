@@ -1892,6 +1892,14 @@ impl System {
             self.oam[range].copy_from_slice(&bytes);
             return Ok(());
         }
+
+        // Ordinary writes to cartridge ROM space do not trap on the GBA.
+        // Cartridge peripherals such as EEPROM must intercept their addresses
+        // before reaching this fallback. Future GPIO/RTC handling must do the same.
+        if (0x0800_0000..0x0e00_0000).contains(&address) {
+            return Ok(());
+        }
+
         Err(CoreError::UnmappedAddress { address, width: 2 })
     }
 
@@ -2197,6 +2205,10 @@ impl CpuBus for System {
             if range.start < object_start {
                 self.write_halfword(address & !1, u16::from(value) * 0x0101)?;
             }
+        } else if (0x0800_0000..0x0e00_0000).contains(&address) {
+            // ROM bus store with no selected cartridge peripheral.
+            // The access consumes timing but has no storage effect.
+            return Ok(());
         } else if ram_range(address, OAM_START, OAM_BYTES, 1).is_none() {
             return Err(CoreError::UnmappedAddress { address, width: 1 });
         }
@@ -3805,5 +3817,39 @@ mod tests {
             machine.inspect16(IO_START + 0x202).unwrap() & 0x1000,
             0x1000
         );
+    }
+
+    #[test]
+    fn firered_agbprint_init_rom_writes_do_not_fault_or_mutate_rom() {
+        let mut bus = System::new();
+        bus.rom = vec![0x5a; 16 * 1024 * 1024];
+
+        let access = Access {
+            kind: AccessKind::Data,
+            sequential: false,
+        };
+
+        let original_prefix = bus.rom[..16].to_vec();
+
+        // Retail FireRed Rev 0 retained AGBPrintInit. These are cartridge-ROM
+        // writes used by that SDK debug facility. On an ordinary cartridge they
+        // must not raise a CPU-visible memory fault.
+        for (address, value) in [
+            (0x09fe_2ffe, 0x0020),
+            (0x09fe_20f8, 0x0000),
+            (0x09fe_20fc, 0x0000),
+            (0x09fe_20fe, 0x0000),
+            (0x09fe_20fa, 0x00fd),
+            (0x09fe_2ffe, 0x0000),
+        ] {
+            bus.write16_impl(address, value, access).unwrap();
+        }
+
+        assert_eq!(&bus.rom[..16], original_prefix.as_slice());
+
+        // Ordinary in-range ROM is equally read-only.
+        bus.write16_impl(ROM_START, 0x1234, access).unwrap();
+
+        assert_eq!(&bus.rom[..16], original_prefix.as_slice());
     }
 }
