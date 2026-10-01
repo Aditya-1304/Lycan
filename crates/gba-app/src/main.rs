@@ -16,8 +16,11 @@ fn main() -> eframe::Result {
         return saves::probe(arguments.get(index + 1).map_or("", String::as_str))
             .map_err(|error| eframe::Error::AppCreation(Box::new(std::io::Error::other(error))));
     }
-    if arguments.iter().any(|argument| argument == "--audio-probe") {
-        return audio::probe()
+    if let Some(index) = arguments
+        .iter()
+        .position(|argument| argument == "--audio-probe")
+    {
+        return audio::probe(arguments.get(index + 1).map_or("pcm", String::as_str))
             .map_err(|error| eframe::Error::AppCreation(Box::new(std::io::Error::other(error))));
     }
     // Native platforms use eframe's Glow renderer and the configured winit backend.

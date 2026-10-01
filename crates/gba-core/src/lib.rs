@@ -2,7 +2,7 @@
 
 mod backup;
 mod eeprom;
-pub use eeprom::{EEPROM512_BYTES, EEPROM8K_BYTES};
+pub use eeprom::{EEPROM8K_BYTES, EEPROM512_BYTES};
 mod flash;
 mod sram;
 pub use backup::{BackupDetection, BackupSelection, BackupType, detect_backup};
@@ -10,6 +10,7 @@ pub use flash::{FLASH64_BYTES, FLASH128_BYTES};
 pub use sram::{SRAM_BYTES, SaveImage};
 
 mod audio;
+mod noise;
 mod pulse;
 mod wave;
 pub use audio::PCM_RATE;
@@ -1561,7 +1562,7 @@ impl System {
     /// means 65,536 transfers; immediate mode ignores the repeat bit.
     fn configure_dma(&mut self, channel: usize, value: u16) {
         let base = 0xb0 + channel * 12;
-        let sound = channel == 1 && value & 0x3000 == 0x3000;
+        let sound = matches!(channel, 1 | 2) && value & 0x3000 == 0x3000;
         let old = self.dma[channel].control;
         self.dma[channel].control = value;
         if value & 0x8000 == 0 {
@@ -1596,7 +1597,7 @@ impl System {
     /// memory access advances scanout and requests through the ordinary bus path.
     fn dma_beat(&mut self, channel: usize) -> Result<(), CoreError> {
         let control = self.dma[channel].control;
-        let sound = channel == 1 && control & 0x3000 == 0x3000;
+        let sound = matches!(channel, 1 | 2) && control & 0x3000 == 0x3000;
         let width = if sound || control & 0x400 != 0 { 4 } else { 2 };
         if !self.dma[channel].sequential {
             self.gamepak = GamePak::default();
@@ -1607,7 +1608,10 @@ impl System {
             && !self.dma[channel].sequential
             && self.eeprom_address(self.dma[channel].destination)
         {
-            self.eeprom.as_mut().unwrap().begin_dma(self.dma[channel].count);
+            self.eeprom
+                .as_mut()
+                .unwrap()
+                .begin_dma(self.dma[channel].count);
         }
         let access = Access {
             kind: AccessKind::Data,
@@ -1762,9 +1766,9 @@ impl System {
 
         if let Some(range) = range_for(address, IO_START, self.io.len(), 2) {
             let offset = range.start;
-            if matches!(offset, 0xc6 | 0xde) {
+            if matches!(offset, 0xc6 | 0xd2 | 0xde) {
                 self.io[range].copy_from_slice(&bytes);
-                self.configure_dma(if offset == 0xc6 { 1 } else { 3 }, value);
+                self.configure_dma((offset - 0xba) / 12, value);
                 return Ok(());
             }
             if (0x100..0x110).contains(&offset) {
@@ -1774,7 +1778,7 @@ impl System {
             }
             if matches!(
                 offset,
-                0x60 | 0x62 | 0x64 | 0x68 | 0x6c | 0x70 | 0x72 | 0x74 | 0x90
+                0x60 | 0x62 | 0x64 | 0x68 | 0x6c | 0x70 | 0x72 | 0x74 | 0x78 | 0x7c | 0x90
                     ..=0x9e | 0x80 | 0x82 | 0x84 | 0x88
             ) {
                 self.audio.write_control(offset, value);
@@ -2004,12 +2008,16 @@ impl System {
         let (irq, refill) = self.audio.advance(target - self.cycles, target);
         let flags = u16::from_le_bytes([self.io[0x202], self.io[0x203]]) | irq;
         self.io[0x202..0x204].copy_from_slice(&flags.to_le_bytes());
-        if refill[usize::from(self.dma[1].destination == IO_START + 0xa4)]
-            && self.dma[1].control & 0xb000 == 0xb000
-            && matches!(self.dma[1].destination, 0x040000a0 | 0x040000a4)
-            && !self.dma[1].active
-        {
-            self.dma[1].active = true;
+        // Both sound DMA channels independently follow their latched FIFO
+        // destination. Arbitration retains the ordinary DMA1-before-DMA2 order.
+        for dma in &mut self.dma[1..=2] {
+            if refill[usize::from(dma.destination == IO_START + 0xa4)]
+                && dma.control & 0xb000 == 0xb000
+                && matches!(dma.destination, 0x040000a0 | 0x040000a4)
+                && !dma.active
+            {
+                dma.active = true;
+            }
         }
         self.cycles = target;
         self.refresh_status();
@@ -3294,7 +3302,7 @@ mod tests {
     // to host deadlines. Existing DMA3 image tests do not consume audio FIFOs.
     #[test]
     fn timer_fifo_dma_sound_is_identical_across_bounded_advances() {
-        let run = |chunk: u64, fifo: u32, bias: u16| {
+        let run = |chunk: u64, fifo: u32, bias: u16, channel: usize| {
             let mut machine = Machine::new();
             machine.system.halted = true;
             for (index, byte) in machine.system.ewram.iter_mut().take(128).enumerate() {
@@ -3306,16 +3314,16 @@ mod tests {
             };
             machine
                 .system
-                .write32_impl(IO_START + 0xbc, EWRAM_START, data)
+                .write32_impl(IO_START + 0xb0 + channel as u32 * 12, EWRAM_START, data)
                 .unwrap();
             machine
                 .system
-                .write32_impl(IO_START + 0xc0, IO_START + fifo, data)
+                .write32_impl(IO_START + 0xb4 + channel as u32 * 12, IO_START + fifo, data)
                 .unwrap();
             // FIFO mode forces four words and a fixed destination regardless of count/width.
             machine
                 .system
-                .write32_impl(IO_START + 0xc4, 0xb2000001, data)
+                .write32_impl(IO_START + 0xb8 + channel as u32 * 12, 0xb2000001, data)
                 .unwrap();
             machine
                 .system
@@ -3355,11 +3363,14 @@ mod tests {
             assert!(pcm.iter().any(|&sample| sample < -0.5));
             pcm
         };
-        // Both FIFO destinations and PWM cadences must remain independent of
+        // DMA2 previously never enabled or refilled. Both channels, FIFO
+        // destinations and PWM cadences must remain independent of
         // host chunk size, including chunks that split a PWM sample interval.
         for fifo in [0xa0, 0xa4] {
             for bias in [0x200, 0x4200, 0x8200, 0xc200] {
-                assert_eq!(run(37, fifo, bias), run(4096, fifo, bias));
+                for channel in [1, 2] {
+                    assert_eq!(run(37, fifo, bias, channel), run(4096, fifo, bias, channel));
+                }
             }
         }
     }

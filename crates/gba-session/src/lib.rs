@@ -10,7 +10,7 @@ pub use gba_core::{CYCLES_PER_FRAME, Cycle, GBA_CLOCK_HZ, PCM_RATE, SCREEN_HEIGH
 
 pub use gba_core::{BackupSelection, BackupType, Button, ButtonState};
 pub use gba_core::{
-    EEPROM512_BYTES, EEPROM8K_BYTES, FLASH64_BYTES, FLASH128_BYTES, SRAM_BYTES, SaveImage,
+    EEPROM8K_BYTES, EEPROM512_BYTES, FLASH64_BYTES, FLASH128_BYTES, SRAM_BYTES, SaveImage,
 };
 
 pub const BUTTONS: [Button; 10] = [
