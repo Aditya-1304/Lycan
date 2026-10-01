@@ -3,6 +3,7 @@ use eframe::egui;
 use gba_session::{
     BUTTONS, Button, CYCLES_PER_FRAME, Cycle, GBA_CLOCK_HZ, SCREEN_HEIGHT, SCREEN_WIDTH, Session,
 };
+use sha2::{Digest, Sha256};
 use std::time::Duration;
 use web_time::Instant;
 
@@ -119,6 +120,10 @@ const KEY_BINDINGS: [(Button, egui::Key); 10] = [
 /// Shared native/browser application displaying pixels produced by guest execution.
 pub struct GbaApp {
     session: Session,
+    bios_hash: Option<String>,
+    bios_picker_open: bool,
+    bios_sender: std::sync::mpsc::Sender<Result<Vec<u8>, String>>,
+    bios_receiver: std::sync::mpsc::Receiver<Result<Vec<u8>, String>>,
     storage: crate::saves::Storage,
     save_identity: Option<crate::saves::Identity>,
     save_generation: u64,
@@ -161,8 +166,13 @@ impl GbaApp {
     /// Creates a session and loads the assembled guest artifact without executing in startup.
     pub fn new(_cc: &eframe::CreationContext<'_>) -> Self {
         let (rom_sender, rom_receiver) = std::sync::mpsc::channel();
+        let (bios_sender, bios_receiver) = std::sync::mpsc::channel();
         let mut app = Self {
             session: Session::new(),
+            bios_hash: None,
+            bios_picker_open: false,
+            bios_sender,
+            bios_receiver,
             storage: crate::saves::Storage::default(),
             save_identity: None,
             save_generation: 0,
@@ -198,6 +208,79 @@ impl GbaApp {
         };
         app.load_rom_bytes("pcm.gba", PCM_ROM);
         app
+    }
+
+    /// Reads supplied firmware off the UI loop on native and through a local
+    /// browser future on WASM. Cancellation leaves the installed image intact.
+    fn pick_bios(&mut self, ctx: &egui::Context) {
+        self.bios_picker_open = true;
+        let sender = self.bios_sender.clone();
+        let ctx = ctx.clone();
+        let selection = rfd::AsyncFileDialog::new()
+            .set_title("Load GBA BIOS (16 KiB)")
+            .add_filter("BIOS", &["bin", "rom"])
+            .pick_file();
+        let task = async move {
+            let result = if let Some(file) = selection.await {
+                #[cfg(not(target_arch = "wasm32"))]
+                let bytes = std::fs::read(file.path()).map_err(|error| error.to_string());
+                #[cfg(target_arch = "wasm32")]
+                let bytes = wasm_bindgen_futures::JsFuture::from(file.inner().array_buffer())
+                    .await
+                    .map(|buffer| js_sys::Uint8Array::new(&buffer).to_vec())
+                    .map_err(|error| format!("{error:?}"));
+                bytes
+            } else {
+                Err("BIOS selection cancelled".to_owned())
+            };
+            let _ = sender.send(result);
+            ctx.request_repaint();
+        };
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Err(error) = std::thread::Builder::new()
+            .name("bios-picker".into())
+            .spawn(move || pollster::block_on(task))
+        {
+            self.bios_picker_open = false;
+            self.status = format!("BIOS picker failed: {error}");
+        }
+        #[cfg(target_arch = "wasm32")]
+        wasm_bindgen_futures::spawn_local(task);
+    }
+
+    /// Byte identity confines controlled startup to the shipped diagnostics.
+    /// Every other cartridge must pass through the supplied BIOS reset path.
+    fn controlled_rom(bytes: &[u8]) -> bool {
+        [
+            FLASH_DIAGNOSTIC_ROM,
+            BANKED_DIAGNOSTIC_ROM,
+            EEPROM512_ROM,
+            EEPROM8K_ROM,
+            BANKED_ROM,
+            FLASH_ROM,
+            SRAM_ROM,
+            BUTTONS_ROM,
+            PALETTE_ROM,
+            CALCULATIONS_ROM,
+            COPY_ROM,
+            COUNTER_ROM,
+            ARM_DIAGNOSTIC_ROM,
+            THUMB_DIAGNOSTIC_ROM,
+            TILED_ROM,
+            STRIPES_ROM,
+            KEYPAD_OR_ROM,
+            KEYPAD_AND_ROM,
+            VBLANK_ROM,
+            NOISE_ROM,
+            WAVE_ROM,
+            PULSE_ROM,
+            PCM_ROM,
+            DMA_ROM,
+            IRQ_SPRITES_ROM,
+            SPRITES_ROM,
+            MEMORY_ROM,
+        ]
+        .contains(&bytes)
     }
 
     /// Starts one asynchronous picker from the user's click. Native dialog/read
@@ -314,10 +397,14 @@ impl GbaApp {
                 (bytes == FLASH_DIAGNOSTIC_ROM).then_some(gba_session::BackupType::Flash64)
             }
         });
-        match self
-            .session
-            .load_rom_with_backup(bytes_to_load, backup_override)
-        {
+        let result = if Self::controlled_rom(bytes) {
+            self.session
+                .load_rom_with_backup(bytes_to_load, backup_override)
+        } else {
+            self.session
+                .boot_rom_with_bios(bytes_to_load, backup_override)
+        };
+        match result {
             Ok(()) => {
                 self.save_generation = self.save_generation.wrapping_add(1);
                 self.save_identity = self
@@ -638,6 +725,13 @@ impl GbaApp {
         ui.heading("gba-rs");
         self.draw_save_controls(ui);
         ui.horizontal_wrapped(|ui| {
+            if ui.add_enabled(!self.bios_picker_open, egui::Button::new("Load BIOS")).clicked() {
+                self.pick_bios(ui.ctx());
+            }
+            ui.label(self.bios_hash.as_ref().map_or_else(
+                || "BIOS: not loaded".to_owned(),
+                |hash| format!("BIOS: 16384 bytes, SHA-256 {hash}"),
+            ));
             if ui.add_enabled(!self.picker_open, egui::Button::new("Load ROM")).clicked() {
                 self.pick_rom(ui.ctx());
             }
@@ -1086,6 +1180,25 @@ impl eframe::App for GbaApp {
                     });
                     ctx.request_repaint();
                 });
+            }
+        }
+        while let Ok(result) = self.bios_receiver.try_recv() {
+            self.bios_picker_open = false;
+            match result {
+                Ok(bytes) => match self.session.load_bios(&bytes) {
+                    Ok(()) => {
+                        self.audio.clear();
+                        self.host_origin = Instant::now();
+                        self.replay_deadline = None;
+                        self.last_guest_generation = 0;
+                        self.screen_image.pixels.fill(egui::Color32::BLACK);
+                        self.image_generation = self.image_generation.wrapping_add(1);
+                        self.bios_hash = Some(format!("{:x}", Sha256::digest(&bytes)));
+                        self.status = "BIOS loaded; select a ROM to boot".to_owned();
+                    }
+                    Err(error) => self.status = format!("BIOS load failed: {error}"),
+                },
+                Err(error) => self.status = error,
             }
         }
         while let Ok(completion) = self.rom_receiver.try_recv() {
