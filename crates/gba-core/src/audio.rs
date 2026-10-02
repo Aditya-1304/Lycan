@@ -18,8 +18,14 @@ struct Timer {
 }
 
 impl Timer {
+    /// Every hardware prescaler is a power of two. Share its shift with counter
+    /// projection and event advancement to avoid variable integer division.
+    fn prescaler_shift(self) -> u32 {
+        [0, 6, 8, 10][(self.control & 3) as usize]
+    }
+
     fn period(self) -> u64 {
-        [1, 64, 256, 1024][(self.control & 3) as usize]
+        1 << self.prescaler_shift()
     }
 
     fn enabled(self) -> bool {
@@ -97,14 +103,26 @@ impl Audio {
             timer.control = value & if index == 0 { 0xc3 } else { 0xc7 };
             // A changed divider must retain a valid fractional tick, even when
             // software reprograms an enabled timer to a faster clock.
-            timer.phase %= timer.period();
+            timer.phase &= timer.period() - 1;
         }
     }
 
     pub fn refresh_timers(&self, io: &mut [u8]) {
+        self.refresh_timers_at(io, 0);
+    }
+
+    /// Projects counters between scheduler events without mutating prescaler
+    /// phase. The scheduler guarantees that no overflow lies in this interval.
+    pub fn refresh_timers_at(&self, io: &mut [u8], elapsed: u64) {
         for (index, timer) in self.timers.iter().enumerate() {
             let offset = 0x100 + index * 4;
-            io[offset..offset + 2].copy_from_slice(&timer.counter.to_le_bytes());
+            let ticks = if timer.enabled() && !timer.cascade(index) {
+                (timer.phase + elapsed) >> timer.prescaler_shift()
+            } else {
+                0
+            };
+            let counter = timer.counter.wrapping_add(ticks as u16);
+            io[offset..offset + 2].copy_from_slice(&counter.to_le_bytes());
             io[offset + 2..offset + 4].copy_from_slice(&timer.control.to_le_bytes());
         }
     }
@@ -217,7 +235,7 @@ impl Audio {
         let period = SAMPLE_CYCLES >> (self.bias >> 14);
         let mut next = self
             .next_sample
-            .min((now / period + 1) * period)
+            .min((now & !(period - 1)) + period)
             .min(self.next_sequence);
         if let Some(edge) = self.wave.next_edge() {
             next = next.min(now + edge);
@@ -269,8 +287,8 @@ impl Audio {
                 u64::from(previous_overflow)
             } else {
                 let total = timer.phase + elapsed;
-                timer.phase = total % timer.period();
-                total / timer.period()
+                timer.phase = total & (timer.period() - 1);
+                total >> timer.prescaler_shift()
             };
             let value = u64::from(timer.counter) + ticks;
             previous_overflow = value >= 65536;

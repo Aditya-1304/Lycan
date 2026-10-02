@@ -9,6 +9,10 @@ class GbaPcm extends AudioWorkletProcessor {
         this.read = 0; this.write = 0; this.depth = 0; this.epoch = 0;
         this.active = false; this.primed = false; this.gain = 0.5;
         this.maxDepth = 0; this.underruns = 0; this.overflows = 0; this.played = 0;
+        // Event counts describe affected callbacks/submissions, while frame
+        // counts describe the amount of audio missing or discarded.
+        this.underrunEvents = 0; this.overflowEvents = 0;
+        this.callbacks = 0; this.maxCallbackFrames = 0;
         this.port.onmessage = ({ data }) => {
             if (data.kind === 'clear') {
                 this.epoch = data.epoch;
@@ -20,12 +24,17 @@ class GbaPcm extends AudioWorkletProcessor {
             } else if (data.kind === 'pcm') {
                 if (data.epoch === this.epoch && this.active) {
                     const samples = new Float32Array(data.buffer, 0, data.frames * 2);
+                    let dropped = 0;
                     for (let i = 0; i < samples.length; i += 2) {
-                        if (this.depth === this.ring.length / 2) { this.overflows++; continue; }
+                        if (this.depth === this.ring.length / 2) { dropped++; continue; }
                         this.ring[this.write * 2] = samples[i];
                         this.ring[this.write * 2 + 1] = samples[i + 1];
                         this.write = (this.write + 1) % (this.ring.length / 2);
                         this.depth++;
+                    }
+                    if (dropped) {
+                        this.overflows += dropped;
+                        this.overflowEvents++;
                     }
                     this.maxDepth = Math.max(this.maxDepth, this.depth);
                 }
@@ -36,6 +45,8 @@ class GbaPcm extends AudioWorkletProcessor {
             } else if (data.kind === 'stats') {
                 this.port.postMessage({ kind: 'stats', epoch: this.epoch, depth: this.depth,
                     maxDepth: this.maxDepth, underruns: this.underruns,
+                    underrunEvents: this.underrunEvents, overflowEvents: this.overflowEvents,
+                    callbacks: this.callbacks, maxCallbackFrames: this.maxCallbackFrames,
                     overflows: this.overflows, played: this.played });
             }
         };
@@ -44,6 +55,8 @@ class GbaPcm extends AudioWorkletProcessor {
     process(_inputs, outputs) {
         const channels = outputs[0];
         if (!channels.length) return true;
+        this.callbacks++;
+        this.maxCallbackFrames = Math.max(this.maxCallbackFrames, channels[0].length);
         if (this.active && !this.primed && this.depth >= this.target) this.primed = true;
         let missing = false;
         for (let frame = 0; frame < channels[0].length; frame++) {
@@ -60,7 +73,10 @@ class GbaPcm extends AudioWorkletProcessor {
             }
             for (let channel = 0; channel < channels.length; channel++) channels[channel][frame] = channel === 0 ? left : channel === 1 ? right : 0;
         }
-        if (missing) this.primed = false;
+        // Silence only the missing samples. Repriming after a transient miss
+        // would delay already available audio until another startup buffer fills.
+        // Explicit clear messages retain the lifecycle priming requirement.
+        if (missing) this.underrunEvents++;
         return true;
     }
 }
