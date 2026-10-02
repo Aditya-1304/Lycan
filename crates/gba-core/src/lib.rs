@@ -2370,15 +2370,43 @@ impl Object {
         })
     }
 
-    /// OBJ mosaic repeats source samples relative to the object's display origin,
+    /// OBJ mosaic repeats samples on the screen grid, clamping groups that begin
+    /// before the object to its first source texel,
     /// before flips or affine transforms; window selection uses the destination pixel.
-    fn mosaic(&self, x: usize, y: usize, io: &[u8]) -> (usize, usize) {
+    fn mosaic(
+        &self,
+        local_x: usize,
+        local_y: usize,
+        screen_x: usize,
+        screen_y: usize,
+        io: &[u8],
+    ) -> (usize, usize) {
         if self.attr0 & 0x1000 == 0 {
-            return (x, y);
+            return (local_x, local_y);
         }
-        let width = usize::from(io[0x4d] & 15) + 1;
+
+        let width = usize::from(io[0x4d] & 0x0f) + 1;
         let height = usize::from(io[0x4d] >> 4) + 1;
-        (x / width * width, y / height * height)
+
+        (
+            local_x.saturating_sub(screen_x % width),
+            local_y.saturating_sub(screen_y % height),
+        )
+    }
+
+    /// Finishes the final screen-aligned horizontal mosaic block. Both visible
+    /// objects and object windows use this coverage; nominal bounds still define
+    /// source geometry and vertical clipping. Signed X preserves left-edge wrapping.
+    fn horizontal_coverage(&self, io: &[u8]) -> usize {
+        let (width, _) = self.bounds();
+        if self.attr0 & 0x1000 == 0 {
+            return width;
+        }
+        let mosaic_width = i32::from(io[0x4d] & 15) + 1;
+        let raw_x = i32::from(self.attr1 & 511);
+        let x = if raw_x >= 256 { raw_x - 512 } else { raw_x };
+        let end = x + width as i32;
+        width + (mosaic_width - end.rem_euclid(mosaic_width)).rem_euclid(mosaic_width) as usize
     }
 
     /// Expanded bounds change the center and clipping rectangle, never source stride.
@@ -2583,14 +2611,22 @@ impl WindowMasks {
                     continue;
                 }
                 let y = (line + 256 - usize::from(object.attr0 & 255)) & 255;
-                let (width, height) = object.bounds();
+                let (_, height) = object.bounds();
                 if y >= height {
                     continue;
                 }
-                for local_x in 0..width {
+                for local_x in 0..object.horizontal_coverage(io) {
                     let x = (usize::from(object.attr1 & 511) + local_x) & 511;
-                    let (sx, sy) = object.mosaic(local_x, y, io);
-                    if x < SCREEN_WIDTH && object.pixel(sx, sy, control, vram, palette).is_some() {
+                    if x >= SCREEN_WIDTH {
+                        continue;
+                    }
+
+                    let (sample_x, sample_y) = object.mosaic(local_x, y, x, line, io);
+
+                    if object
+                        .pixel(sample_x, sample_y, control, vram, palette)
+                        .is_some()
+                    {
                         layers[x] = io[0x4b] & 0x3f;
                     }
                 }
@@ -2668,16 +2704,16 @@ impl Display {
                 continue;
             }
             let y = (self.line + 256 - usize::from(object.attr0 & 255)) & 255;
-            let (bound_width, bound_height) = object.bounds();
+            let (_, bound_height) = object.bounds();
             if y >= bound_height {
                 continue;
             }
-            for local_x in 0..bound_width {
+            for local_x in 0..object.horizontal_coverage(io) {
                 let x = (usize::from(object.attr1 & 511) + local_x) & 511;
                 if x >= SCREEN_WIDTH || masks.layers[x] & 0x10 == 0 || objects[x].is_some() {
                     continue;
                 }
-                let (sample_x, sample_y) = object.mosaic(local_x, y, io);
+                let (sample_x, sample_y) = object.mosaic(local_x, y, x, self.line, io);
                 if let Some(color) = object.pixel(sample_x, sample_y, self.control, vram, palette) {
                     objects[x] = Some((color, ((object.attr2 >> 10) & 3) as u8));
                 }
@@ -3306,6 +3342,47 @@ fn range_for(address: u32, start: u32, length: usize, width: usize) -> Option<Ra
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Catches truncating an unaligned OBJ's final mosaic block and anchoring
+    /// vertical groups to the object. Expected pixels follow mGBA's OBJ renderer.
+    #[test]
+    fn unaligned_object_mosaic_repeats_through_right_edge() {
+        let mut bus = System::new();
+        bus.display.control = 0x1040;
+        for entry in bus.oam.as_chunks_mut::<8>().0 {
+            entry[..2].copy_from_slice(&0x0200u16.to_le_bytes());
+        }
+        bus.oam[..2].copy_from_slice(&0x103du16.to_le_bytes()); // Y=61, mosaic.
+        bus.oam[2..4].copy_from_slice(&101u16.to_le_bytes());
+        bus.io[0x4d] = 0x22; // Three screen pixels in each axis.
+        for row in 0..8 {
+            bus.vram[0x10000 + row * 4..0x10004 + row * 4].fill((row as u8 + 1) * 0x11);
+            bus.palette[0x202 + row * 2..0x204 + row * 2]
+                .copy_from_slice(&(row as u16 + 1).to_le_bytes());
+        }
+        let masks = WindowMasks {
+            layers: [0x3f; SCREEN_WIDTH],
+        };
+        for (line, color) in [(61, 1), (62, 1), (63, 3)] {
+            bus.display.line = line;
+            bus.display.render_objects(
+                &bus.vram,
+                &bus.palette,
+                &bus.oam,
+                &[4; SCREEN_WIDTH],
+                &masks,
+                &bus.io,
+            );
+            let row = &bus.display.drawing[line * SCREEN_WIDTH..(line + 1) * SCREEN_WIDTH];
+            assert_eq!(row[100], 0);
+            assert!(
+                row[101..111].iter().all(|pixel| *pixel == color),
+                "line {line}: right-edge repetition or vertical phase is wrong: {:?}",
+                &row[101..112]
+            );
+            assert_eq!(row[111], 0);
+        }
+    }
 
     /// Catches recomputing origins from line number after a mid-frame write,
     /// and treating signed 28-bit reference coordinates as unsigned values.

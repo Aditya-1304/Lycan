@@ -45,10 +45,11 @@ jobs:
         with:
           node-version: '26.10.0'
 
-      - name: Affine display contracts
+      - name: Advanced display contracts
         run: |
           python3 roms/affine/build.py
           python3 roms/affine-object/build.py
+          python3 roms/window/build.py
 
           git diff --exit-code -- \
             roms/affine-mode-1.gba \
@@ -57,10 +58,12 @@ jobs:
             roms/affine-mode-4.gba \
             roms/affine-mode-5.gba \
             roms/affine-object.gba \
-            roms/affine-object-degenerate.gba
+            roms/affine-object-degenerate.gba \
+            roms/window.gba
 
           python3 roms/affine/verify.py
           python3 roms/affine-object/verify.py
+          python3 roms/window/verify.py
 
       - name: WASM timing runtime
         run: |
