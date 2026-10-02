@@ -3068,3 +3068,132 @@ gradients, matching state-1/state-2 images, and the DMA IF diagnostic line.
 Automated build environment: Linux 7.2.7-arch1-1, Intel Core i7-13620H,
 Rust 1.98.1, Node 26.10.0, and Trunk 0.21.14. Governor, thermals, display
 refresh, audio device, and browser versions were not recorded.
+
+
+## Slice 26 — Pokémon FireRed: complete by user-declared manual acceptance
+
+On 2026-10-02, the user supplied the Linux native, Chrome, and Brave FireRed
+snapshots below and explicitly requested that Slice 26 be marked done. Slice 26
+is recorded as complete on that user-declared acceptance. The diagnostics and
+remaining measured limitations are retained separately; completion does not
+mean that all three platforms recorded zero audio underruns.
+
+### Cartridge and BIOS identity
+
+The local cartridge and BIOS identities were checked when recording this entry.
+The BIOS hash matches all three supplied runtime snapshots.
+
+| Field | Recorded value |
+| --- | --- |
+| Cartridge | `local-roms/firered.gba` |
+| ROM size | 16,777,216 bytes |
+| ROM SHA-256 | `3d0c79f1627022e18765766f6cb5ea067f6b5bf7dca115552189ad65a5c3a8ac` |
+| Header title / game code | `POKEMON FIRE` / `BPRE` |
+| Region marker / revision | Header region marker `E` (from `BPRE`) / revision 0 |
+| BIOS | User-supplied firmware; hardware reset-vector boot |
+| BIOS size | 16,384 bytes |
+| BIOS SHA-256 | `fd2547724b505f487e6dcb29ec2ecff3af35a841a77ab2e85fd87350abd36570` |
+| Cartridge backup | `Some(Flash128)`; detected `Identified(Flash128)`; override `None` |
+
+### User-supplied live performance
+
+All timing values are copied exactly from the user's latest snapshots. Each
+metric contains 120 samples. The three snapshots represent separate sessions
+and different backup states; they are not a controlled replay of identical
+save states, inputs, or gameplay scenes.
+
+| Platform | Core mean/p95 ms | Pixel conversion mean/p95 ms | Texture submission mean/p95 ms | Samples (core / conversion / texture) |
+| --- | --- | --- | --- | --- |
+| Linux native UI | 7.946 / 12.864 | 0.042 / 0.073 | 0.001 / 0.002 | 120 / 120 / 120 |
+| Chrome | 8.182 / 13.700 | 0.057 / 0.100 | 0.000 / 0.000 | 120 / 120 / 120 |
+| Brave | 8.691 / 14.100 | 0.073 / 0.200 | 0.004 / 0.000 | 120 / 120 / 120 |
+
+Brave's texture mean/p95 pair is retained exactly as supplied; the apparent
+ordering is not corrected or replaced with an inferred value. All three core
+p95 values are below the nominal 16.7427 ms GBA frame period, but exceed the
+plan's less-than-12 ms core p95 goal. These individual stage summaries do not
+establish end-to-end frame time or sustained wall-clock emulation speed.
+
+### Runtime snapshots supplied by the user
+
+| Diagnostic | Linux native UI | Chrome | Brave |
+| --- | ---: | ---: | ---: |
+| ROM / execution state | `firered.gba` / Running | `firered.gba` / Running | `firered.gba` / Running |
+| ROM action/status text | `Reset firered.gba` | `Loaded firered.gba` | `Loaded firered.gba` |
+| Backup restoration status | Backup restored | No stored backup; new cartridge | No stored backup; new cartridge |
+| Executed instructions | 1970298206 | 1067216308 | 1097262556 |
+| GBA cycles | 5677997955 | 3124420681 | 3209665227 |
+| Host output rate | 48000 Hz | 48000 Hz | 48000 Hz |
+| Browser AudioContext state | Not applicable | running | running |
+| Current queue depth | 45.9 ms | 49.9 ms | 33.8 ms |
+| Maximum queue depth | 75.6 ms | 57.5 ms | 73.5 ms |
+| Queue capacity | 80 ms | 80 ms | 80 ms |
+| Underrun events | 12 | 115 | 12065 |
+| Underrun frames | 3503 | 146 | 15440 |
+| Overflow events | 0 | 0 | 0 |
+| Overflow frames | 0 | 0 | 0 |
+| Audio callbacks | 158622 | 69752 | 83624 |
+| Maximum callback size | 512 frames | 128 frames | 128 frames |
+| Host output frames | 16292945 | 8805083 | 9045124 |
+| Native device errors | 0 | Not reported by browser adapter | Not reported by browser adapter |
+| Core PCM rate | 32768 Hz | 32768 Hz | 32768 Hz |
+| Core PCM frames produced | 11089839 | 6102384 | 6268877 |
+| PCM staging drops | 0 | 0 | 0 |
+| Empty FIFO count | 14 | 14 | 14 |
+| Backup / detection / override | `Some(Flash128)` / `Identified(Flash128)` / `None` | `Some(Flash128)` / `Identified(Flash128)` / `None` | `Some(Flash128)` / `Identified(Flash128)` / `None` |
+| Live pacing indicator | Not included in supplied snapshot | Not included in supplied snapshot | Not included in supplied snapshot |
+
+Underrun events count audio callbacks with missing output frames, rather than
+individual audible interruptions. At 48 kHz, the reported missing frames
+represent approximately 0.072979 seconds of aggregate missing audio on native,
+0.304771 seconds on Chrome, and 32.167917 seconds on Brave. These counters are
+cumulative and do not establish when the missing audio occurred. Brave's
+substantial underrun count remains a recorded audio limitation despite its
+core p95 fitting within one GBA frame. Zero overflows and zero core staging
+drops are recorded on all three platforms.
+
+### Implementation and automated evidence
+
+The following verification was completed earlier in this session, before this
+documentation-only update; these entries do not claim a new test run.
+
+| Check or change | Recorded evidence |
+| --- | --- |
+| Shared frontend pacing | Immediate repaint requests; bounded recovery debt; fractional cycles retained; pause/focus reanchoring cancels old debt |
+| Shared core hot path | Cached device deadlines; MMIO readback projection; region-based bus reads; power-of-two timer prescaler arithmetic |
+| Native audio recovery | 40 ms startup threshold; transient underruns do not de-prime playback; event/callback diagnostics; 80 ms queue retained |
+| Browser audio recovery | Matching 40 ms startup threshold and transient recovery; event/callback diagnostics; 80 ms queue retained |
+| Workspace tests | PASS: 42 core unit tests, 1 backup integration test, 15 session tests, 2 app tests; 60 total |
+| Recovery regressions | Meaningful RED before implementation, GREEN after implementation for host jitter/debt and native/browser audio recovery |
+| Browser queue tests | PASS: 2 production-script tests; registered in CI |
+| Native/WASM guest contracts | PASS: broad fixture runner; affine, affine-object, window, blend, raster, pulse, wave, noise, and cartridge timing/IRQ/keypad/DMA/PCM contracts |
+| Static/build checks | PASS: strict workspace Clippy, formatting, native release app build, WASM app check, browser JavaScript syntax checks, and Trunk release build |
+| FireRed bounded probe | 1,800 frames with fixed Start press at frames 360–361; BIOS enters cartridge; Flash128 detected; no execution error; reset retains backup bytes |
+| FireRed before/after comparison | Three 1,800-frame runs per implementation; cycles 505612800, instructions 156596096, PC `0x08006bd0`, framebuffer generations 1800, PCM counters `(987525, 0, 14)` |
+| Probe framebuffer SHA-256 | `e2cc2a1fa6131cf4d86faa3baf78851f35a36853e2467c257b3df9d89e85cce5` before and after |
+| Sampled framebuffer equality | Exact bytes match before/after at frames 600, 1200, and 1800 in each comparison |
+| PCM comparison | Matching non-cryptographic PCM fingerprint `eecebf9050561610` in each before/after run |
+| Temporary automated logs | `/tmp/gba-firered-frame-timings.log`, `/tmp/gba-firered-probe-comparison.log`, `/tmp/gba-performance-contracts.log`; temporary local evidence, not tracked artifacts |
+
+The bounded probe uses fresh cartridge storage and a fixed startup input. It
+supports execution and performance verification, but does not independently
+prove the plan's early-town/route, battle, save/reopen, or 30-minute live-session
+acceptance scenarios.
+
+### Manual acceptance and recorded limits
+
+- [x] Slice 26 marked complete at the user's explicit request on 2026-10-02.
+- [x] Linux native, Chrome, and Brave live FireRed snapshots recorded with exact timing values and audio counters.
+- [x] ROM/BIOS identity, Flash128 selection, bounded probe, and earlier automated verification recorded.
+
+Manual completion is attributed to the user's closure request. Exact town/route
+and battle checkpoints, save-slot/reopen procedure, per-platform 30-minute
+session logs, browser versions, display refresh, audio device, volume setting,
+governor, thermals, and sustained wall-clock speed were not supplied and remain
+not recorded. The native snapshot reports a restored backup; browser snapshots
+report new cartridge storage. No additional browser save/reopen proof is
+inferred from those labels. Audible stability of these specific latest runs
+was not separately described; their nonzero underrun counters are retained.
+
+This entry closes Slice 26 by user-declared acceptance and does not mark game
+Slices 27–30 complete or establish equal performance across all five games.

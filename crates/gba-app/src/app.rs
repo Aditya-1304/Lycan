@@ -1,8 +1,6 @@
 use crate::audio::Audio;
 use eframe::egui;
-use gba_session::{
-    BUTTONS, Button, CYCLES_PER_FRAME, Cycle, GBA_CLOCK_HZ, SCREEN_HEIGHT, SCREEN_WIDTH, Session,
-};
+use gba_session::{BUTTONS, Button, CYCLES_PER_FRAME, Cycle, SCREEN_HEIGHT, SCREEN_WIDTH, Session};
 use sha2::{Digest, Sha256};
 use std::{sync::Arc, time::Duration};
 use web_time::Instant;
@@ -45,7 +43,6 @@ const DISPLAY_DIAGNOSTIC_ROMS: [&[u8]; 9] = [
 
 const WIDTH: usize = SCREEN_WIDTH;
 const HEIGHT: usize = SCREEN_HEIGHT;
-const WAKE_SECONDS: f64 = CYCLES_PER_FRAME as f64 / GBA_CLOCK_HZ as f64;
 
 const BUTTONS_ROM: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -1602,7 +1599,7 @@ impl eframe::App for GbaApp {
         if self.loaded && !self.session.paused() && focused && visible {
             // This wake is a presentation request. Session elapsed-time pacing,
             // rather than callback count, determines how many GBA cycles execute.
-            ctx.request_repaint_after(Duration::from_secs_f64(WAKE_SECONDS));
+            ctx.request_repaint();
         }
     }
 

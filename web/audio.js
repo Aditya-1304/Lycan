@@ -2,8 +2,8 @@
 // contains owned ArrayBuffers; WASM memory is copied, never transferred.
 (() => {
     let context, node, starting = false, epoch = 0, playing = false, gain = 0.5;
-    let error = '', stats = { depth: 0, maxDepth: 0, underruns: 0, overflows: 0, played: 0 };
-    let pending = 0, bridgeDrops = 0;
+    let error = '', stats = { depth: 0, maxDepth: 0, underruns: 0, underrunEvents: 0, overflows: 0, overflowEvents: 0, callbacks: 0, maxCallbackFrames: 0, played: 0 };
+    let pending = 0, bridgeDrops = 0, bridgeDropEvents = 0;
     const pool = [];
     let timer;
     const message = data => node?.port.postMessage(data);
@@ -23,7 +23,9 @@
                         node = new AudioWorkletNode(context, 'gba-pcm', {
                             numberOfInputs: 0, numberOfOutputs: 1, outputChannelCount: [2],
                             processorOptions: { capacity: Math.ceil(context.sampleRate * 0.08),
-                                target: Math.ceil(context.sampleRate * 0.06) }
+                                // Prime once per lifecycle boundary, retaining
+                                // queue headroom for ordinary catch-up bursts.
+                                target: Math.ceil(context.sampleRate * 0.04) }
                         });
                         node.onprocessorerror = () => { error = 'AudioWorklet processor failed; reload to retry'; };
                         node.port.onmessage = ({ data }) => {
@@ -50,6 +52,7 @@
             // delivery cannot build an unbounded queue on a busy browser thread.
             if (pending + samples.length / 2 > Math.ceil(context.sampleRate * 0.08)) {
                 bridgeDrops += samples.length / 2;
+                bridgeDropEvents++;
                 return;
             }
             const bytes = samples.length * 4;
@@ -74,7 +77,7 @@
         status() {
             if (error) return `Audio unavailable: ${error}`;
             if (!node) return starting ? 'Starting audio…' : 'Click Enable audio to retry';
-            return `${context.sampleRate} Hz (${context.state}) | queue ${(stats.depth * 1000 / context.sampleRate).toFixed(1)} ms (max ${(stats.maxDepth * 1000 / context.sampleRate).toFixed(1)}, cap 80) | underrun frames ${stats.underruns} | overflow frames ${stats.overflows + bridgeDrops} | output frames ${stats.played}`;
+            return `${context.sampleRate} Hz (${context.state}) | queue ${(stats.depth * 1000 / context.sampleRate).toFixed(1)} ms (max ${(stats.maxDepth * 1000 / context.sampleRate).toFixed(1)}, cap 80) | underrun events ${stats.underrunEvents} frames ${stats.underruns} | overflow events ${stats.overflowEvents + bridgeDropEvents} frames ${stats.overflows + bridgeDrops} | callbacks ${stats.callbacks} max ${stats.maxCallbackFrames} frames | output frames ${stats.played}`;
         }
     };
     // Visibility suspension clears the ring immediately rather than waiting for

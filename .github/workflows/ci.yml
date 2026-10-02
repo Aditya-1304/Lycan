@@ -76,6 +76,7 @@ jobs:
           python3 roms/cartridge/verify_wasm.py --diagnostics --vblank --keypad --dma --pcm
           node --check web/audio.js
           node --check web/pcm-worklet.js
+          node web/pcm-worklet.test.cjs
 
       - name: Backup contracts
         run: |
