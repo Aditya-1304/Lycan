@@ -1622,7 +1622,14 @@ impl System {
             display = display.min(self.next_visible_hblank());
         }
 
+        if self.io[4] & 0x20 != 0
+            && let Some(vcount) = self.next_vcount_match()
+        {
+            display = display.min(vcount);
+        }
+
         let display = display.min(self.audio.next_event(self.cycles));
+
         self.inputs
             .front()
             .map_or(display, |event| display.min(event.cycle.0))
@@ -1650,6 +1657,28 @@ impl System {
         } else {
             (edge / CYCLES_PER_FRAME + 1) * CYCLES_PER_FRAME + HBLANK_FLAG_CYCLE
         }
+    }
+
+    /// Returns the next scanline boundary matching DISPSTAT's VCOUNT compare.
+    ///
+    /// VCOUNT only ranges from 0 through 227. Compare values outside that range
+    /// cannot match. An IRQ is generated on the transition into the matching
+    /// scanline, not repeatedly while execution remains within that scanline.
+    fn next_vcount_match(&self) -> Option<u64> {
+        let compare = u64::from(self.io[5]);
+
+        if compare >= SCANLINES_PER_FRAME {
+            return None;
+        }
+
+        let frame_start = self.cycles / CYCLES_PER_FRAME * CYCLES_PER_FRAME;
+        let edge = frame_start + compare * CYCLES_PER_SCANLINE;
+
+        Some(if edge > self.cycles {
+            edge
+        } else {
+            edge + CYCLES_PER_FRAME
+        })
     }
 
     /// A low-to-high enable transition latches the descriptor. DMA0-2 use
@@ -2179,9 +2208,18 @@ impl System {
     /// Advances display events before any access changes the state observed by scanout.
     fn advance_time(&mut self, cycles: u64) {
         let deadline = self.cycles.saturating_add(cycles);
+
         loop {
-            let target = deadline.min(self.audio.next_event(self.cycles));
+            let mut target = deadline.min(self.audio.next_event(self.cycles));
+
+            if self.io[4] & 0x20 != 0
+                && let Some(vcount) = self.next_vcount_match()
+            {
+                target = target.min(vcount);
+            }
+
             self.advance_devices(target);
+
             if self.cycles >= deadline {
                 break;
             }
@@ -2194,8 +2232,11 @@ impl System {
         // the existing channel order provides hardware priority.
         let vblank = self.next_vblank();
         let hblank = self.next_visible_hblank();
+        let vcount = self.next_vcount_match();
+
         let vblank_due = vblank <= target;
         let hblank_due = hblank <= target;
+        let vcount_due = vcount.is_some_and(|edge| edge <= target);
 
         for dma in &mut self.dma {
             if dma.active {
@@ -2210,6 +2251,12 @@ impl System {
         // Repeated reads in VBlank must not regenerate an acknowledged request.
         if vblank_due && self.io[4] & 8 != 0 {
             self.io[0x202] |= 1;
+        }
+
+        // VCOUNT requests IRQ exactly when VCOUNT enters the programmed comparison
+        // scanline. IF retains the request until guest software acknowledges bit 2.
+        if vcount_due && self.io[4] & 0x20 != 0 {
+            self.io[0x202] |= 1 << 2;
         }
         while self
             .inputs
@@ -4410,6 +4457,85 @@ mod tests {
                 (160 << 8) | 0x38 | flags
             );
         }
+    }
+
+    #[test]
+    fn vcount_irq_latches_once_per_compare_edge() {
+        let mut machine = Machine::new();
+
+        let access = Access {
+            kind: AccessKind::Data,
+            sequential: false,
+        };
+
+        // VCOUNT compare = 150, VCOUNT IRQ enabled.
+        machine
+            .system
+            .write16_impl(IO_START + 4, (150 << 8) | 0x20, access)
+            .unwrap();
+
+        // Enable VCOUNT in IE.
+        machine
+            .system
+            .write16_impl(IO_START + 0x200, 1 << 2, access)
+            .unwrap();
+
+        let first_edge = 150 * CYCLES_PER_SCANLINE;
+
+        assert!(machine.cycles().0 < first_edge);
+
+        // Stop immediately before the comparison edge.
+        machine
+            .system
+            .advance_time(first_edge - machine.cycles().0 - 1);
+
+        assert_eq!(machine.inspect16(IO_START + 0x202).unwrap() & (1 << 2), 0,);
+
+        // Enter scanline 150.
+        machine.system.advance_time(1);
+
+        assert_eq!(machine.inspect16(IO_START + 6).unwrap(), 150,);
+
+        assert_ne!(
+            machine.inspect16(IO_START + 4).unwrap() & 0x04,
+            0,
+            "VCOUNT comparison status must be set",
+        );
+
+        assert_eq!(
+            machine.inspect16(IO_START + 0x202).unwrap() & (1 << 2),
+            1 << 2,
+            "VCOUNT must latch IF bit 2",
+        );
+
+        // Guest acknowledges VCOUNT.
+        machine
+            .system
+            .write16_impl(IO_START + 0x202, 1 << 2, access)
+            .unwrap();
+
+        assert_eq!(machine.inspect16(IO_START + 0x202).unwrap() & (1 << 2), 0,);
+
+        // Remaining inside line 150 must NOT continuously regenerate the IRQ.
+        machine.system.advance_time(100);
+
+        assert_eq!(
+            machine.inspect16(IO_START + 0x202).unwrap() & (1 << 2),
+            0,
+            "VCOUNT IRQ must trigger only on the compare edge",
+        );
+
+        // It should fire again on line 150 of the following frame.
+        let second_edge = CYCLES_PER_FRAME + first_edge;
+
+        machine
+            .system
+            .advance_time(second_edge - machine.cycles().0);
+
+        assert_eq!(
+            machine.inspect16(IO_START + 0x202).unwrap() & (1 << 2),
+            1 << 2,
+        );
     }
 
     #[test]
