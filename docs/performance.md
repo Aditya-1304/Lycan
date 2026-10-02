@@ -2676,11 +2676,12 @@ they do not newly confirm every visual/lifecycle check. The pending manual-statu
 text is retained until that scope is explicitly confirmed. Browser versions and
 sustained speed remain unrecorded. No later slice was implemented.
 
-## Slice 23 — window masks and mosaic: automated verification complete; manual acceptance pending
+## Slice 23 — window masks and mosaic: automated correction verified; original manual acceptance recorded
 
 Implemented against `plan_final.md` section 23 on 2026-10-02. Existing timing
-entries are preserved. Linux UI and Chrome/Brave visual acceptance remain **not
-verified**; browser checks are user-owned. Instructions and exact capture replay:
+entries are preserved. On 2026-10-02 the user confirmed all manual Slice 23
+checks, including Linux application and Chrome/Brave visual/lifecycle acceptance.
+The supplied browser diagnostics and timings are recorded below. Instructions and exact capture replay:
 [window README](../roms/window/README.md).
 
 The compositor now selects WIN0, WIN1, OBJWIN or WINOUT before background and
@@ -2690,7 +2691,8 @@ object-window texels; transparent object-window texels preserve the outside mask
 Bits 0–4 gate individual layers while backdrop remains available. Bit 5 retains
 color-effect permission for section 24; alpha/brightness operations are not part
 of this slice. BG mosaic samples screen-coordinate groups before scroll/affine
-addressing; OBJ mosaic samples relative to object bounds before flips/transforms.
+addressing; OBJ mosaic samples screen-aligned groups, clamped at the object origin,
+before flips/transforms. Horizontal coverage includes the final partial mosaic block.
 Rendering retains the existing scanline approximation.
 
 ### Fixture and acceptance evidence
@@ -2708,7 +2710,7 @@ cargo run --locked -p gba-tools --release -- bench-window
 
 | Evidence | Result |
 | --- | --- |
-| ROM | `window.gba`, 632 bytes; SHA-256 `3351328bb7580a9b246d87d7f04226b23833e29a87e60c59609e9a035102737a` |
+| ROM | `window.gba`, 632 bytes; SHA-256 `067e7b896ccb2cf9a763b4dc685527fd6a470c41bf8440c0dfe4f467f98c9920` |
 | Startup | Controlled direct ARM, no BIOS, no backup; app exception requires exact shipped bytes |
 | Completion | Continuous guest; polling PC `0x080001b0..=0x080001c4`, mailbox `0x03000000` ID `0x00a4` plus four exact control slots, completed framebuffer generation |
 | Execution bounds | 2,000,000 instructions per advance; at most 32 cycles of instruction-boundary overshoot |
@@ -2718,7 +2720,7 @@ cargo run --locked -p gba-tools --release -- bench-window
 | Final guest state | Frame 52; PC `0x080001b4`; cycles 14,606,592; instructions 1,217,728; mailbox controls `[32,0,0,2]` |
 | Production WASM GREEN | Same 11 guest captures and independent image oracle executed in Node |
 | Capture artifacts | `target/window-captures/frame-{12,16,20,24,28,32,36,40,44,48,52}.ppm`; each image checked against geometry before frozen SHA-256 |
-| Core/session tests | PASS: 33 core unit tests, 1 backup integration test, 13 session tests; no additional mechanical unit tests |
+| Core/session tests | PASS: 34 core unit tests, 1 backup integration test, 13 session tests; one focused unaligned OBJ mosaic regression |
 | Regression captures | PASS: 35 affine-background native/WASM captures; 14 affine-object native/WASM captures and existing standalone mGBA singular-matrix comparison |
 | Broad fixtures | PASS: `cargo run --locked -p gba-tools --release -- fixtures run` |
 | Static gates | PASS: all-target workspace Clippy with `-D warnings`, formatting, `git diff --check` |
@@ -2727,7 +2729,8 @@ cargo run --locked -p gba-tools --release -- bench-window
 
 The new replay catches real layer leakage, incorrect overlap precedence, opaque
 object-window holes and incorrect mosaic sampling; previous fixtures do not
-exercise these behaviors. No separate host tests duplicate the guest oracle.
+exercise these behaviors. The focused renderer regression separately covers the
+unaligned right edge at X=101 and screen-aligned vertical sampling at Y=61.
 Affine mosaic and vertically wrapped window bounds are implemented through the
 shared samplers/range selection but are not independently captured by this focused
 guest. Color-effect permission is retained, while its visible effect will be
@@ -2738,9 +2741,42 @@ verified when section 24 introduces blending. No mGBA window comparison is claim
 | Platform | Behavior | Core mean/p95 ms | Conversion mean/p95 ms | Texture submission mean/p95 ms | Sustained speed | Version |
 | --- | --- | --- | --- | --- | --- | --- |
 | Native headless | 600 stable frames after frame-12 initialization; image/mailbox checked | 2.286 / 2.282 | Not applicable | Not applicable | Not measured | Rust 1.98.1 |
-| Linux native UI | Not verified | Not measured | Not measured | Not measured | Not measured | Not recorded |
-| Chrome | Not verified; user-owned | Not measured | Not measured | Not measured | Not measured | Not recorded |
-| Brave | Not verified; user-owned | Not measured | Not measured | Not measured | Not measured | Not recorded |
+| Linux native UI | User-confirmed PASS | Not measured | Not measured | Not measured | Not measured | Not recorded |
+| Chrome | User-confirmed PASS | 7.447 / 11.100 | 0.111 / 0.200 | 0.015 / 0.100 | Not measured | Not recorded |
+| Brave | User-confirmed PASS | 7.386 / 11.400 | 0.106 / 0.200 | 0.023 / 0.100 | Not measured | Not recorded |
+
+### User-recorded Chrome / Brave diagnostics
+
+Both snapshots identify `window.gba` as loaded and **Running**. Each core,
+pixel-conversion and texture-submission summary contains **120 samples**. Timings
+are preserved exactly as supplied and remain separate from the native headless
+benchmark. The user explicitly confirmed all manual checks: window movement,
+layer changes, rectangular overlap, object-window transparency, mosaic,
+wrapped/empty bounds, preserved outside layers, pause/resume/reset, focus-loss
+key release and resizing. Manual acceptance is attributed to that confirmation,
+not inferred from the Running snapshots.
+
+| Diagnostic | Chrome | Brave |
+| --- | --- | --- |
+| Executed instructions | 39,100,392 | 52,257,824 |
+| GBA cycles | 469,128,406 | 626,994,556 |
+| Core PCM rate | 32,768 Hz | 32,768 Hz |
+| PCM samples produced | 916,266 | 1,224,598 |
+| PCM staging drops | 0 | 0 |
+| Empty FIFO count | 0 | 0 |
+| Host audio | Off | Off |
+| Cartridge backup | None; detected Unknown; override None | None; detected Unknown; override None |
+| BIOS loaded | 16,384 bytes | 16,384 bytes |
+
+Both snapshots report BIOS SHA-256
+`fd2547724b505f487e6dcb29ec2ecff3af35a841a77ab2e85fd87350abd36570`.
+This diagnostic uses controlled ARM startup; loaded BIOS bytes do not establish
+BIOS boot for this ROM. Backup None is expected because this guest has no save
+hardware. PCM counters establish core sample generation; the supplied snapshots
+show host audio off. Browser versions, elapsed wall time, sustained emulation
+speed, refresh rate and native UI numerical timings were not supplied and remain
+unrecorded/unmeasured. Chrome and Brave core mean/p95 values are below the
+16.74 ms frame budget; the snapshots do not independently measure sustained speed.
 
 Environment: Linux 7.2.7-arch1-1, Intel Core i7-13620H, Rust 1.98.1,
 Trunk 0.21.14. Governor, thermals, refresh rate and audio device were not recorded.
@@ -2767,8 +2803,8 @@ env -u NO_COLOR trunk --config web/Trunk.toml serve --release --dist /home/adity
 ```
 
 Open `http://127.0.0.1:8080` in Chrome and Brave and repeat the checks. Record only
-observed timing values, browser versions and sustained speed; confirm visual
-acceptance separately.
+observed timing values, browser versions and sustained speed on future runs.
+The checks above are user-confirmed complete; commands are retained for reproduction.
 
 ### Comparison against plan section 23
 
@@ -2778,8 +2814,55 @@ acceptance separately.
 - [x] Capture rectangular boundaries, overlap, wrapped/empty bounds and transparent object-window pixels.
 - [x] Automatically verify expected masked regions and preserved outside layers on native and production WASM.
 - [x] Record evidence-backed performance and reproduction commands without changing prior user timings.
-- [ ] User-confirmed Linux application visual/lifecycle acceptance.
-- [ ] User-confirmed Chrome/Brave visual/lifecycle acceptance and browser measurements.
+- [x] User-confirmed Linux application visual/lifecycle acceptance.
+- [x] User-confirmed Chrome/Brave visual/lifecycle acceptance and supplied browser measurements.
 
-Section 23 implementation and automated acceptance are complete. Overall manual
-acceptance remains pending; section 24 was not started.
+The original Section 23 closeout was implemented, automatically verified and manually
+accepted by the user on Linux, Chrome and Brave. The mosaic correction below has
+separate automated evidence; its changed guest awaits manual replay. Missing browser versions and numerical
+sustained-speed/native UI measurements are explicitly recorded above. Section 24
+was not started.
+
+### OBJ mosaic correctness follow-up (2026-10-02)
+
+The previous oracle incorrectly grouped OBJ samples relative to its local origin,
+and Y=60 accidentally aligned with the three-pixel screen grid. The corrected
+oracle uses `local_x.saturating_sub(x % 3)` and
+`local_y.saturating_sub(y % 3)` only inside the visible object's geometric bounds.
+The guest now starts its ordinary object at Y=61. It retains the original mailbox,
+polling PC, instruction limits and frame checkpoints.
+
+Before changing coverage, the focused regression
+`unaligned_object_mosaic_repeats_through_right_edge` failed on line 61: pixels
+109–110 were absent for an eight-pixel object at X=101 with three-pixel mosaic.
+Its source rows distinguish the vertical rule at Y=61: rows 61/62 use source row
+0, row 63 uses source row 2. A shared `horizontal_coverage` helper now rounds the
+exclusive right edge to the next screen mosaic boundary for visible OBJ and
+OBJWIN paths; source dimensions and vertical clipping retain nominal bounds.
+
+Expected right-edge behavior was compared to the rounding and repeat logic in
+[mGBA's software OBJ renderer](https://github.com/mgba-emu/mgba/blob/master/src/gba/renderers/software-obj.c).
+This is a source-behavior comparison, not a run of an installed mGBA emulator.
+Evidence: `target/window-evidence/mosaic-red.txt` and `mosaic-green.txt`.
+
+All 11 corrected geometry captures passed **before** `captures.json` was
+regenerated (`target/window-evidence/corrected-oracle.txt`). Frozen-image checks
+and the same production WASM geometry replay then passed. The new ROM is still
+632 bytes; its current identity is recorded in the fixture table and manifest.
+The original browser timings and manual confirmation above are preserved as
+historical evidence for the earlier ROM (`3351328bb7580a9b246d87d7f04226b23833e29a87e60c59609e9a035102737a`).
+Manual visual acceptance of the corrected Y=61 guest has not been repeated;
+load the rebuilt `roms/window.gba` and replay the README sequence to verify it.
+No updated browser timings are inferred from the earlier snapshots.
+
+Correction gates: PASS for 34 core unit tests, one backup integration test, 13
+session tests, workspace all-target Clippy with warnings denied, 11 corrected
+native/WASM window captures, 14 prior affine-object captures plus the existing
+mGBA singular-matrix comparison, 35 prior affine-background captures, broad
+fixtures, native release app, WASM app check, release Trunk artifact, formatting
+and whitespace checks. Logs: `target/window-evidence/mosaic-results.txt` and
+`mosaic-{verify,tests,clippy,affine-object,affine-bg,fixtures,native,wasm,trunk,format,diff}.txt`.
+The first correction Clippy run flagged the test's OAM chunk iteration; switching
+to typed eight-byte chunks resolved it and the final gate passed. Existing
+headless timings also describe the earlier build; no new performance measurements
+were fabricated for this correction.

@@ -88,21 +88,22 @@ pub fn verify_with_capture(mut capture: impl FnMut(u64, &[u16])) {
                 } else {
                     0
                 };
-                let local_x = x.wrapping_sub(100);
-                let local_y = y.wrapping_sub(60);
-                let object_x = if state[2] != 0 {
-                    local_x / 3 * 3
-                } else {
-                    local_x
-                };
-                let object_y = if state[2] != 0 {
-                    local_y / 3 * 3
-                } else {
-                    local_y
-                };
-                if mask & 0x10 != 0 && local_x < 8 && local_y < 8 && (object_x + object_y) % 2 == 0
-                {
-                    expected = 0x7fff;
+                if mask & 0x10 != 0 && (100..108).contains(&x) && (61..69).contains(&y) {
+                    let local_x = x - 100;
+                    let local_y = y - 61;
+                    let object_x = if state[2] != 0 {
+                        local_x.saturating_sub(x % 3)
+                    } else {
+                        local_x
+                    };
+                    let object_y = if state[2] != 0 {
+                        local_y.saturating_sub(y % 3)
+                    } else {
+                        local_y
+                    };
+                    if (object_x + object_y) % 2 == 0 {
+                        expected = 0x7fff;
+                    }
                 }
                 assert_eq!(
                     machine.framebuffer()[y * 240 + x],

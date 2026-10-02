@@ -15,7 +15,9 @@ opaque OBJWIN texels override WINOUT. Backdrop remains visible when every layer
 is masked. BG0 is red/blue checkerboard, BG1 green, ordinary OBJ white with
 transparent holes. WIN0 admits BG0/BG1/OBJ and effects, WIN1 only BG1, OBJWIN
 only BG0, outside only BG1/OBJ. A toggles WIN0 to BG1/OBJ, B toggles 4x4 BG
-and 3x3 OBJ mosaic. Mosaic samples before source transforms and destination
+and 3x3 OBJ mosaic. OBJ mosaic uses screen-coordinate groups with first-texel clamping and repeats
+through the final horizontal block. The ordinary object starts at Y=61 so the
+vertical three-pixel mosaic grid is unaligned. Mosaic samples before source transforms and destination
 window selection. Bit 5 of each selected mask retains color-effect permission;
 color effects themselves belong to section 24.
 
@@ -52,3 +54,12 @@ env -u NO_COLOR trunk --config web/Trunk.toml serve --release --dist /home/adity
 
 Open http://127.0.0.1:8080 in Chrome and Brave and repeat the same checks. Record
 browser versions, sustained speed, and observed timing summaries in performance.md.
+
+The focused core regression `unaligned_object_mosaic_repeats_through_right_edge`
+checks an eight-pixel OBJ at X=101/Y=61 with 3x3 mosaic. Expected coverage extends
+through pixel 110 and stops at 111; source rows 0/0/2 serve screen rows 61/62/63.
+This follows the right-edge rounding and repeated-source logic in
+[mGBA's software OBJ renderer](https://github.com/mgba-emu/mgba/blob/master/src/gba/renderers/software-obj.c).
+The corrected geometry oracle passed before the accepted capture hashes were
+regenerated. Earlier manual acceptance applies to the prior Y=60 guest; repeat
+the existing manual sequence with this corrected ROM.

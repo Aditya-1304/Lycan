@@ -1,6 +1,6 @@
 # Original interactive ARM guest; expectations are not changed by build.py.
 bytes = 632
-sha256 = "3351328bb7580a9b246d87d7f04226b23833e29a87e60c59609e9a035102737a"
+sha256 = "067e7b896ccb2cf9a763b4dc685527fd6a470c41bf8440c0dfe4f467f98c9920"
 mailbox_id = 164
 mailbox_address = 50331648
 polling_pc_start = 134218160

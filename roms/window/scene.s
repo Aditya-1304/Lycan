@@ -69,7 +69,7 @@ obj_tile:
  strh r1, [r4, #2]
  mov r1, #0
  strh r1, [r4, #4]
- mov r1, #60
+ mov r1, #61
  strh r1, [r4, #8]
  mov r1, #100
  strh r1, [r4, #10]
@@ -110,7 +110,7 @@ apply:
  ldr r1, =0x2233
  strh r1, [r0, #0x4c]
  ldr r4, =0x07000000
- mov r1, #60
+ mov r1, #61
  orr r1, r1, r7, lsl #12
  strh r1, [r4, #8]
  ldr r1, =0xf340
