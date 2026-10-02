@@ -3197,3 +3197,348 @@ was not separately described; their nonzero underrun counters are retained.
 
 This entry closes Slice 26 by user-declared acceptance and does not mark game
 Slices 27–30 complete or establish equal performance across all five games.
+
+## Slice 27 — Super Mario Advance 2: complete by user-confirmed manual acceptance
+
+Record date: 2026-10-03. The user supplied the native, Chrome, and Brave
+snapshots below, confirmed that the third capture was Brave, and explicitly
+confirmed that all manual checks were completed and everything worked as
+intended. Slice 27 is complete on that user-confirmed acceptance. The recorded
+performance and cumulative audio counters remain separate from that acceptance.
+
+### Cartridge, BIOS, and backup identity
+
+ROM identity comes from the earlier exact-ROM headless reproduction in this
+conversation; it was not rehashed during this documentation-only update. All
+three supplied live snapshots report the same BIOS identity and backup selection.
+
+| Field | Recorded value |
+| --- | --- |
+| Cartridge | `local-roms/super-mario-advance-2.gba` |
+| ROM size | 4,194,304 bytes |
+| ROM SHA-256 | `63d9fff04c635990a5c205a99ea64bfa698aa5cb9ec1333360063bbee949a4f3` |
+| Header title / game code / revision | `SUPER MARIOB` / `AA2E` / 0 |
+| BIOS | `private-data/gba_bios.bin`; user-supplied firmware through hardware reset-vector boot |
+| BIOS size | 16,384 bytes |
+| BIOS SHA-256 | `fd2547724b505f487e6dcb29ec2ecff3af35a841a77ab2e85fd87350abd36570` |
+| Cartridge backup | `Some(Eeprom)`; detected `Identified(Eeprom)`; override `None` |
+| Resolved EEPROM capacity | 8,192 bytes on all three platforms |
+| Native save directory used for the reproduced issue | `/tmp/lycan-sma2-clean` |
+| Existing save envelope | `GBAEEPR1`; 8,232 bytes: 40-byte identity envelope plus 8,192-byte EEPROM payload |
+
+### User-supplied live performance
+
+Every value is copied exactly from the supplied diagnostics. Each metric has
+120 samples. These snapshots are not a controlled replay of identical scenes,
+inputs, save states, or session durations.
+
+| Platform | Core mean/p95 ms | Pixel conversion mean/p95 ms | Texture submission mean/p95 ms | Samples (core / conversion / texture) |
+| --- | --- | --- | --- | --- |
+| Linux native UI | 9.476 / 16.500 | 0.082 / 0.200 | 0.004 / 0.000 | 120 / 120 / 120 |
+| Chrome | 8.837 / 16.600 | 0.087 / 0.200 | 0.005 / 0.000 | 120 / 120 / 120 |
+| Brave | 7.935 / 12.700 | 0.073 / 0.200 | 0.003 / 0.000 | 120 / 120 / 120 |
+
+Texture submission mean/p95 pairs are retained exactly as supplied, including
+p95 values below their means. All three core p95 values exceed the below-12 ms
+goal and fall below the nominal 16.7427 ms GBA frame period. These individual
+stage summaries do not establish complete application-frame time, GPU
+completion, or sustained cycles per wall-clock second.
+
+### Runtime snapshots supplied by the user
+
+| Diagnostic | Linux native UI | Chrome | Brave |
+| --- | ---: | ---: | ---: |
+| Loaded ROM / execution state | `super-mario-advance-2.gba` / Running | `super-mario-advance-2.gba` / Running | `super-mario-advance-2.gba` / Running |
+| Backup status | Saved revision 196 | Backup restored | Backup restored |
+| Executed instructions | 241537606 | 622469400 | 672949460 |
+| GBA cycles | 828010979 | 2093132180 | 2255449104 |
+| Host output rate | 48000 Hz | 48000 Hz | 48000 Hz |
+| Reported audio state | running | running | running |
+| Current queue depth | 24.0 ms | 26.6 ms | 64.7 ms |
+| Maximum queue depth | 52.5 ms | 47.1 ms | 77.3 ms |
+| Queue capacity | 80 ms | 80 ms | 80 ms |
+| Underrun events | 2 | 51 | 6248 |
+| Underrun frames | 69 | 4183 | 797277 |
+| Overflow events | 1 | 5 | 5 |
+| Overflow frames | 394 | 4115 | 4115 |
+| Audio callbacks | 15568 | 44068 | 54004 |
+| Maximum callback size | 128 frames | 128 frames | 128 frames |
+| Host output frames | 1949627 | 5634985 | 6111651 |
+| Core PCM rate | 32768 Hz | 32768 Hz | 32768 Hz |
+| Core PCM frames produced | 1617208 | 4088148 | 4405174 |
+| PCM staging drops | 0 | 0 | 0 |
+| Empty FIFO count | 12 | 41094 | 41094 |
+| Backup / detection / override | `Some(Eeprom)` / `Identified(Eeprom)` / `None` | `Some(Eeprom)` / `Identified(Eeprom)` / `None` | `Some(Eeprom)` / `Identified(Eeprom)` / `None` |
+| EEPROM capacity | 8192 bytes | 8192 bytes | 8192 bytes |
+| Live pacing indicator | Not included in supplied snapshot | Not included in supplied snapshot | Not included in supplied snapshot |
+| Native device errors | Not included in supplied snapshot | Not applicable | Not applicable |
+
+At 48 kHz, the cumulative underrun frames correspond to approximately 0.001438
+seconds of missing output on native, 0.087146 seconds on Chrome, and 16.609938
+seconds on Brave. Event counts identify callbacks with missing output rather
+than distinct audible interruptions. The snapshots do not identify when these
+underruns, overflows, or empty FIFO reads occurred, or establish a cause. Brave's
+large cumulative underrun count is retained despite the user's confirmation
+that the manual checks worked as intended. Core PCM staging drops are zero on
+all three platforms; host overflow counters are nonzero on all three.
+
+### EEPROM fix and earlier automated verification
+
+These results were obtained during the preceding fix in this conversation;
+no code, builds, tests, emulator execution, or UI checks were rerun for this
+documentation-only update.
+
+| Check or change | Recorded evidence |
+| --- | --- |
+| Original failure reproduced | Exact ROM and BIOS; fresh EEPROM; 900 frames with Start pressed at frames 360–361; framebuffer displayed “Your saved data is corrupt.” |
+| Protocol cause | 142 read commands rejected because their trailing clock carried bit 1; no trace overflow. Rejected commands returned ready bits rather than the requested block. |
+| General EEPROM fix | Consume the final read-command clock regardless of its bit value; preserve write stop-bit validation, command/count checks, capacity selection, and save format. No title-specific override. |
+| Reference comparison | mGBA `GBASavedataWriteEEPROM` transitions to a read response at the final command clock without validating that clock's value: https://github.com/mgba-emu/mgba/blob/master/src/gba/savedata.c |
+| Regression justification | Existing serial DMA round-trip coverage only used a zero trailing bit. The new test catches the observed high trailing read clock returning ready bits instead of saved data. |
+| RED / GREEN | `read_command_accepts_high_trailing_clock_without_changing_save` failed before the fix on the first dummy clock (`1` instead of `0`); passed after the fix for both 512-byte and 8-KiB devices, preserving bytes, revision, and clean state. |
+| Workspace tests | PASS: 43 core unit tests, 1 backup integration test, 15 session tests, 2 app tests; 61 total |
+| Trace-enabled core tests | PASS: 43 core unit tests and 1 backup integration test |
+| Static/build checks | PASS: formatting, diff whitespace checks, strict Clippy for core/tools with trace enabled, core WASM check, and native release app build |
+| Bounded trace | Compile-time `eeprom-trace` feature; opt-in core capture; 512 retained records between drains with explicit dropped-record counts; DMA3 directions, commands, responses, ready polling, and rejected commands recorded. Default production builds omit instrumentation. |
+| Fixed fresh-save boot | 900 frames; world map reached; 392 responses and 196 write commands; zero response/image mismatches, rejected commands, or dropped trace records |
+| Fixed separate restored-save boot | 900 frames; generated raw EEPROM restored; world map reached; 188 responses and zero write commands; zero response/image mismatches, rejected commands, or dropped trace records |
+| Fixed existing-save boot | Copy of the user's original EEPROM payload restored; 900 frames; world map reached; 328 responses and 134 write commands; zero response/image mismatches, rejected commands, or dropped trace records. Original save file was left untouched. |
+| Reset preservation | All three fixed probes returned PC to `0x00000000` and retained backup bytes |
+| Fixed fresh-save framebuffer SHA-256 | `b1d08adf68a90546b4b10e586bc9fc134a96d44f9655f673dd24a2e38db10d91` |
+| Fixed restored-save framebuffer SHA-256 | `c0bec781876ee6dfd1b79ef573841523f1e631521c3dbf1e184c76c789f01ed6` |
+| Fixed existing-save framebuffer SHA-256 | `615881dcbdfe9602fe9071e9483553d0554d6dd2fdb3bdd7650be9e4fc54bec8` |
+| Temporary evidence | `/tmp/sma2-first.log`; `/tmp/sma2-fixed-first.log`, `/tmp/sma2-fixed-second.log`, `/tmp/sma2-fixed-existing.log`; matching `.ppm`/`.png` captures and raw save payloads. Temporary local artifacts from the preceding fix, not tracked or rechecked for this update. |
+
+Response/image comparisons used the initial raw image updated by each traced
+write. They check transaction data, not independent hardware timing accuracy.
+The headless probes establish the reproduced corruption fix and boot/restore
+behavior; the gameplay and live-platform acceptance below comes from the user.
+
+### Manual acceptance and recorded limits
+
+- [x] Slice 27 complete by the user's explicit confirmation on 2026-10-03.
+- [x] Agreed early-level gameplay and scrolling/action transitions manually verified.
+- [x] Sprite/background composition and sound effects manually verified.
+- [x] Detected EEPROM backup protocol and in-game save/resume manually verified.
+- [x] Shared manual checks completed; the user reports everything working as intended.
+- [x] Native, Chrome, and Brave snapshots recorded with exact timings, sample counts, backup states, and audio counters.
+- [x] Earlier corruption reproduction, EEPROM fix, meaningful RED/GREEN regression, and automated checks recorded separately from manual acceptance.
+
+The manual checklist is attributed to the user's statement that all checks
+were completed. Exact level/checkpoint names, save-slot sequence, individual
+shared-check observations, and per-platform long-session logs were not supplied
+and remain not recorded. Sustained wall-clock speed, unthrottled speed, complete
+frame/GPU timing, and memory/queue trends were not measured in the supplied
+snapshots. Browser versions, refresh rate, zoom, audio device, volume setting,
+power/governor state, thermals, and other host load were not refreshed for these
+captures; the older reference environment is not a current-session measurement.
+
+“Backup restored” changing to “Saved revision” is normal after guest writes and
+host persistence. The native snapshot records revision 196; the Chrome and
+Brave snapshots record successful restoration. These labels supplement the
+user's manual save/resume confirmation rather than replacing it.
+
+This entry closes Slice 27. It does not mark Slices 28–30 complete or establish
+that the numerical performance targets were all met.
+
+## Slice 28 — Metroid Fusion: complete by user-confirmed manual acceptance
+
+Record date: 2026-10-03. The user supplied the native, Chrome, and Brave
+captures below and explicitly confirmed that all manual checks were completed
+and everything was working. Slice 28 is complete on that user-confirmed
+acceptance. Platform labels are retained as supplied; no emulator or browser
+was operated to independently reproduce these captures for this update.
+
+### Cartridge, BIOS, and backup
+
+| Field | Recorded value |
+| --- | --- |
+| Loaded cartridge | `metroid-fusion.gba` |
+| ROM size / SHA-256 / header identity | Not recorded in the supplied snapshots; not inspected for this documentation-only update |
+| BIOS size | 16,384 bytes on all three platforms |
+| BIOS SHA-256 | `fd2547724b505f487e6dcb29ec2ecff3af35a841a77ab2e85fd87350abd36570` on all three platforms |
+| Cartridge backup | `Some(Sram)`; detected `Identified(Sram)`; override `None` on all three platforms |
+| Backup status | Saved revision 1047 on all three platforms |
+| Save directory / browser storage details | Not supplied |
+
+### User-supplied live performance
+
+Values are copied exactly from the supplied diagnostics. Every metric has 120
+samples. Identical backup revision numbers do not establish identical inputs,
+scenes, save bytes, or measurement windows across the three captures.
+
+| Platform | Core mean/p95 ms | Pixel conversion mean/p95 ms | Texture submission mean/p95 ms | Samples (core / conversion / texture) |
+| --- | --- | --- | --- | --- |
+| Linux native UI | 6.972 / 8.119 | 0.078 / 0.090 | 0.002 / 0.003 | 120 / 120 / 120 |
+| Chrome | 6.459 / 7.719 | 0.066 / 0.079 | 0.001 / 0.002 | 120 / 120 / 120 |
+| Brave | 6.892 / 8.199 | 0.073 / 0.086 | 0.002 / 0.003 | 120 / 120 / 120 |
+
+All three reported core p95 values meet the below-12 ms goal and are below the
+nominal 16.7427 ms GBA frame period. Individual stage summaries do not establish
+end-to-end application-frame time, GPU completion, or sustained emulation speed.
+
+### Runtime snapshots supplied by the user
+
+| Diagnostic | Linux native UI | Chrome | Brave |
+| --- | ---: | ---: | ---: |
+| Loaded ROM / execution state | `metroid-fusion.gba` / Running | `metroid-fusion.gba` / Running | `metroid-fusion.gba` / Running |
+| Backup status | Saved revision 1047 | Saved revision 1047 | Saved revision 1047 |
+| Executed instructions | 1034922793 | 1044290528 | 1047225613 |
+| GBA cycles | 10145837393 | 10281144894 | 10323487513 |
+| Host output rate | 48000 Hz | 48000 Hz | 48000 Hz |
+| Current queue depth | 65.9 ms | 41.4 ms | 63.3 ms |
+| Maximum queue depth | 72.1 ms | 72.1 ms | 72.1 ms |
+| Queue capacity | 80 ms | 80 ms | 80 ms |
+| Underrun events | 0 | 0 | 0 |
+| Underrun frames | 0 | 0 | 0 |
+| Overflow events | 0 | 0 | 0 |
+| Overflow frames | 0 | 0 | 0 |
+| Audio callbacks | 55701 | 58700 | 59751 |
+| Maximum callback size | 512 frames | 512 frames | 512 frames |
+| Host output frames | 28516864 | 28902400 | 29020672 |
+| Reported device errors | 0 | 0 | 0 |
+| Core PCM rate | 32768 Hz | 32768 Hz | 32768 Hz |
+| Core PCM frames produced | 19816088 | 20080361 | 20163061 |
+| PCM staging drops | 0 | 0 | 0 |
+| Empty FIFO count | 14 | 14 | 14 |
+| Backup / detection / override | `Some(Sram)` / `Identified(Sram)` / `None` | `Some(Sram)` / `Identified(Sram)` / `None` | `Some(Sram)` / `Identified(Sram)` / `None` |
+| Explicit audio running/AudioContext state | Not included in supplied snapshot | Not included in supplied snapshot | Not included in supplied snapshot |
+| Live pacing indicator | Not included in supplied snapshot | Not included in supplied snapshot | Not included in supplied snapshot |
+
+All supplied snapshots report zero host audio underruns, overflows, device
+errors, and core PCM staging drops. Current queue depths fall within the
+40–80 ms target, and recorded maximum depths remain below the 80 ms capacity.
+The empty FIFO count is 14 on every capture; its timing and cause are not
+identified by these cumulative snapshots. Chrome and Brave labels are the
+user's labels, including their reported 512-frame callback maximum and device
+error field; these fields were not changed to match earlier browser captures.
+
+### Manual acceptance and recorded limits
+
+- [x] Slice 28 complete by the user's explicit manual confirmation on 2026-10-03.
+- [x] Early exploration/combat checkpoint manually verified.
+- [x] Room transitions manually verified as working.
+- [x] Save-point use and save/resume manually verified.
+- [x] Effects, composition, timing, and audio mixing manually verified.
+- [x] Shared manual checks complete; the user reports everything working.
+- [x] Native, Chrome, and Brave timings, sample counts, backup state, and audio counters recorded exactly.
+
+Acceptance is attributed to the user's confirmation. Exact checkpoint/room
+names, save-slot/reopen sequence, and individual shared-check observations were
+not supplied and remain not recorded. No failing room transition was reported
+in this request, and no regression replay was supplied or generated for this
+update. The saved-revision labels report host persistence; manual save/resume
+acceptance comes from the user's confirmation rather than those labels alone.
+
+Browser versions, display refresh, zoom, audio device, volume setting, power
+state, governor, thermals, and other host load were not refreshed for these
+captures. Sustained wall-clock speed, unthrottled speed, complete frame/GPU
+timing, and 30-minute memory/queue trends were not measured in the supplied
+diagnostics. The older reference configuration is not a measurement of these
+sessions. No new build, test, headless probe, or UI verification was performed
+for this documentation-only update; earlier Slice 27 automated checks are not
+presented as Metroid Fusion-specific verification.
+
+This entry closes Slice 28 by user-confirmed manual acceptance. Slices 29–30
+remain outside this update.
+
+## Slice 29 — Zelda: The Minish Cap: complete by user-confirmed manual acceptance
+
+Record date: 2026-10-03. The user supplied the native, Chrome, and Brave
+captures below and confirmed that all checks were performed manually and that
+everything was correct and smooth. Slice 29 is complete on that user-confirmed
+acceptance. Platform labels and diagnostics are retained exactly as supplied;
+no emulator or browser was operated for this documentation-only update.
+
+### Cartridge, BIOS, and backup
+
+| Field | Recorded value |
+| --- | --- |
+| Loaded cartridge | `minish-cap.gba` |
+| ROM size / SHA-256 / header identity | Not recorded in the supplied snapshots; not inspected for this update |
+| BIOS size | 16,384 bytes on all three platforms |
+| BIOS SHA-256 | `fd2547724b505f487e6dcb29ec2ecff3af35a841a77ab2e85fd87350abd36570` on all three platforms |
+| Cartridge backup | `Some(Eeprom)`; detected `Identified(Eeprom)`; override `None` on all three platforms |
+| Resolved EEPROM capacity | 8,192 bytes on all three platforms |
+| Backup status | Saved revision 5 on all three platforms |
+| Save directory / browser storage details | Not supplied |
+
+### User-supplied live performance
+
+Each metric contains 120 samples. The snapshots do not establish a controlled
+replay of identical scenes, input sequences, save bytes, or measurement windows.
+
+| Platform | Core mean/p95 ms | Pixel conversion mean/p95 ms | Texture submission mean/p95 ms | Samples (core / conversion / texture) |
+| --- | --- | --- | --- | --- |
+| Linux native UI | 7.458 / 9.560 | 0.061 / 0.078 | 0.001 / 0.002 | 120 / 120 / 120 |
+| Chrome | 7.582 / 9.638 | 0.060 / 0.078 | 0.001 / 0.002 | 120 / 120 / 120 |
+| Brave | 7.408 / 9.399 | 0.055 / 0.073 | 0.001 / 0.002 | 120 / 120 / 120 |
+
+All three core p95 values meet the below-12 ms goal and fall below the nominal
+16.7427 ms GBA frame period. These individual stage summaries do not establish
+complete application-frame time, GPU completion, or sustained emulation speed.
+
+### Runtime snapshots supplied by the user
+
+| Diagnostic | Linux native UI | Chrome | Brave |
+| --- | ---: | ---: | ---: |
+| Loaded ROM / execution state | `minish-cap.gba` / Running | `minish-cap.gba` / Running | `minish-cap.gba` / Running |
+| Backup status | Saved revision 5 | Saved revision 5 | Saved revision 5 |
+| Executed instructions | 1047996625 | 1079728043 | 1101021090 |
+| GBA cycles | 6524465500 | 6680941096 | 6780387869 |
+| Host output rate | 48000 Hz | 48000 Hz | 48000 Hz |
+| Current queue depth | 50.0 ms | 45.0 ms | 51.5 ms |
+| Maximum queue depth | 55.8 ms | 55.8 ms | 55.8 ms |
+| Queue capacity | 80 ms | 80 ms | 80 ms |
+| Underrun events | 0 | 0 | 0 |
+| Underrun frames | 0 | 0 | 0 |
+| Overflow events | 0 | 0 | 0 |
+| Overflow frames | 0 | 0 | 0 |
+| Audio callbacks | 36172 | 38613 | 39914 |
+| Maximum callback size | 512 frames | 512 frames | 512 frames |
+| Host output frames | 18519040 | 18964992 | 19247616 |
+| Reported device errors | 0 | 0 | 0 |
+| Core PCM rate | 32768 Hz | 32768 Hz | 32768 Hz |
+| Core PCM frames produced | 12743096 | 13048713 | 13242945 |
+| PCM staging drops | 0 | 0 | 0 |
+| Empty FIFO count | 13 | 13 | 13 |
+| Backup / detection / override | `Some(Eeprom)` / `Identified(Eeprom)` / `None` | `Some(Eeprom)` / `Identified(Eeprom)` / `None` | `Some(Eeprom)` / `Identified(Eeprom)` / `None` |
+| EEPROM capacity | 8192 bytes | 8192 bytes | 8192 bytes |
+| Explicit audio running/AudioContext state | Not included in supplied snapshot | Not included in supplied snapshot | Not included in supplied snapshot |
+| Live pacing indicator | Not included in supplied snapshot | Not included in supplied snapshot | Not included in supplied snapshot |
+
+All three captures report zero host audio underruns, overflows, device errors,
+and core PCM staging drops. Current queue depths meet the 40–80 ms target,
+and the recorded maximum depth of 55.8 ms remains below the 80 ms capacity.
+The cumulative empty FIFO count is 13 on every capture; these snapshots do not
+identify its timing or cause. Chrome and Brave retain the user's platform
+labels and their supplied 512-frame callback maximum and device-error field.
+
+### Manual acceptance and recorded limits
+
+- [x] Slice 29 complete by the user's explicit manual confirmation on 2026-10-03.
+- [x] Early outdoor/interior areas and transitions manually verified.
+- [x] Dialogue/action transitions manually verified.
+- [x] In-game save and resume manually verified.
+- [x] Layer/effect behavior, timing, and sound manually verified.
+- [x] Shared manual checks complete; the user reports everything correct and smooth.
+- [x] Native, Chrome, and Brave timings, sample counts, EEPROM selection/capacity, backup status, and audio counters recorded exactly.
+
+The checklist is attributed to the user's confirmation that all checks were
+completed. Exact area/checkpoint names, transition sequences, save-slot/reopen
+procedure, and individual shared-check observations were not supplied and
+remain not recorded. Saved revision 5 reports host persistence; save/resume
+acceptance comes from the user's manual confirmation rather than that label
+alone.
+
+Browser versions, display refresh, zoom, audio device, volume setting, power
+state, governor, thermals, and other host load were not refreshed for these
+captures. Sustained wall-clock speed, unthrottled speed, complete frame/GPU
+timing, and 30-minute memory/queue trends were not measured in the supplied
+diagnostics. The older reference configuration is not a measurement of these
+sessions. No new build, test, headless probe, or UI verification was performed
+for this documentation-only update; earlier game-specific automated checks
+are not presented as Minish Cap-specific verification.
+
+This entry closes Slice 29 by user-confirmed manual acceptance. Slice 30
+remains outside this update.
