@@ -31,7 +31,8 @@ const FLASH_ROM: &[u8] = include_bytes!("../../../roms/flash-score.gba");
 const SRAM_ROM: &[u8] = include_bytes!("../../../roms/sram.gba");
 
 /// Original affine diagnostics use controlled ARM startup; retail ROMs retain BIOS boot.
-const AFFINE_ROMS: [&[u8]; 5] = [
+const AFFINE_ROMS: [&[u8]; 6] = [
+    include_bytes!("../../../roms/affine-object.gba"),
     include_bytes!("../../../roms/affine-mode-1.gba"),
     include_bytes!("../../../roms/affine-mode-2.gba"),
     include_bytes!("../../../roms/affine-mode-3.gba"),
@@ -1108,6 +1109,10 @@ impl GbaApp {
             } else {
                 "Running"
             });
+
+            if self.rom_name == "affine-object.gba" {
+                ui.label("Sprite: Right rotates; Up enlarges; Z expands bounds; X changes color depth; S changes tile layout; A changes priority; Left clips position.");
+            }
 
             if self.rom_name.starts_with("affine-mode-")
                 && let (

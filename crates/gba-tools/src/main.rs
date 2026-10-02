@@ -1,5 +1,8 @@
 #![forbid(unsafe_code)]
 
+#[path = "../../../roms/affine-object/contract.rs"]
+mod object_contract;
+
 #[path = "../../../roms/affine/contract.rs"]
 mod affine_contract;
 
@@ -2237,6 +2240,16 @@ fn run_diagnostic(
 /// Measures complete frame advances after scene initialization and replay.
 /// Host samples are owned by this CLI; the emulation hot path allocates nothing.
 fn benchmark_frames(fixture: &Fixture, machine: &mut Machine, frames: usize) -> Result<()> {
+    benchmark_machine(&fixture.name, machine, frames, fixture.max_instructions)
+}
+
+/// Shares frame timing between manifest fixtures and bounded interactive diagnostics.
+fn benchmark_machine(
+    name: &str,
+    machine: &mut Machine,
+    frames: usize,
+    max_instructions: usize,
+) -> Result<()> {
     if frames == 0 || frames > 1_000_000 {
         return Err(fail("frame count must be 1..=1000000"));
     }
@@ -2247,7 +2260,7 @@ fn benchmark_frames(fixture: &Fixture, machine: &mut Machine, frames: usize) -> 
     for _ in 0..frames {
         target.0 += CYCLES_PER_FRAME;
         let start = Instant::now();
-        machine.advance_to(target, fixture.max_instructions)?;
+        machine.advance_to(target, max_instructions)?;
         samples.push(start.elapsed().as_secs_f64() * 1000.0);
         pcm.clear();
         machine.drain_pcm(&mut pcm);
@@ -2257,7 +2270,7 @@ fn benchmark_frames(fixture: &Fixture, machine: &mut Machine, frames: usize) -> 
     let p95 = samples[(frames * 95).div_ceil(100).saturating_sub(1)];
     println!(
         "BENCH {} frames={frames} core_mean_ms={mean:.3} core_p95_ms={p95:.3} upload=not-applicable-headless",
-        fixture.name
+        name
     );
     Ok(())
 }
@@ -2411,6 +2424,53 @@ fn probe_bios(args: &[String], diagnostic: bool) -> Result<()> {
 
 fn run() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().map(String::as_str) == Some("bench-affine-object") {
+        let frames = option(&args, "--frames")?
+            .unwrap_or_else(|| "600".to_owned())
+            .parse()?;
+        let mut machine = Machine::new();
+        machine.load_rom(include_bytes!("../../../roms/affine-object.gba"))?;
+        machine.advance_to(Cycle(20 * CYCLES_PER_FRAME), 2_000_000)?;
+        let image = machine.framebuffer().to_vec();
+        benchmark_machine("affine-object", &mut machine, frames, 2_000_000)?;
+        if machine.framebuffer() != image || machine.inspect16(0x03000000)? != 0xa2 {
+            return Err("Affine object benchmark changed the settled scene".into());
+        }
+        return Ok(());
+    }
+    if args.first().map(String::as_str) == Some("verify-affine-object") {
+        let capture = option(&args, "--capture")?.map(PathBuf::from);
+        let identity: toml::Value = toml::from_str(&fs::read_to_string(
+            root().join("roms/affine-object/manifest.toml"),
+        )?)?;
+        let degenerate = fs::read(root().join("roms/affine-object-degenerate.gba"))?;
+        if identity["mgba_degenerate"]["sha256"].as_str() != Some(hash(&degenerate).as_str()) {
+            return Err("mGBA degenerate ROM identity mismatch".into());
+        }
+        let bytes = fs::read(root().join("roms/affine-object.gba"))?;
+        if identity["sha256"].as_str() != Some(hash(&bytes).as_str()) {
+            return Err("Affine object ROM identity mismatch".into());
+        }
+        if let Some(directory) = &capture {
+            fs::create_dir_all(directory)?;
+        }
+        let mut capture_image = |frame, pixels: &[u16]| {
+            if let Some(directory) = &capture {
+                let mut ppm = b"P6\n240 160\n255\n".to_vec();
+                for pixel in pixels {
+                    for shift in [0, 5, 10] {
+                        let channel = ((pixel >> shift) & 31) as u8;
+                        ppm.push((channel << 3) | (channel >> 2));
+                    }
+                }
+                fs::write(directory.join(format!("frame-{frame}.ppm")), ppm)
+                    .expect("write object capture");
+            }
+        };
+        object_contract::verify_with_capture(&mut capture_image);
+        object_contract::verify_degenerate(capture_image);
+        return Ok(());
+    }
     if args.first().map(String::as_str) == Some("verify-affine") {
         let capture = option(&args, "--capture")?.map(PathBuf::from);
         if let Some(directory) = &capture {

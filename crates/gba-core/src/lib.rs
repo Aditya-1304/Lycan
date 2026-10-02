@@ -2326,24 +2326,26 @@ impl TextBackground {
     }
 }
 
-/// Snapshot of a normal (non-affine) object at a scanline drawing boundary.
-/// Affine, window and blending behavior belongs to the corresponding later slices.
-struct NormalObject {
+/// Snapshot of an object and its optional signed 8.8 OAM transformation.
+/// Source dimensions determine tile addressing; display bounds determine clipping.
+struct Object {
     attr0: u16,
     attr1: u16,
     attr2: u16,
     width: usize,
     height: usize,
+    matrix: Option<[i32; 4]>,
 }
 
-impl NormalObject {
-    fn from_oam(entry: &[u8]) -> Option<Self> {
+impl Object {
+    fn from_oam(entry: &[u8], oam: &[u8]) -> Option<Self> {
         let attr0 = u16::from_le_bytes([entry[0], entry[1]]);
         let attr1 = u16::from_le_bytes([entry[2], entry[3]]);
         let attr2 = u16::from_le_bytes([entry[4], entry[5]]);
-        // Bit 9 disables normal objects; bit 8 selects affine interpretation.
-        // Non-normal OBJ modes require blending/window state not implemented here.
-        if attr0 & 0x0f00 != 0 {
+        // Bit 9 disables regular objects but doubles affine display bounds.
+        // Object-window and semitransparent modes require later effect handling.
+        let affine = attr0 & 0x100 != 0;
+        if attr0 & 0x0c00 != 0 || (!affine && attr0 & 0x200 != 0) {
             return None;
         }
         let dimensions = match attr0 >> 14 {
@@ -2359,7 +2361,23 @@ impl NormalObject {
             attr2,
             width,
             height,
+            matrix: affine.then(|| {
+                let base = usize::from((attr1 >> 9) & 31) * 32;
+                [6, 14, 22, 30].map(|offset| {
+                    i16::from_le_bytes([oam[base + offset], oam[base + offset + 1]]) as i32
+                })
+            }),
         })
+    }
+
+    /// Expanded bounds change the center and clipping rectangle, never source stride.
+    fn bounds(&self) -> (usize, usize) {
+        let factor = if self.matrix.is_some() && self.attr0 & 0x200 != 0 {
+            2
+        } else {
+            1
+        };
+        (self.width * factor, self.height * factor)
     }
 
     /// Resolves one local texel through OBJ character memory and OBJ palette RAM.
@@ -2372,11 +2390,30 @@ impl NormalObject {
         vram: &[u8],
         palette: &[u8],
     ) -> Option<u16> {
-        if self.attr1 & (1 << 12) != 0 {
-            x = self.width - 1 - x;
-        }
-        if self.attr1 & (1 << 13) != 0 {
-            y = self.height - 1 - y;
+        if let Some([pa, pb, pc, pd]) = self.matrix {
+            let (bound_width, bound_height) = self.bounds();
+            let dx = x as i32 - bound_width as i32 / 2;
+            let dy = y as i32 - bound_height as i32 / 2;
+            // Arithmetic shifts retain hardware flooring for negative fractions.
+            // OAM supplies a screen-to-source matrix, including singular matrices.
+            let source_x = ((pa * dx + pb * dy) >> 8) + self.width as i32 / 2;
+            let source_y = ((pc * dx + pd * dy) >> 8) + self.height as i32 / 2;
+            if source_x < 0
+                || source_y < 0
+                || source_x >= self.width as i32
+                || source_y >= self.height as i32
+            {
+                return None;
+            }
+            x = source_x as usize;
+            y = source_y as usize;
+        } else {
+            if self.attr1 & (1 << 12) != 0 {
+                x = self.width - 1 - x;
+            }
+            if self.attr1 & (1 << 13) != 0 {
+                y = self.height - 1 - y;
+            }
         }
         let color_256 = self.attr0 & (1 << 13) != 0;
         let units = if color_256 { 2 } else { 1 };
@@ -2529,14 +2566,15 @@ impl Display {
     ) {
         let mut objects = [None; SCREEN_WIDTH];
         for entry in oam.as_chunks::<8>().0 {
-            let Some(object) = NormalObject::from_oam(entry) else {
+            let Some(object) = Object::from_oam(entry, oam) else {
                 continue;
             };
             let y = (self.line + 256 - usize::from(object.attr0 & 255)) & 255;
-            if y >= object.height {
+            let (bound_width, bound_height) = object.bounds();
+            if y >= bound_height {
                 continue;
             }
-            for local_x in 0..object.width {
+            for local_x in 0..bound_width {
                 let x = (usize::from(object.attr1 & 511) + local_x) & 511;
                 if x >= SCREEN_WIDTH || objects[x].is_some() {
                     continue;
