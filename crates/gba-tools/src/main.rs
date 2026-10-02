@@ -2,6 +2,8 @@
 
 #[path = "../../../roms/affine-object/contract.rs"]
 mod object_contract;
+#[path = "../../../roms/window/contract.rs"]
+mod window_contract;
 
 #[path = "../../../roms/affine/contract.rs"]
 mod affine_contract;
@@ -2424,6 +2426,38 @@ fn probe_bios(args: &[String], diagnostic: bool) -> Result<()> {
 
 fn run() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().map(String::as_str) == Some("verify-window") {
+        let identity: toml::Value = toml::from_str(&fs::read_to_string(
+            root().join("roms/window/manifest.toml"),
+        )?)?;
+        let bytes = fs::read(root().join("roms/window.gba"))?;
+        if identity["sha256"].as_str() != Some(hash(&bytes).as_str()) {
+            return Err("Window ROM identity mismatch".into());
+        }
+        let directory = root().join("target/window-captures");
+        fs::create_dir_all(&directory)?;
+        window_contract::verify_with_capture(|frame, pixels| {
+            let mut ppm = b"P6\n240 160\n255\n".to_vec();
+            for pixel in pixels {
+                for shift in [0, 5, 10] {
+                    let channel = ((pixel >> shift) & 31) as u8;
+                    ppm.push((channel << 3) | (channel >> 2));
+                }
+            }
+            fs::write(directory.join(format!("frame-{frame}.ppm")), ppm).unwrap();
+        });
+        return Ok(());
+    }
+    if args.first().map(String::as_str) == Some("bench-window") {
+        let mut machine = Machine::new();
+        machine.load_rom(include_bytes!("../../../roms/window.gba"))?;
+        machine.advance_to(Cycle(12 * CYCLES_PER_FRAME), 2_000_000)?;
+        let image = machine.framebuffer().to_vec();
+        benchmark_machine("window", &mut machine, 600, 2_000_000)?;
+        assert_eq!(machine.framebuffer(), image);
+        assert_eq!(machine.inspect16(0x03000000)?, 0xa4);
+        return Ok(());
+    }
     if args.first().map(String::as_str) == Some("bench-affine-object") {
         let frames = option(&args, "--frames")?
             .unwrap_or_else(|| "600".to_owned())

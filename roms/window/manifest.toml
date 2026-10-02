@@ -1,0 +1,11 @@
+# Original interactive ARM guest; expectations are not changed by build.py.
+bytes = 632
+sha256 = "3351328bb7580a9b246d87d7f04226b23833e29a87e60c59609e9a035102737a"
+mailbox_id = 164
+mailbox_address = 50331648
+polling_pc_start = 134218160
+polling_pc_end = 134218180
+instruction_limit = 2000000
+cycle_overshoot_limit = 32
+capture_frames = [12, 16, 20, 24, 28, 32, 36, 40, 44, 48, 52]
+startup = "controlled ARM, no BIOS, no backup"

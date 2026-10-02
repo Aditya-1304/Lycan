@@ -2675,3 +2675,111 @@ supplied snapshots independently establish running sessions and timing evidence;
 they do not newly confirm every visual/lifecycle check. The pending manual-status
 text is retained until that scope is explicitly confirmed. Browser versions and
 sustained speed remain unrecorded. No later slice was implemented.
+
+## Slice 23 — window masks and mosaic: automated verification complete; manual acceptance pending
+
+Implemented against `plan_final.md` section 23 on 2026-10-02. Existing timing
+entries are preserved. Linux UI and Chrome/Brave visual acceptance remain **not
+verified**; browser checks are user-owned. Instructions and exact capture replay:
+[window README](../roms/window/README.md).
+
+The compositor now selects WIN0, WIN1, OBJWIN or WINOUT before background and
+object priority decisions. Rectangular bounds are half-open, support wrapping,
+and are empty when start equals end. WIN0 wins overlap, then WIN1, then opaque
+object-window texels; transparent object-window texels preserve the outside mask.
+Bits 0–4 gate individual layers while backdrop remains available. Bit 5 retains
+color-effect permission for section 24; alpha/brightness operations are not part
+of this slice. BG mosaic samples screen-coordinate groups before scroll/affine
+addressing; OBJ mosaic samples relative to object bounds before flips/transforms.
+Rendering retains the existing scanline approximation.
+
+### Fixture and acceptance evidence
+
+The original MIT guest, [manifest](../roms/window/manifest.toml), independent
+[geometry oracle](../roms/window/contract.rs) and frozen
+[capture hashes](../roms/window/captures.json) are reproducible with:
+
+```bash
+cd /home/aditya/Projects/GBA/gba-rs
+python3 roms/window/build.py
+python3 roms/window/verify.py
+cargo run --locked -p gba-tools --release -- bench-window
+```
+
+| Evidence | Result |
+| --- | --- |
+| ROM | `window.gba`, 632 bytes; SHA-256 `3351328bb7580a9b246d87d7f04226b23833e29a87e60c59609e9a035102737a` |
+| Startup | Controlled direct ARM, no BIOS, no backup; app exception requires exact shipped bytes |
+| Completion | Continuous guest; polling PC `0x080001b0..=0x080001c4`, mailbox `0x03000000` ID `0x00a4` plus four exact control slots, completed framebuffer generation |
+| Execution bounds | 2,000,000 instructions per advance; at most 32 cycles of instruction-boundary overshoot |
+| Meaningful RED | Before implementation, outside pixel `(0,0)` incorrectly rendered BG0 `0x001f` instead of allowed BG1 `0x03e0`; final guest also fails against isolated unchanged HEAD renderer |
+| Native GREEN | 11 full-frame captures at frames 12,16,20,24,28,32,36,40,44,48,52; 422,400 pixel comparisons |
+| Captured behavior | Moving WIN0, visible layer toggle, WIN0/WIN1 overlap, object-window opaque/transparent texels, preserved outside BG/OBJ, wrapped/empty horizontal bounds, horizontal/vertical 4x4 BG and 3x3 OBJ mosaic |
+| Final guest state | Frame 52; PC `0x080001b4`; cycles 14,606,592; instructions 1,217,728; mailbox controls `[32,0,0,2]` |
+| Production WASM GREEN | Same 11 guest captures and independent image oracle executed in Node |
+| Capture artifacts | `target/window-captures/frame-{12,16,20,24,28,32,36,40,44,48,52}.ppm`; each image checked against geometry before frozen SHA-256 |
+| Core/session tests | PASS: 33 core unit tests, 1 backup integration test, 13 session tests; no additional mechanical unit tests |
+| Regression captures | PASS: 35 affine-background native/WASM captures; 14 affine-object native/WASM captures and existing standalone mGBA singular-matrix comparison |
+| Broad fixtures | PASS: `cargo run --locked -p gba-tools --release -- fixtures run` |
+| Static gates | PASS: all-target workspace Clippy with `-D warnings`, formatting, `git diff --check` |
+| Application builds | PASS: native release app, WASM app check, isolated release Trunk output `target/window-web` |
+| Retained evidence | `target/window-evidence/{results,baseline-red,verify,tests,clippy,native-build,wasm-check,object-regression,background-regression,fixtures,bench,trunk,format,diff}.txt` |
+
+The new replay catches real layer leakage, incorrect overlap precedence, opaque
+object-window holes and incorrect mosaic sampling; previous fixtures do not
+exercise these behaviors. No separate host tests duplicate the guest oracle.
+Affine mosaic and vertically wrapped window bounds are implemented through the
+shared samplers/range selection but are not independently captured by this focused
+guest. Color-effect permission is retained, while its visible effect will be
+verified when section 24 introduces blending. No mGBA window comparison is claimed.
+
+### Performance and manual acceptance
+
+| Platform | Behavior | Core mean/p95 ms | Conversion mean/p95 ms | Texture submission mean/p95 ms | Sustained speed | Version |
+| --- | --- | --- | --- | --- | --- | --- |
+| Native headless | 600 stable frames after frame-12 initialization; image/mailbox checked | 2.286 / 2.282 | Not applicable | Not applicable | Not measured | Rust 1.98.1 |
+| Linux native UI | Not verified | Not measured | Not measured | Not measured | Not measured | Not recorded |
+| Chrome | Not verified; user-owned | Not measured | Not measured | Not measured | Not measured | Not recorded |
+| Brave | Not verified; user-owned | Not measured | Not measured | Not measured | Not measured | Not recorded |
+
+Environment: Linux 7.2.7-arch1-1, Intel Core i7-13620H, Rust 1.98.1,
+Trunk 0.21.14. Governor, thermals, refresh rate and audio device were not recorded.
+The retained headless run excludes conversion, texture submission, UI and host
+audio. Its core mean/p95 are below the 16.74 ms frame budget; this does not prove
+browser speed. An earlier run measured 2.504 / 2.692 ms; the table uses the final
+retained run rather than mixing samples.
+
+```bash
+cd /home/aditya/Projects/GBA/gba-rs
+cargo run --locked -p gba-app --release -- --debug-ui
+```
+
+Load `roms/window.gba`, then Resume. Right/Left move WIN0, Z changes its permitted
+layers, X toggles mosaic, Up selects wrapped WIN0, Down selects empty WIN0.
+Release between presses. Replay Right, Z, X, Right, Right, Left, X, Z, Up, Down
+and compare the frozen captures. Reset restores the initial scene. Verify overlap,
+object-window holes, unchanged outside layers, pause/resume/reset, focus-loss key
+release and crisp resizing. F1 exposes timing summaries.
+
+```bash
+cd /home/aditya/Projects/GBA/gba-rs
+env -u NO_COLOR trunk --config web/Trunk.toml serve --release --dist /home/aditya/Projects/GBA/gba-rs/target/window-web --address 127.0.0.1 --port 8080
+```
+
+Open `http://127.0.0.1:8080` in Chrome and Brave and repeat the checks. Record only
+observed timing values, browser versions and sustained speed; confirm visual
+acceptance separately.
+
+### Comparison against plan section 23
+
+- [x] Buttons move a window and change visible layers through guest register writes.
+- [x] Add window bounds and per-layer/effect permission masks.
+- [x] Add an object-window case and a focused mosaic case.
+- [x] Capture rectangular boundaries, overlap, wrapped/empty bounds and transparent object-window pixels.
+- [x] Automatically verify expected masked regions and preserved outside layers on native and production WASM.
+- [x] Record evidence-backed performance and reproduction commands without changing prior user timings.
+- [ ] User-confirmed Linux application visual/lifecycle acceptance.
+- [ ] User-confirmed Chrome/Brave visual/lifecycle acceptance and browser measurements.
+
+Section 23 implementation and automated acceptance are complete. Overall manual
+acceptance remains pending; section 24 was not started.

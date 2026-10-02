@@ -30,8 +30,9 @@ const BANKED_ROM: &[u8] = include_bytes!("../../../roms/flash-banked-score.gba")
 const FLASH_ROM: &[u8] = include_bytes!("../../../roms/flash-score.gba");
 const SRAM_ROM: &[u8] = include_bytes!("../../../roms/sram.gba");
 
-/// Original affine diagnostics use controlled ARM startup; retail ROMs retain BIOS boot.
-const AFFINE_ROMS: [&[u8]; 6] = [
+/// Original display diagnostics use controlled ARM startup; retail ROMs retain BIOS boot.
+const AFFINE_ROMS: [&[u8]; 7] = [
+    include_bytes!("../../../roms/window.gba"),
     include_bytes!("../../../roms/affine-object.gba"),
     include_bytes!("../../../roms/affine-mode-1.gba"),
     include_bytes!("../../../roms/affine-mode-2.gba"),

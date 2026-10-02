@@ -2343,9 +2343,9 @@ impl Object {
         let attr1 = u16::from_le_bytes([entry[2], entry[3]]);
         let attr2 = u16::from_le_bytes([entry[4], entry[5]]);
         // Bit 9 disables regular objects but doubles affine display bounds.
-        // Object-window and semitransparent modes require later effect handling.
+        // Object-window texels select masks; semitransparent effects arrive separately.
         let affine = attr0 & 0x100 != 0;
-        if attr0 & 0x0c00 != 0 || (!affine && attr0 & 0x200 != 0) {
+        if matches!(attr0 & 0x0c00, 0x0400 | 0x0c00) || (!affine && attr0 & 0x200 != 0) {
             return None;
         }
         let dimensions = match attr0 >> 14 {
@@ -2368,6 +2368,17 @@ impl Object {
                 })
             }),
         })
+    }
+
+    /// OBJ mosaic repeats source samples relative to the object's display origin,
+    /// before flips or affine transforms; window selection uses the destination pixel.
+    fn mosaic(&self, x: usize, y: usize, io: &[u8]) -> (usize, usize) {
+        if self.attr0 & 0x1000 == 0 {
+            return (x, y);
+        }
+        let width = usize::from(io[0x4d] & 15) + 1;
+        let height = usize::from(io[0x4d] >> 4) + 1;
+        (x / width * width, y / height * height)
     }
 
     /// Expanded bounds change the center and clipping rectangle, never source stride.
@@ -2530,6 +2541,75 @@ impl AffineBackground {
     }
 }
 
+/// Window selection precedes layer priority. Bits 0..4 enable BG0..3/OBJ;
+/// bit 5 preserves permission for the subsequent color-effects stage.
+struct WindowMasks {
+    layers: [u8; SCREEN_WIDTH],
+}
+
+impl WindowMasks {
+    /// Hardware ranges are half-open and wrap when the start exceeds the end.
+    fn contains(bounds: u16, coordinate: usize) -> bool {
+        let start = usize::from(bounds >> 8);
+        let end = usize::from(bounds & 255);
+        if start <= end {
+            (start..end).contains(&coordinate)
+        } else {
+            coordinate >= start || coordinate < end
+        }
+    }
+
+    /// WIN0 overrides WIN1, which overrides OBJWIN, which overrides WINOUT.
+    /// Transparent OBJWIN texels leave the previous outside mask intact.
+    fn scanline(
+        control: u16,
+        line: usize,
+        io: &[u8],
+        oam: &[u8],
+        vram: &[u8],
+        palette: &[u8],
+    ) -> Self {
+        let mut layers = [0x3f; SCREEN_WIDTH];
+        if control & 0xe000 == 0 {
+            return Self { layers };
+        }
+        layers.fill(io[0x4a] & 0x3f);
+        if control & 0x9000 == 0x9000 {
+            for entry in oam.as_chunks::<8>().0 {
+                let Some(object) = Object::from_oam(entry, oam) else {
+                    continue;
+                };
+                if object.attr0 & 0x0c00 != 0x0800 {
+                    continue;
+                }
+                let y = (line + 256 - usize::from(object.attr0 & 255)) & 255;
+                let (width, height) = object.bounds();
+                if y >= height {
+                    continue;
+                }
+                for local_x in 0..width {
+                    let x = (usize::from(object.attr1 & 511) + local_x) & 511;
+                    let (sx, sy) = object.mosaic(local_x, y, io);
+                    if x < SCREEN_WIDTH && object.pixel(sx, sy, control, vram, palette).is_some() {
+                        layers[x] = io[0x4b] & 0x3f;
+                    }
+                }
+            }
+        }
+        for window in (0..2).rev() {
+            let read = |offset| u16::from_le_bytes([io[offset], io[offset + 1]]);
+            if control & (0x2000 << window) != 0 && Self::contains(read(0x44 + window * 2), line) {
+                for (x, mask) in layers.iter_mut().enumerate() {
+                    if Self::contains(read(0x40 + window * 2), x) {
+                        *mask = io[0x48 + window] & 0x3f;
+                    }
+                }
+            }
+        }
+        Self { layers }
+    }
+}
+
 /// Display timing is independent of VRAM writes and frontend presentation.
 struct Display {
     control: u16,
@@ -2576,12 +2656,17 @@ impl Display {
         palette: &[u8],
         oam: &[u8],
         bg_priority: &[u8; SCREEN_WIDTH],
+        masks: &WindowMasks,
+        io: &[u8],
     ) {
         let mut objects = [None; SCREEN_WIDTH];
         for entry in oam.as_chunks::<8>().0 {
             let Some(object) = Object::from_oam(entry, oam) else {
                 continue;
             };
+            if object.attr0 & 0x0c00 == 0x0800 {
+                continue;
+            }
             let y = (self.line + 256 - usize::from(object.attr0 & 255)) & 255;
             let (bound_width, bound_height) = object.bounds();
             if y >= bound_height {
@@ -2589,10 +2674,11 @@ impl Display {
             }
             for local_x in 0..bound_width {
                 let x = (usize::from(object.attr1 & 511) + local_x) & 511;
-                if x >= SCREEN_WIDTH || objects[x].is_some() {
+                if x >= SCREEN_WIDTH || masks.layers[x] & 0x10 == 0 || objects[x].is_some() {
                     continue;
                 }
-                if let Some(color) = object.pixel(local_x, y, self.control, vram, palette) {
+                let (sample_x, sample_y) = object.mosaic(local_x, y, io);
+                if let Some(color) = object.pixel(sample_x, sample_y, self.control, vram, palette) {
                     objects[x] = Some((color, ((object.attr2 >> 10) & 3) as u8));
                 }
             }
@@ -2627,6 +2713,7 @@ impl Display {
                 } else {
                     backdrop
                 });
+                let masks = WindowMasks::scanline(self.control, self.line, io, oam, vram, palette);
                 let mut bg_priority = [4u8; SCREEN_WIDTH];
                 if !forced_blank {
                     // Back-to-front composition preserves lower-numbered BG ties.
@@ -2646,15 +2733,35 @@ impl Display {
                             }
                             let text_layer = TextBackground::from_registers(io, background);
                             for (x, pixel_priority) in bg_priority.iter_mut().enumerate() {
+                                if masks.layers[x] & (1 << background) == 0 {
+                                    continue;
+                                }
+                                let mosaic = text_layer.control & 0x40 != 0;
+                                let width = usize::from(io[0x4c] & 15) + 1;
+                                let height = usize::from(io[0x4c] >> 4) + 1;
+                                let sample_x = if mosaic { x / width * width } else { x };
+                                let sample_y = if mosaic {
+                                    self.line / height * height
+                                } else {
+                                    self.line
+                                };
                                 let color = if text {
-                                    text_layer.pixel(x, self.line, vram, palette)
+                                    text_layer.pixel(sample_x, sample_y, vram, palette)
                                 } else {
                                     AffineBackground::new(
                                         io,
                                         background,
-                                        self.affine_origin[background - 2],
+                                        std::array::from_fn(|axis| {
+                                            let offset = 0x22 + (background - 2) * 16 + axis * 4;
+                                            let delta =
+                                                i16::from_le_bytes([io[offset], io[offset + 1]])
+                                                    as i32;
+                                            // Vertical mosaic reuses the group's first line origin.
+                                            self.affine_origin[background - 2][axis]
+                                                .wrapping_sub(delta * (self.line - sample_y) as i32)
+                                        }),
                                     )
-                                    .pixel(x, mode, page, vram, palette)
+                                    .pixel(sample_x, mode, page, vram, palette)
                                 };
                                 if let Some(color) = color {
                                     self.drawing[start + x] = color;
@@ -2672,7 +2779,7 @@ impl Display {
                     }
                 }
                 if !forced_blank && self.control & (1 << 12) != 0 {
-                    self.render_objects(vram, palette, oam, &bg_priority);
+                    self.render_objects(vram, palette, oam, &bg_priority, &masks, io);
                 }
                 self.line += 1;
                 self.next_event = self.frame_start
