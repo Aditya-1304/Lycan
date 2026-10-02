@@ -1917,7 +1917,9 @@ impl System {
     /// Applies a bus beat after its access time has synchronized scanout. Word
     /// transfers reuse this path without charging the hardware clock twice.
     fn write_halfword(&mut self, address: u32, value: u16) -> Result<(), CoreError> {
-        if self.bios_enabled && address < BIOS_SIZE as u32 {
+        // BIOS and the remainder of regions 00h/01h are not writable memory.
+        // The enclosing bus operation has already charged its timing.
+        if address < EWRAM_START {
             return Ok(());
         }
 
@@ -2345,9 +2347,10 @@ impl CpuBus for System {
             return Ok(());
         }
 
-        if self.bios_enabled && address < BIOS_SIZE as u32 {
-            // The BIOS is ROM. Stores occupy the bus but do not modify it and do
-            // not raise a CPU-visible memory fault.
+        // Region 00h/01h contains the BIOS followed by unmapped system space.
+        // Stores consume bus time but have no writable target. Real hardware does
+        // not turn these accesses into a guest-visible execution failure.
+        if address < EWRAM_START {
             return Ok(());
         }
 
@@ -5107,5 +5110,44 @@ mod tests {
         assert_eq!(ColorEffects::brighten(0x001f, 8), 0x421f);
 
         assert_eq!(ColorEffects::darken(0x001f, 8), 0x0010);
+    }
+
+    #[test]
+    fn unmapped_low_system_stores_are_ignored() {
+        let mut machine = Machine::new();
+
+        let data = Access {
+            kind: AccessKind::Data,
+            sequential: false,
+        };
+
+        machine.system.cpu_open_bus = 0x4433_2211;
+
+        // BIOS ends at 0x00003fff. The remaining low system area has no
+        // writable backing device, but stores must not terminate execution.
+        machine.system.write8(0x0000_7c00, 0xaa, data).unwrap();
+
+        machine
+            .system
+            .write16_impl(0x0000_7c00, 0xbbcc, data)
+            .unwrap();
+
+        machine
+            .system
+            .write32_impl(0x0000_7c00, 0xddee_ff00, data)
+            .unwrap();
+
+        // Reads remain open-bus rather than becoming writable storage.
+        assert_eq!(machine.system.read8(0x0000_7c00, data).unwrap(), 0x11,);
+
+        assert_eq!(
+            machine.system.read16_impl(0x0000_7c00, data).unwrap(),
+            0x2211,
+        );
+
+        assert_eq!(
+            machine.system.read32_impl(0x0000_7c00, data).unwrap(),
+            0x4433_2211,
+        );
     }
 }
