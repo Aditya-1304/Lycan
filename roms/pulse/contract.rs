@@ -1,6 +1,7 @@
 //! Bounded guest acceptance for pulse note timing, controls and streaming audio.
 use gba_core::{Button, CYCLES_PER_FRAME, Cycle, Machine};
 use gba_session::Resampler;
+use std::num::NonZeroU32;
 const ROM: &[u8] = include_bytes!("../pulse.gba");
 
 /// Recorded rising edges independently check the guest's requested frequency.
@@ -168,11 +169,15 @@ pub fn verify() -> Vec<[f32; 2]> {
     let whole = render(CYCLES_PER_FRAME);
     assert_eq!(whole, render(997));
     for rate in [44_100, 48_000, 96_000] {
+        let Some(output_rate) = NonZeroU32::new(rate) else {
+            continue;
+        };
+
         for side in 0..2 {
             let mono: Vec<_> = whole.iter().map(|f| f[side]).collect();
             let mut expected = Vec::new();
-            Resampler::new(rate).process(&mono, &mut expected);
-            let mut converter = Resampler::new(rate);
+            Resampler::new(output_rate).process(&mono, &mut expected);
+            let mut converter = Resampler::new(output_rate);
             let mut streamed = Vec::new();
             for chunk in mono.chunks(137) {
                 converter.process(chunk, &mut streamed);

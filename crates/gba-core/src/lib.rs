@@ -133,15 +133,36 @@ pub struct Cycle(pub u64);
 /// A failure produced while loading or executing a guest program.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CoreError {
-    InvalidInputTimestamp { requested: Cycle, earliest: Cycle },
+    InvalidInputTimestamp {
+        requested: Cycle,
+        earliest: Cycle,
+    },
     InputQueueFull,
     EmptyRom,
     MissingBios,
-    InvalidBiosSize { size: usize },
-    RomTooLarge { size: usize, maximum: usize },
-    InvalidAccessAlignment { address: u32, width: usize },
-    UnmappedAddress { address: u32, width: usize },
-    UnsupportedInstruction { address: u32, instruction: u32 },
+    InvalidBiosSize {
+        size: usize,
+    },
+    RomTooLarge {
+        size: usize,
+        maximum: usize,
+    },
+    InvalidAccessAlignment {
+        address: u32,
+        width: usize,
+    },
+    UnmappedAddress {
+        address: u32,
+        width: usize,
+    },
+    UnsupportedInstruction {
+        address: u32,
+        instruction: u32,
+    },
+    /// Halfword load/store execution received an unsupported internal selector.
+    InvalidTransferKind {
+        kind: u32,
+    },
 }
 
 impl fmt::Display for CoreError {
@@ -185,6 +206,9 @@ impl fmt::Display for CoreError {
                 formatter,
                 "unsupported CPU instruction {instruction:#010x} at {address:#010x}"
             ),
+            Self::InvalidTransferKind { kind } => {
+                write!(formatter, "invalid internal halfword transfer kind {kind}")
+            }
         }
     }
 }
@@ -685,7 +709,12 @@ impl Cpu {
                 5 => self.registers[rd] = self.load_halfword_signed(bus, target, 1, access)?,
                 6 => self.registers[rd] = u32::from(bus.read8(target, access)?),
                 7 => self.registers[rd] = self.load_halfword_signed(bus, target, 3, access)?,
-                _ => unreachable!("three-bit transfer kind"),
+                _ => {
+                    return Err(CoreError::UnsupportedInstruction {
+                        address,
+                        instruction: op,
+                    });
+                }
             }
             if op & 0x0800 != 0 || op & 0x0e00 == 0x0600 {
                 bus.idle(1);
@@ -919,7 +948,7 @@ impl Cpu {
                 13 => operand,
                 14 => lhs & !operand,
                 15 => !operand,
-                _ => unreachable!("all arithmetic opcodes handled above"),
+                _ => return false,
             };
             (result, shifter_carry, false)
         };
@@ -959,7 +988,7 @@ impl Cpu {
         if amount == 0 {
             return (value, self.cpsr & CPSR_C != 0);
         }
-        match kind {
+        match kind & 3 {
             0 if amount < 32 => (value << amount, value & (1 << (32 - amount)) != 0),
             0 => (0, amount == 32 && value & 1 != 0),
             1 if amount < 32 => (value >> amount, value & (1 << (amount - 1)) != 0),
@@ -968,11 +997,10 @@ impl Cpu {
                 ((value as i32) >> amount.min(31)) as u32,
                 value & (1 << (amount.min(32) - 1)) != 0,
             ),
-            3 => {
+            _ => {
                 let result = value.rotate_right(amount);
                 (result, result >> 31 != 0)
             }
-            _ => unreachable!("two-bit shift kind"),
         }
     }
 
@@ -980,16 +1008,15 @@ impl Cpu {
     /// by 32 and RRX. The carry result is used only when the ALU updates flags.
     fn shift_immediate(&self, value: u32, kind: u32, amount: u32) -> (u32, bool) {
         let carry = self.cpsr & CPSR_C != 0;
-        match (kind, amount) {
+        match (kind & 3, amount) {
             (0, 0) => (value, carry),
             (0, n) => (value << n, value & (1 << (32 - n)) != 0),
             (1, 0) => (0, value >> 31 != 0),
             (1, n) => (value >> n, value & (1 << (n - 1)) != 0),
             (2, 0) => (((value as i32) >> 31) as u32, value >> 31 != 0),
             (2, n) => (((value as i32) >> n) as u32, value & (1 << (n - 1)) != 0),
-            (3, 0) => ((u32::from(carry) << 31) | (value >> 1), value & 1 != 0),
-            (3, n) => (value.rotate_right(n), value & (1 << (n - 1)) != 0),
-            _ => unreachable!("shift encoding contains two bits"),
+            (_, 0) => ((u32::from(carry) << 31) | (value >> 1), value & 1 != 0),
+            (_, n) => (value.rotate_right(n), value & (1 << (n - 1)) != 0),
         }
     }
 
@@ -1357,7 +1384,7 @@ impl Cpu {
             2 => Ok(bus.read8(target, access)? as i8 as i32 as u32),
             3 if target & 1 != 0 => Ok(bus.read8(target, access)? as i8 as i32 as u32),
             3 => Ok(bus.read16(target, access)? as i16 as i32 as u32),
-            _ => unreachable!("halfword transfer kind"),
+            _ => Err(CoreError::InvalidTransferKind { kind }),
         }
     }
 }
@@ -1654,13 +1681,23 @@ impl System {
             0x07ff_ffff
         };
 
-        self.dma[channel].source = u32::from_le_bytes(self.io[base..base + 4].try_into().unwrap())
-            & source_mask
-            & !(width - 1);
-        self.dma[channel].destination =
-            u32::from_le_bytes(self.io[base + 4..base + 8].try_into().unwrap())
-                & destination_mask
-                & !(width - 1);
+        let source = u32::from_le_bytes([
+            self.io[base],
+            self.io[base + 1],
+            self.io[base + 2],
+            self.io[base + 3],
+        ]);
+
+        let destination = u32::from_le_bytes([
+            self.io[base + 4],
+            self.io[base + 5],
+            self.io[base + 6],
+            self.io[base + 7],
+        ]);
+
+        self.dma[channel].source = source & source_mask & !(width - 1);
+
+        self.dma[channel].destination = destination & destination_mask & !(width - 1);
         self.dma[channel].initial_destination = self.dma[channel].destination;
 
         let programmed_count = u16::from_le_bytes([self.io[base + 8], self.io[base + 9]]);
@@ -1701,10 +1738,11 @@ impl System {
             && !self.dma[channel].sequential
             && self.eeprom_address(self.dma[channel].destination)
         {
-            self.eeprom
-                .as_mut()
-                .unwrap()
-                .begin_dma(self.dma[channel].count);
+            let count = self.dma[channel].count;
+
+            if let Some(eeprom) = self.eeprom.as_mut() {
+                eeprom.begin_dma(count);
+            }
         }
         let access = Access {
             kind: AccessKind::Data,
@@ -1780,8 +1818,11 @@ impl System {
             return Err(CoreError::InvalidAccessAlignment { address, width: 2 });
         }
         self.charge(address, 2, access);
-        if self.eeprom_address(address) && matches!(access.kind, AccessKind::Data) {
-            let value = self.eeprom.as_mut().unwrap().read();
+        if self.eeprom_address(address)
+            && matches!(access.kind, AccessKind::Data)
+            && let Some(eeprom) = self.eeprom.as_mut()
+        {
+            let value = eeprom.read();
             self.open_bus = u32::from(value) * 0x0001_0001;
             return Ok(value);
         }
@@ -1852,7 +1893,10 @@ impl System {
         }
 
         if self.eeprom_address(address) {
-            self.eeprom.as_mut().unwrap().write(value);
+            if let Some(eeprom) = self.eeprom.as_mut() {
+                eeprom.write(value);
+            }
+
             return Ok(());
         }
 
@@ -1871,19 +1915,15 @@ impl System {
         if let Some(range) = range_for(address, IO_START, self.io.len(), 2) {
             let offset = range.start;
             if matches!(offset, 0x50 | 0x52 | 0x54) {
-                let stored = match offset {
+                let stored = if offset == 0x50 {
                     // BLDCNT: bits 14..15 are unused.
-                    0x50 => value & 0x3fff,
-
-                    // BLDALPHA: only EVA and EVB fields are writable.
-                    // Values above 16 remain representable in the register; the
-                    // blender clamps them when used.
-                    0x52 => value & 0x1f1f,
-
+                    value & 0x3fff
+                } else if offset == 0x52 {
+                    // BLDALPHA: EVA and EVB are five-bit register fields.
+                    value & 0x1f1f
+                } else {
                     // BLDY: effective EVY saturates at 16.
-                    0x54 => (value & 0x001f).min(16),
-
-                    _ => unreachable!(),
+                    (value & 0x001f).min(16)
                 };
 
                 self.io[range].copy_from_slice(&stored.to_le_bytes());
@@ -2061,7 +2101,12 @@ impl System {
         }
         if self.execution_address < BIOS_SIZE as u32 {
             let offset = address as usize & !3;
-            let word = u32::from_le_bytes(bios[offset..offset + 4].try_into().unwrap());
+            let word = u32::from_le_bytes([
+                bios[offset],
+                bios[offset + 1],
+                bios[offset + 2],
+                bios[offset + 3],
+            ]);
             if matches!(access.kind, AccessKind::Fetch) {
                 self.bios_latch = word;
             }
@@ -2171,7 +2216,9 @@ impl System {
             .front()
             .is_some_and(|event| event.cycle.0 <= target)
         {
-            let event = self.inputs.pop_front().expect("front was present");
+            let Some(event) = self.inputs.pop_front() else {
+                break;
+            };
 
             if self.buttons.set(event.button, event.pressed) {
                 self.evaluate_keypad();
@@ -2210,8 +2257,8 @@ impl CpuBus for System {
                 0 if self.bios_enabled => self.bios_latch,
                 7 => self
                     .read_bytes(fetch_address & !3, 4)
-                    .map(|bytes| u32::from_le_bytes(bytes.try_into().unwrap()))
-                    .unwrap_or(pipeline[1] * 0x00010001),
+                    .map(|bytes| u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+                    .unwrap_or(pipeline[1] * 0x0001_0001),
                 3 if fetch_address & 2 != 0 => (pipeline[1] << 16) | pipeline[0],
                 3 => pipeline[1] | (pipeline[0] << 16),
                 _ => pipeline[1] * 0x00010001,
@@ -2760,7 +2807,7 @@ impl LayerPixel {
             BLEND_LAYER_OBJ => self.priority * 5,
             0..=3 => self.priority * 5 + self.layer + 1,
             BLEND_LAYER_BACKDROP => 20,
-            _ => unreachable!("invalid display layer"),
+            _ => u8::MAX,
         }
     }
 }
@@ -2939,7 +2986,7 @@ impl ColorEffects {
             // Darken
             3 => Self::darken(top.color, self.evy),
 
-            _ => unreachable!("two-bit color-effect mode"),
+            _ => top.color & 0x7fff,
         }
     }
 }
@@ -2977,7 +3024,7 @@ impl Display {
             let background = usize::from(offset >= 0x38);
             let axis = (offset & 7) / 4;
             let base = 0x28 + background * 16 + axis * 4;
-            let raw = i32::from_le_bytes(io[base..base + 4].try_into().unwrap());
+            let raw = i32::from_le_bytes([io[base], io[base + 1], io[base + 2], io[base + 3]]);
             self.affine_origin[background][axis] = (raw << 4) >> 4;
         }
     }
@@ -3263,7 +3310,10 @@ impl Machine {
         if bytes.len() != BIOS_SIZE {
             return Err(CoreError::InvalidBiosSize { size: bytes.len() });
         }
-        self.system.bios = Some(bytes.to_vec().into_boxed_slice().try_into().unwrap());
+        let mut bios = Box::new([0u8; BIOS_SIZE]);
+        bios.copy_from_slice(bytes);
+
+        self.system.bios = Some(bios);
         if self.bios_startup {
             self.reset();
         }
@@ -3608,7 +3658,7 @@ impl Machine {
         let firmware = self.system.test_firmware;
         let bios = self.system.bios.take();
         let bios_startup = self.bios_startup;
-        let backup = self.backup.clone();
+        let backup = std::mem::take(&mut self.backup);
         let sram = self.system.sram.take();
         let mut eeprom = self.system.eeprom.take();
         if let Some(chip) = &mut eeprom {

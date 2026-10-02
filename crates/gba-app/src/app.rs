@@ -4,7 +4,7 @@ use gba_session::{
     BUTTONS, Button, CYCLES_PER_FRAME, Cycle, GBA_CLOCK_HZ, SCREEN_HEIGHT, SCREEN_WIDTH, Session,
 };
 use sha2::{Digest, Sha256};
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 use web_time::Instant;
 
 /// Completion of a picker or dropped-file request. None means dialog cancellation.
@@ -159,7 +159,7 @@ pub struct GbaApp {
     core_times: Measurements,
     conversion_times: Measurements,
     upload_times: Measurements,
-    screen_image: egui::ColorImage,
+    screen_image: Arc<egui::ColorImage>,
     texture: Option<egui::TextureHandle>,
     image_generation: u64,
     uploaded_generation: Option<u64>,
@@ -208,7 +208,10 @@ impl GbaApp {
             core_times: Measurements::default(),
             conversion_times: Measurements::default(),
             upload_times: Measurements::default(),
-            screen_image: egui::ColorImage::filled([WIDTH, HEIGHT], egui::Color32::BLACK),
+            screen_image: Arc::new(egui::ColorImage::filled(
+                [WIDTH, HEIGHT],
+                egui::Color32::BLACK,
+            )),
             texture: None,
             image_generation: 0,
             uploaded_generation: None,
@@ -465,7 +468,9 @@ impl GbaApp {
                 self.host_origin = Instant::now();
                 self.replay_deadline = None;
                 self.last_guest_generation = 0;
-                self.screen_image.pixels.fill(egui::Color32::BLACK);
+                Arc::make_mut(&mut self.screen_image)
+                    .pixels
+                    .fill(egui::Color32::BLACK);
                 self.image_generation = self.image_generation.wrapping_add(1);
                 self.core_times = Measurements::default();
                 self.conversion_times = Measurements::default();
@@ -594,7 +599,7 @@ impl GbaApp {
         }
         if !self.storage.busy && !self.storage.failed {
             if self.restoring_save {
-                if let Some(identity) = self.save_identity.clone() {
+                if let Some(identity) = self.save_identity {
                     self.storage.load(ctx, identity, self.save_generation);
                 }
             } else if self
@@ -603,7 +608,7 @@ impl GbaApp {
                 .is_some_and(|status| status.dirty)
             {
                 if let (Some(identity), Some(image)) =
-                    (self.save_identity.clone(), self.session.save_image())
+                    (self.save_identity, self.session.save_image())
                 {
                     self.storage
                         .write(ctx, identity, self.save_generation, image);
@@ -620,7 +625,7 @@ impl GbaApp {
     /// Imports run with the guest paused and after any outstanding write. Exports
     /// include identity and the latest bytes, including data from a failed write.
     fn draw_save_controls(&mut self, ui: &mut egui::Ui) {
-        let Some(identity) = self.save_identity.clone() else {
+        let Some(identity) = self.save_identity else {
             return;
         };
         ui.label(format!("Backup: {}", self.storage.status));
@@ -649,7 +654,7 @@ impl GbaApp {
                     self.session.toggle_pause();
                 }
                 self.storage
-                    .import(ui.ctx(), identity.clone(), self.save_generation);
+                    .import(ui.ctx(), identity, self.save_generation);
                 self.save_import_open = self.storage.busy;
             }
             if ui
@@ -677,15 +682,15 @@ impl GbaApp {
 
     /// Converts the core's row-major BGR555 pixels into the shared egui image.
     fn copy_framebuffer_to_image(&mut self) {
-        for (destination, &pixel) in self
-            .screen_image
-            .pixels
-            .iter_mut()
-            .zip(self.session.framebuffer())
-        {
-            let red = expand_five_bit(pixel & 0x1F);
-            let green = expand_five_bit((pixel >> 5) & 0x1F);
-            let blue = expand_five_bit((pixel >> 10) & 0x1F);
+        let framebuffer = self.session.framebuffer();
+
+        let image = Arc::make_mut(&mut self.screen_image);
+
+        for (destination, &pixel) in image.pixels.iter_mut().zip(framebuffer) {
+            let red = expand_five_bit(pixel & 0x1f);
+            let green = expand_five_bit((pixel >> 5) & 0x1f);
+            let blue = expand_five_bit((pixel >> 10) & 0x1f);
+
             *destination = egui::Color32::from_rgb(red, green, blue);
         }
     }
@@ -706,13 +711,16 @@ impl GbaApp {
         if self.texture.is_none() {
             self.texture = Some(ctx.load_texture(
                 "gba-framebuffer",
-                self.screen_image.clone(),
+                Arc::clone(&self.screen_image),
                 egui::TextureOptions::NEAREST,
             ));
             self.uploaded_generation = Some(self.image_generation);
-        } else if self.uploaded_generation != Some(self.image_generation) {
+        } else if changed {
             if let Some(texture) = &mut self.texture {
-                texture.set(self.screen_image.clone(), egui::TextureOptions::NEAREST);
+                texture.set(
+                    Arc::clone(&self.screen_image),
+                    egui::TextureOptions::NEAREST,
+                );
             }
             self.uploaded_generation = Some(self.image_generation);
         }
@@ -732,7 +740,9 @@ impl GbaApp {
         self.host_origin = Instant::now();
         self.replay_deadline = None;
         self.last_guest_generation = 0;
-        self.screen_image.pixels.fill(egui::Color32::BLACK);
+        Arc::make_mut(&mut self.screen_image)
+            .pixels
+            .fill(egui::Color32::BLACK);
         self.status = format!("Reset {}", self.rom_name);
         self.image_generation = self.image_generation.wrapping_add(1);
     }
@@ -1340,7 +1350,7 @@ impl eframe::App for GbaApp {
             let image = ctx.input(|input| {
                 input.events.iter().find_map(|event| {
                     if let egui::Event::Screenshot { image, .. } = event {
-                        Some(image.clone())
+                        Some(Arc::clone(image))
                     } else {
                         None
                     }
@@ -1369,8 +1379,16 @@ impl eframe::App for GbaApp {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             }
         }
-        let dropped = ctx.input(|input| input.raw.dropped_files.clone());
-        if let Some(file) = dropped.into_iter().last() {
+        let dropped = ctx.input_mut(|input| {
+            let file = input.raw.dropped_files.pop();
+
+            // The existing behavior intentionally processes only
+            // the final file from one drop operation.
+            input.raw.dropped_files.clear();
+
+            file
+        });
+        if let Some(file) = dropped {
             let name = file
                 .path()
                 .file_name()
@@ -1411,7 +1429,9 @@ impl eframe::App for GbaApp {
                         self.host_origin = Instant::now();
                         self.replay_deadline = None;
                         self.last_guest_generation = 0;
-                        self.screen_image.pixels.fill(egui::Color32::BLACK);
+                        Arc::make_mut(&mut self.screen_image)
+                            .pixels
+                            .fill(egui::Color32::BLACK);
                         self.image_generation = self.image_generation.wrapping_add(1);
                         self.bios_hash = Some(format!("{:x}", Sha256::digest(&bytes)));
                         self.status = "BIOS loaded; select a ROM to boot".to_owned();

@@ -1,6 +1,7 @@
 //! Streaming conversion from the fixed core cadence to a host device rate.
 
 use crate::PCM_RATE;
+use std::num::NonZeroU32;
 
 /// Linear interpolation with an integer phase carried across chunk boundaries.
 /// Reset only on session discontinuities; ordinary frame boundaries retain it.
@@ -12,10 +13,9 @@ pub struct Resampler {
 
 impl Resampler {
     /// Output adapters supply their actual device/AudioContext sample rate.
-    pub fn new(output_rate: u32) -> Self {
-        assert!(output_rate > 0);
+    pub fn new(output_rate: NonZeroU32) -> Self {
         Self {
-            output_rate,
+            output_rate: output_rate.get(),
             previous: None,
             phase: 0,
         }
@@ -53,11 +53,9 @@ pub struct StereoResampler {
 
 impl StereoResampler {
     /// Output adapters supply their actual device/AudioContext sample rate.
-    pub fn new(output_rate: u32) -> Self {
-        assert!(output_rate > 0);
-
+    pub fn new(output_rate: NonZeroU32) -> Self {
         Self {
-            output_rate,
+            output_rate: output_rate.get(),
             previous: None,
             phase: 0,
         }
@@ -102,10 +100,14 @@ mod tests {
     fn uneven_chunks_match_continuous_resampling_at_device_rates() {
         let input: Vec<_> = (0..=PCM_RATE).map(|i| (i % 256) as f32 / 256.0).collect();
         for rate in [44_100, 48_000, 96_000] {
+            let Some(output_rate) = NonZeroU32::new(rate) else {
+                continue;
+            };
+
             let mut whole = Vec::new();
-            Resampler::new(rate).process(&input, &mut whole);
+            Resampler::new(output_rate).process(&input, &mut whole);
             let mut streaming = Vec::new();
-            let mut converter = Resampler::new(rate);
+            let mut converter = Resampler::new(output_rate);
             for chunk in input.chunks(137) {
                 converter.process(chunk, &mut streaming);
             }
@@ -130,10 +132,14 @@ mod tests {
             .collect();
 
         for rate in [44_100, 48_000, 96_000] {
-            let mut stereo_converter = super::StereoResampler::new(rate);
+            let Some(output_rate) = NonZeroU32::new(rate) else {
+                continue;
+            };
+
+            let mut stereo_converter = super::StereoResampler::new(output_rate);
             let mut stereo = Vec::new();
-            let mut left_converter = Resampler::new(rate);
-            let mut right_converter = Resampler::new(rate);
+            let mut left_converter = Resampler::new(output_rate);
+            let mut right_converter = Resampler::new(output_rate);
             let mut left = Vec::new();
             let mut right = Vec::new();
 

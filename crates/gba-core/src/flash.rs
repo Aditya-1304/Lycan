@@ -125,8 +125,11 @@ impl Flash {
                 } else {
                     return;
                 };
-                if self.bytes[range.clone()].iter().any(|&byte| byte != 0xff) {
-                    self.bytes[range].fill(0xff);
+                let start = range.start;
+                let end = range.end;
+
+                if self.bytes[start..end].iter().any(|&byte| byte != 0xff) {
+                    self.bytes[start..end].fill(0xff);
                     self.revision += 1;
                 }
                 Command::Idle

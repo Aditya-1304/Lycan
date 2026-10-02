@@ -382,12 +382,7 @@ fn fail(message: impl Into<String>) -> Box<dyn Error> {
     io::Error::other(message.into()).into()
 }
 fn root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .to_owned()
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
 fn hash(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
@@ -747,7 +742,9 @@ fn tool(program: &str, args: &[&std::ffi::OsStr]) -> Result<()> {
 /// Rebuilds original assembly with GNU Arm binutils and verifies its frozen identity.
 fn build_fixtures(path: &Path) -> Result<()> {
     let manifest = manifest(path)?;
-    let directory = path.parent().unwrap();
+    let directory = path
+        .parent()
+        .ok_or_else(|| fail("fixture manifest has no parent directory"))?;
     let build = std::env::temp_dir().join(format!("gba-fixtures-{}", std::process::id()));
     fs::create_dir_all(&build)?;
     if manifest.fixture.iter().any(|fixture| fixture.bios_required) {
@@ -1017,6 +1014,17 @@ fn capture(path: &Path, framebuffer: &[u16]) -> Result<()> {
     }
     fs::write(path, output)?;
     Ok(())
+}
+
+/// Retains the first file error so callback-based verification can return it afterward.
+fn record_capture_error(error: &mut Option<Box<dyn Error>>, path: PathBuf, framebuffer: &[u16]) {
+    if error.is_some() {
+        return;
+    }
+
+    if let Err(cause) = capture(&path, framebuffer) {
+        *error = Some(cause);
+    }
 }
 
 /// Resolves fixture input names to the same logical buttons used by the app.
@@ -2444,17 +2452,17 @@ fn run() -> Result<()> {
         }
         let directory = root().join("target/raster-captures");
         fs::create_dir_all(&directory)?;
+        let mut capture_error = None;
         raster_contract::verify_with_capture(|frame, pixels| {
-            let mut ppm = b"P6\n240 160\n255\n".to_vec();
-            for pixel in pixels {
-                for shift in [0, 5, 10] {
-                    let channel = ((pixel >> shift) & 31) as u8;
-                    ppm.push((channel << 3) | (channel >> 2));
-                }
-            }
-            fs::write(directory.join(format!("frame-{frame}.ppm")), ppm)
-                .expect("write raster capture");
+            record_capture_error(
+                &mut capture_error,
+                directory.join(format!("frame-{frame}.ppm")),
+                pixels,
+            );
         });
+        if let Some(error) = capture_error {
+            return Err(error);
+        }
         return Ok(());
     }
     if args.first().map(String::as_str) == Some("bench-raster") {
@@ -2463,10 +2471,13 @@ fn run() -> Result<()> {
         machine.advance_to(Cycle(12 * CYCLES_PER_FRAME), 2_000_000)?;
         let image = machine.framebuffer().to_vec();
         benchmark_machine("raster", &mut machine, 600, 2_000_000)?;
-        assert_eq!(machine.framebuffer(), image);
-        assert_eq!(machine.inspect16(0x0300_0000)?, 0x00a6);
-        assert_eq!(machine.inspect16(0x0300_0002)?, 0);
-        assert_eq!(machine.inspect16(0x0300_0004)?, 0x0100);
+        if machine.framebuffer() != image.as_slice()
+            || machine.inspect16(0x0300_0000)? != 0x00a6
+            || machine.inspect16(0x0300_0002)? != 0
+            || machine.inspect16(0x0300_0004)? != 0x0100
+        {
+            return Err(fail("raster benchmark changed the settled guest contract"));
+        }
         return Ok(());
     }
     if args.first().map(String::as_str) == Some("verify-blend") {
@@ -2483,16 +2494,17 @@ fn run() -> Result<()> {
         }
         let directory = root().join("target/blend-captures");
         fs::create_dir_all(&directory)?;
+        let mut capture_error = None;
         blend_contract::verify_with_capture(|frame, pixels| {
-            let mut ppm = b"P6\n240 160\n255\n".to_vec();
-            for pixel in pixels {
-                for shift in [0, 5, 10] {
-                    let channel = ((pixel >> shift) & 31) as u8;
-                    ppm.push((channel << 3) | (channel >> 2));
-                }
-            }
-            fs::write(directory.join(format!("frame-{frame}.ppm")), ppm).unwrap();
+            record_capture_error(
+                &mut capture_error,
+                directory.join(format!("frame-{frame}.ppm")),
+                pixels,
+            );
         });
+        if let Some(error) = capture_error {
+            return Err(error);
+        }
         return Ok(());
     }
     if args.first().map(String::as_str) == Some("bench-blend") {
@@ -2501,8 +2513,9 @@ fn run() -> Result<()> {
         machine.advance_to(Cycle(12 * CYCLES_PER_FRAME), 2_000_000)?;
         let image = machine.framebuffer().to_vec();
         benchmark_machine("blend", &mut machine, 600, 2_000_000)?;
-        assert_eq!(machine.framebuffer(), image);
-        assert_eq!(machine.inspect16(0x0300_0000)?, 0x00a5);
+        if machine.framebuffer() != image.as_slice() || machine.inspect16(0x0300_0000)? != 0x00a5 {
+            return Err(fail("blend benchmark changed the settled guest contract"));
+        }
         return Ok(());
     }
     if args.first().map(String::as_str) == Some("verify-window") {
@@ -2515,16 +2528,17 @@ fn run() -> Result<()> {
         }
         let directory = root().join("target/window-captures");
         fs::create_dir_all(&directory)?;
+        let mut capture_error = None;
         window_contract::verify_with_capture(|frame, pixels| {
-            let mut ppm = b"P6\n240 160\n255\n".to_vec();
-            for pixel in pixels {
-                for shift in [0, 5, 10] {
-                    let channel = ((pixel >> shift) & 31) as u8;
-                    ppm.push((channel << 3) | (channel >> 2));
-                }
-            }
-            fs::write(directory.join(format!("frame-{frame}.ppm")), ppm).unwrap();
+            record_capture_error(
+                &mut capture_error,
+                directory.join(format!("frame-{frame}.ppm")),
+                pixels,
+            );
         });
+        if let Some(error) = capture_error {
+            return Err(error);
+        }
         return Ok(());
     }
     if args.first().map(String::as_str) == Some("bench-window") {
@@ -2533,8 +2547,9 @@ fn run() -> Result<()> {
         machine.advance_to(Cycle(12 * CYCLES_PER_FRAME), 2_000_000)?;
         let image = machine.framebuffer().to_vec();
         benchmark_machine("window", &mut machine, 600, 2_000_000)?;
-        assert_eq!(machine.framebuffer(), image);
-        assert_eq!(machine.inspect16(0x03000000)?, 0xa4);
+        if machine.framebuffer() != image.as_slice() || machine.inspect16(0x0300_0000)? != 0x00a4 {
+            return Err(fail("window benchmark changed the settled guest contract"));
+        }
         return Ok(());
     }
     if args.first().map(String::as_str) == Some("bench-affine-object") {
@@ -2567,21 +2582,22 @@ fn run() -> Result<()> {
         if let Some(directory) = &capture {
             fs::create_dir_all(directory)?;
         }
+        let mut capture_error = None;
+
         let mut capture_image = |frame, pixels: &[u16]| {
             if let Some(directory) = &capture {
-                let mut ppm = b"P6\n240 160\n255\n".to_vec();
-                for pixel in pixels {
-                    for shift in [0, 5, 10] {
-                        let channel = ((pixel >> shift) & 31) as u8;
-                        ppm.push((channel << 3) | (channel >> 2));
-                    }
-                }
-                fs::write(directory.join(format!("frame-{frame}.ppm")), ppm)
-                    .expect("write object capture");
+                record_capture_error(
+                    &mut capture_error,
+                    directory.join(format!("frame-{frame}.ppm")),
+                    pixels,
+                );
             }
         };
         object_contract::verify_with_capture(&mut capture_image);
         object_contract::verify_degenerate(capture_image);
+        if let Some(error) = capture_error {
+            return Err(error);
+        }
         return Ok(());
     }
     if args.first().map(String::as_str) == Some("verify-affine") {
@@ -2598,22 +2614,20 @@ fn run() -> Result<()> {
                 return Err(format!("Affine mode {mode} ROM identity mismatch").into());
             }
         }
+        let mut capture_error = None;
+
         affine_contract::verify_with_capture(|mode, frame, pixels| {
             if let Some(directory) = &capture {
-                let mut ppm = b"P6\n240 160\n255\n".to_vec();
-                for pixel in pixels {
-                    for shift in [0, 5, 10] {
-                        let channel = ((pixel >> shift) & 31) as u8;
-                        ppm.push((channel << 3) | (channel >> 2));
-                    }
-                }
-                fs::write(
+                record_capture_error(
+                    &mut capture_error,
                     directory.join(format!("mode-{mode}-frame-{frame}.ppm")),
-                    ppm,
-                )
-                .expect("write affine capture");
+                    pixels,
+                );
             }
         });
+        if let Some(error) = capture_error {
+            return Err(error);
+        }
         return Ok(());
     }
     if matches!(
@@ -2730,7 +2744,11 @@ fn run() -> Result<()> {
         if bench && fixture.name != scenario {
             continue;
         }
-        let bytes = load(fixture, path.parent().unwrap())?;
+        let directory = path
+            .parent()
+            .ok_or_else(|| fail("fixture manifest has no parent directory"))?;
+
+        let bytes = load(fixture, directory)?;
         if let Verification::Pcm(expected) = &fixture.verification {
             let mut machine = run_pcm(
                 fixture,
@@ -2802,7 +2820,9 @@ fn run() -> Result<()> {
                 option(&args, "--capture")?.as_deref(),
             )?;
             if bench {
-                let point = expected.checkpoints.last().expect("validated checkpoints");
+                let Some(point) = expected.checkpoints.last() else {
+                    return Err(fail("sprite fixture contains no checkpoints"));
+                };
                 let b = &point.background;
                 if usize::from(point.x) != point.image_x
                     || usize::from(point.y) != point.image_y
@@ -2842,7 +2862,9 @@ fn run() -> Result<()> {
                 if frames == 0 || frames > 1_000_000 {
                     return Err(fail("frame count must be 1..=1000000"));
                 }
-                let point = expected.checkpoints.last().expect("validated checkpoints");
+                let Some(point) = expected.checkpoints.last() else {
+                    return Err(fail("tiled fixture contains no checkpoints"));
+                };
                 // The replay has released every button. Benchmark stable scanout
                 // after initialization and require the same independent image.
                 if point.x as usize != point.image_x
