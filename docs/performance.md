@@ -2955,3 +2955,116 @@ not supplied. For the manual sequence and launch commands, use the [blend
 README](../roms/blend/README.md).
 
 Environment for automated measurements: Linux 7.2.7-arch1-1, Intel Core i7-13620H, Rust 1.98.1, Node 26.10.0, Trunk 0.21.14. Governor, thermals, display refresh, audio device, and browser versions were not recorded.
+
+## Slice 25 — timed HBlank DMA raster effect: automated and manual acceptance complete
+
+Implemented against `plan_final.md` section 25 and `slice25.md`. DMA0 now
+latches `DMA0CNT_H`, channel-specific address and count masks are applied, and
+HBlank/VBlank requests activate all eligible DMA channels together. HALT wakes
+for the next visible HBlank when any ordinary HBlank DMA is armed. Repeated
+HBlank requests reload the count and destination as configured while the source
+continues through its table. Transfers remain beat-based, so the existing
+DMA0-to-DMA3 channel order resolves simultaneous requests. HBlank requests in
+VBlank do not consume raster entries.
+
+### Guest contract and automated evidence
+
+The original [raster guest](../roms/raster/README.md),
+[frozen manifest](../roms/raster/manifest.toml), and
+[independent framebuffer oracle](../roms/raster/contract.rs) build and verify
+with:
+
+```bash
+cd /home/aditya/Projects/GBA/gba-rs
+python3 roms/raster/build.py
+python3 roms/raster/verify.py
+cargo run --locked -p gba-tools --release -- bench-raster
+```
+
+| Evidence | Result |
+| --- | --- |
+| ROM identity | `raster.gba`, 1,880 bytes; SHA-256 `6955629784fedcb3a5157dc0640339bdd8e9270bf3c582b78e2865fbc5d0e68d` |
+| Startup | Controlled ARM, no BIOS and no backup; the app uses the controlled path for the exact shipped diagnostic ROM |
+| Completion | Interactive guest; ROM PC window `0x08000000..0x08001000`; mailbox `0x03000000`, ID `0x00a6` |
+| Execution bounds | At most 2,000,000 instructions per advance and 32 cycles of instruction-boundary overshoot |
+| Meaningful RED | Before core changes, frame 12 failed because DMA IF was `0x0000` instead of DMA0's expected `0x0100`; log: `target/raster-evidence/verify-red.txt` |
+| Native GREEN | Six complete frames; 230,400 exact pixel comparisons; frames 12, 13, 17, 18, 22, and 23 |
+| Production WASM GREEN | The same six guest captures and 230,400 pixel comparisons passed in Node |
+| Final guest state | Frame 23; PC `0x0800018c`; cycles 6,460,624; 535,829 instructions; state 2; IF snapshot `0x0900` |
+| Raster behavior | State 0: DMA0 increasing brightness; state 1: DMA3 decreasing brightness; state 2: both channels complete, DMA0 runs first, and DMA3 supplies the final values matching state 1 |
+| Line ownership | The independently calculated full-frame image verifies each HBlank table entry affects the following visible scanline; VBlank source progression is separately covered by the core regression |
+| Native captures | `target/raster-captures/frame-{12,13,17,18,22,23}.ppm` |
+| Focused core regressions | PASS: 160 visible HBlank repeats and VBlank exclusion; simultaneous DMA0/DMA3 priority; DMA0 14-bit count and 27-bit address latching |
+| Prior display regressions | PASS: blend (8 frames), window (11), affine object (14 plus singular matrices), and affine backgrounds (35 across modes 1–5), including their production-WASM contracts |
+| DMA/audio compatibility | PASS: WASM cartridge DMA/PCM route; pulse, wave, and noise contracts; noise DMA1/DMA2 FIFO refills and chunk invariance |
+| Broad fixture runner | PASS: `cargo run --locked -p gba-tools --release -- fixtures run` |
+| Workspace tests | PASS: 40 core tests, 1 backup integration test, 13 session tests, and 1 app test |
+| Static gates | PASS: workspace all-target Clippy with `-D warnings`, formatting, and `git diff --check` |
+| CI workflow syntax | Not parser-validated: PyYAML, actionlint, and Ruby are unavailable in this environment |
+| Application builds | PASS: native release build, WASM app check, and production Trunk release build |
+| Release benchmark | `bench-raster` completed its 600-frame headless run; millisecond timing fields are reserved for manual entry below |
+
+The implementation stays scanline-granular. The fixture demonstrates a
+one-line HBlank reproduction, so no within-line renderer changes were needed.
+The automated audio/PCM regressions passed; host playback was not manually
+assessed.
+
+### Performance and manual visual acceptance
+
+On 2026-10-02, the user supplied the Linux native, Chrome, and Brave snapshots
+below and confirmed all manual checks were complete. The user confirmed all
+three raster states, expected DMA IF progression (`0x0100`, `0x0800`,
+`0x0900`), and the state-2 match with state 1. The supplied state-2 snapshots
+show IF `0x0900`. Browser versions, display refresh, and sustained wall time
+were not supplied. The host audio output was off in each snapshot, so audible
+playback was not manually assessed.
+
+| Platform | Core mean/p95 ms | Pixel conversion mean/p95 ms | Texture submission mean/p95 ms | Samples (core / conversion / texture) | Visual acceptance |
+| --- | --- | --- | --- | --- | --- |
+| Native headless | User entry pending | Not applicable | Not applicable | 600-frame release benchmark completed | Not applicable |
+| Linux native UI | 7.509 / 9.875 | 0.072 / 0.099 | 0.016 / 0.025 | 120 / 120 / 120 | All states checked; user confirmed |
+| Chrome | 7.680 / 11.800 | 0.097 / 0.200 | 0.019 / 0.100 | 120 / 120 / 12 | All states checked; user confirmed |
+| Brave | 7.908 / 12.100 | 0.114 / 0.200 | 0.023 / 0.100 | 120 / 120 / 120 | All states checked; user confirmed |
+
+The core p95 values are below the 16.74 ms nominal GBA frame period. These
+per-stage summaries do not establish end-to-end frame time or sustained speed.
+
+### Runtime snapshots supplied by the user
+
+| Diagnostic | Linux native UI | Chrome | Brave |
+| --- | ---: | ---: | ---: |
+| Loaded ROM / status | `raster.gba` / Running | `raster.gba` / Running | `raster.gba` / Running |
+| Raster state / DMA IF snapshot | State 2 / `0x0900` | State 2 / `0x0900` | State 2 / `0x0900` |
+| Executed instructions | 50113088 | 12303125 | 15436136 |
+| GBA cycles | 604537362 | 148635132 | 186354032 |
+| BIOS | Not loaded | Not loaded | Not loaded |
+| Core PCM rate | 32768 Hz | 32768 Hz | 32768 Hz |
+| PCM samples produced | 1180737 | 290302 | 363972 |
+| PCM staging drops | 0 | 0 | 0 |
+| Empty FIFO count | 0 | 0 | 0 |
+| Host audio | Off | Off | Off |
+| Backup / detected / override | None / Unknown / None | None / Unknown / None | None / Unknown / None |
+
+For reproduction, launch the native app from the repository root and load
+`roms/raster.gba` through the debug UI's **Load ROM** picker:
+
+```bash
+cd /home/aditya/Projects/GBA/gba-rs
+cargo run --locked -p gba-app --release -- --debug-ui
+```
+
+For Chrome and Brave, start the production web app and load the same ROM using
+the browser's **Load ROM** picker:
+
+```bash
+cd /home/aditya/Projects/GBA/gba-rs
+env -u NO_COLOR trunk --config web/Trunk.toml serve --release --address 127.0.0.1 --port 8080
+```
+
+Open `http://127.0.0.1:8080` in each browser. The manual sequence uses Right
+to cycle through states 0, 1, and 2 and Left to go backward. It checks the
+gradients, matching state-1/state-2 images, and the DMA IF diagnostic line.
+
+Automated build environment: Linux 7.2.7-arch1-1, Intel Core i7-13620H,
+Rust 1.98.1, Node 26.10.0, and Trunk 0.21.14. Governor, thermals, display
+refresh, audio device, and browser versions were not recorded.

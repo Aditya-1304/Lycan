@@ -1465,8 +1465,9 @@ impl GamePak {
     }
 }
 
-/// DMA1 and DMA3 own the bus while active. Programmed registers remain distinct from
-/// latched addresses so repeat transfers retain their source progression.
+/// A latched DMA descriptor. Programmed registers remain distinct from these
+/// internal pointers so repeat transfers can reload count/destination without
+/// rewinding the progressing source.
 #[derive(Default)]
 struct DmaTransfer {
     source: u32,
@@ -1477,6 +1478,13 @@ struct DmaTransfer {
     control: u16,
     active: bool,
     sequential: bool,
+}
+
+impl DmaTransfer {
+    #[inline]
+    fn enabled_for(&self, timing: u16) -> bool {
+        self.control & 0x8000 != 0 && (self.control >> 12) & 3 == timing
+    }
 }
 
 struct System {
@@ -1578,13 +1586,15 @@ impl System {
         }
     }
 
-    /// HALT must stop at input transitions as well as display interrupt edges.
+    /// HALT must stop at input, audio, and display-DMA request boundaries rather
+    /// than advancing past a timed transfer that affects the next visible line.
     fn next_wake_event(&self) -> u64 {
-        let display = if self.dma[3].control & 0xb000 == 0xa000 {
-            self.next_vblank().min(self.next_hblank())
-        } else {
-            self.next_vblank()
-        };
+        let mut display = self.next_vblank();
+
+        if self.dma.iter().any(|dma| dma.enabled_for(2)) {
+            display = display.min(self.next_visible_hblank());
+        }
+
         let display = display.min(self.audio.next_event(self.cycles));
         self.inputs
             .front()
@@ -1601,8 +1611,23 @@ impl System {
         }
     }
 
-    /// Enable rising edges latch the complete descriptor. A zero DMA3 count
-    /// means 65,536 transfers; immediate mode ignores the repeat bit.
+    /// Returns the next visible-line HBlank that may issue an ordinary timed
+    /// DMA request. HBlank continues during VBlank, but those blank lines must
+    /// not consume entries from a repeated raster table.
+    fn next_visible_hblank(&self) -> u64 {
+        let edge = self.next_hblank();
+        let line = edge / CYCLES_PER_SCANLINE % SCANLINES_PER_FRAME;
+
+        if line < SCREEN_HEIGHT as u64 {
+            edge
+        } else {
+            (edge / CYCLES_PER_FRAME + 1) * CYCLES_PER_FRAME + HBLANK_FLAG_CYCLE
+        }
+    }
+
+    /// A low-to-high enable transition latches the descriptor. DMA0-2 use
+    /// 14-bit counts and DMA3 uses 16 bits. DMA0 source and DMA0-2 destination
+    /// addresses use 27 bits; the other source/destination ranges use 28 bits.
     fn configure_dma(&mut self, channel: usize, value: u16) {
         let base = 0xb0 + channel * 12;
         let sound = matches!(channel, 1 | 2) && value & 0x3000 == 0x3000;
@@ -1610,29 +1635,54 @@ impl System {
         self.dma[channel].control = value;
         if value & 0x8000 == 0 {
             self.dma[channel].active = false;
-        } else if old & 0x8000 == 0 {
-            let width = if sound || value & 0x400 != 0 { 4 } else { 2 };
-            self.dma[channel].source =
-                u32::from_le_bytes(self.io[base..base + 4].try_into().unwrap())
-                    & 0x0fff_ffff
-                    & !(width - 1);
-            self.dma[channel].destination =
-                u32::from_le_bytes(self.io[base + 4..base + 8].try_into().unwrap())
-                    & 0x0fff_ffff
-                    & !(width - 1);
-            self.dma[channel].initial_destination = self.dma[channel].destination;
-            let count = u16::from_le_bytes([self.io[base + 8], self.io[base + 9]]);
-            self.dma[channel].count = if sound {
-                4
-            } else if count == 0 {
-                if channel == 3 { 65536 } else { 16384 }
-            } else {
-                u32::from(count)
-            };
-            self.dma[channel].remaining = self.dma[channel].count;
-            self.dma[channel].active = value & 0x3000 == 0;
-            self.dma[channel].sequential = false;
+            return;
         }
+
+        if old & 0x8000 != 0 {
+            return;
+        }
+
+        let width = if sound || value & 0x0400 != 0 { 4 } else { 2 };
+        let source_mask = if channel == 0 {
+            0x07ff_ffff
+        } else {
+            0x0fff_ffff
+        };
+        let destination_mask = if channel == 3 {
+            0x0fff_ffff
+        } else {
+            0x07ff_ffff
+        };
+
+        self.dma[channel].source = u32::from_le_bytes(self.io[base..base + 4].try_into().unwrap())
+            & source_mask
+            & !(width - 1);
+        self.dma[channel].destination =
+            u32::from_le_bytes(self.io[base + 4..base + 8].try_into().unwrap())
+                & destination_mask
+                & !(width - 1);
+        self.dma[channel].initial_destination = self.dma[channel].destination;
+
+        let programmed_count = u16::from_le_bytes([self.io[base + 8], self.io[base + 9]]);
+        let latched_count = if channel == 3 {
+            u32::from(programmed_count)
+        } else {
+            u32::from(programmed_count & 0x3fff)
+        };
+
+        self.dma[channel].count = if sound {
+            // FIFO DMA always transfers four 32-bit units per refill request.
+            4
+        } else if latched_count == 0 {
+            if channel == 3 { 0x1_0000 } else { 0x4000 }
+        } else {
+            latched_count
+        };
+        self.dma[channel].remaining = self.dma[channel].count;
+
+        // Immediate transfers own the bus now; timed transfers await a request.
+        self.dma[channel].active = value & 0x3000 == 0;
+        self.dma[channel].sequential = false;
     }
 
     /// Services one read/write beat, preserving state between host deadlines.
@@ -1840,9 +1890,12 @@ impl System {
                 return Ok(());
             }
 
-            if matches!(offset, 0xc6 | 0xd2 | 0xde) {
-                self.io[range].copy_from_slice(&bytes);
-                self.configure_dma((offset - 0xba) / 12, value);
+            if matches!(offset, 0xba | 0xc6 | 0xd2 | 0xde) {
+                let channel = (offset - 0xba) / 12;
+                // Bits 0..4 are unused on every channel; Game Pak DRQ is DMA3-only.
+                let control = value & if channel < 3 { 0xf7e0 } else { 0xffe0 };
+                self.io[range].copy_from_slice(&control.to_le_bytes());
+                self.configure_dma(channel, control);
                 return Ok(());
             }
             if (0x100..0x110).contains(&offset) {
@@ -2091,21 +2144,26 @@ impl System {
     }
 
     fn advance_devices(&mut self, target: u64) {
-        // Latch VBlank at line 160 even when an access crosses the boundary.
-        // Repeated reads in VBlank must not regenerate an acknowledged request.
-        let next = self.next_vblank();
-        let hblank = self.next_hblank();
-        let trigger = (self.dma[3].control >> 12) & 3;
-        if self.dma[3].control & 0x8000 != 0
-            && !self.dma[3].active
-            && ((trigger == 1 && next <= target)
-                || (trigger == 2
-                    && hblank <= target
-                    && hblank / CYCLES_PER_SCANLINE % SCANLINES_PER_FRAME < 160))
-        {
-            self.dma[3].active = true;
+        // Raise timed requests before CPU execution can continue. Each channel
+        // still transfers one bus beat at a time through Machine::step(), where
+        // the existing channel order provides hardware priority.
+        let vblank = self.next_vblank();
+        let hblank = self.next_visible_hblank();
+        let vblank_due = vblank <= target;
+        let hblank_due = hblank <= target;
+
+        for dma in &mut self.dma {
+            if dma.active {
+                continue;
+            }
+
+            if (vblank_due && dma.enabled_for(1)) || (hblank_due && dma.enabled_for(2)) {
+                dma.active = true;
+            }
         }
-        if next <= target && self.io[4] & 8 != 0 {
+
+        // Repeated reads in VBlank must not regenerate an acknowledged request.
+        if vblank_due && self.io[4] & 8 != 0 {
             self.io[0x202] |= 1;
         }
         while self
@@ -4445,6 +4503,158 @@ mod tests {
             .advance_to(Cycle(3 * CYCLES_PER_SCANLINE), 1)
             .unwrap();
         assert_eq!(machine.inspect16(VRAM_START).unwrap(), 0x7788);
+    }
+
+    #[test]
+    fn dma0_hblank_repeat_reloads_destination_and_skips_vblank() {
+        let mut machine = Machine::new();
+
+        // HALT isolates scheduler wakeups from CPU instruction execution.
+        machine.system.halted = true;
+
+        // Each visible HBlank consumes one four-byte pair of register values.
+        for index in 0..160usize {
+            let value = u16::try_from(index).unwrap();
+            let word = u32::from(0x0404u16) | (u32::from(value) << 16);
+            let offset = index * 4;
+            machine.system.ewram[offset..offset + 4].copy_from_slice(&word.to_le_bytes());
+        }
+
+        let data = Access {
+            kind: AccessKind::Data,
+            sequential: false,
+        };
+        machine
+            .system
+            .write32_impl(IO_START + 0xb0, EWRAM_START, data)
+            .unwrap();
+        machine
+            .system
+            .write32_impl(IO_START + 0xb4, IO_START + 0x52, data)
+            .unwrap();
+        // Count=2 halfwords; HBlank timing, repeat, and destination reload.
+        machine
+            .system
+            .write32_impl(IO_START + 0xb8, (u32::from(0xa260u16) << 16) | 2, data)
+            .unwrap();
+
+        machine
+            .advance_to(Cycle(HBLANK_FLAG_CYCLE + 32), 1)
+            .unwrap();
+
+        assert_eq!(machine.inspect16(IO_START + 0x52).unwrap(), 0x0404);
+        assert_eq!(machine.inspect16(IO_START + 0x54).unwrap(), 0);
+        assert_eq!(machine.system.dma[0].source, EWRAM_START + 4);
+        assert_eq!(machine.system.dma[0].destination, IO_START + 0x52);
+        assert_eq!(machine.executed_instructions(), 0);
+
+        machine
+            .advance_to(Cycle(CYCLES_PER_SCANLINE + HBLANK_FLAG_CYCLE + 32), 1)
+            .unwrap();
+
+        assert_eq!(machine.inspect16(IO_START + 0x54).unwrap(), 1);
+        assert_eq!(machine.system.dma[0].source, EWRAM_START + 8);
+        assert_eq!(machine.system.dma[0].destination, IO_START + 0x52);
+
+        // Exactly 160 visible requests consume 160 source entries.
+        machine.advance_to(Cycle(CYCLES_PER_FRAME - 1), 1).unwrap();
+        assert_eq!(machine.system.dma[0].source, EWRAM_START + 160 * 4);
+        let source_after_visible = machine.system.dma[0].source;
+
+        // HBlank during VBlank must not advance the repeated source table.
+        machine
+            .advance_to(Cycle(CYCLES_PER_FRAME + HBLANK_FLAG_CYCLE - 1), 1)
+            .unwrap();
+        assert_eq!(machine.system.dma[0].source, source_after_visible);
+
+        // Repeated transfers resume on the next visible line-zero HBlank.
+        machine
+            .advance_to(Cycle(CYCLES_PER_FRAME + HBLANK_FLAG_CYCLE + 32), 1)
+            .unwrap();
+        assert_eq!(machine.system.dma[0].source, source_after_visible + 4);
+    }
+
+    #[test]
+    fn simultaneous_hblank_dma_obeys_channel_priority() {
+        let mut machine = Machine::new();
+        let dma0_source = EWRAM_START + 0x0800;
+        let dma3_source = EWRAM_START + 0x0900;
+        let destination = EWRAM_START + 0x1000;
+        machine.system.ewram[0x0800..0x0802].copy_from_slice(&0x1111u16.to_le_bytes());
+        machine.system.ewram[0x0900..0x0902].copy_from_slice(&0x3333u16.to_le_bytes());
+
+        let data = Access {
+            kind: AccessKind::Data,
+            sequential: false,
+        };
+
+        // Arm the lower-priority channel first to prove enable order is irrelevant.
+        machine
+            .system
+            .write32_impl(IO_START + 0xd4, dma3_source, data)
+            .unwrap();
+        machine
+            .system
+            .write32_impl(IO_START + 0xd8, destination, data)
+            .unwrap();
+        machine
+            .system
+            .write32_impl(IO_START + 0xdc, (u32::from(0xa240u16) << 16) | 1, data)
+            .unwrap();
+
+        machine
+            .system
+            .write32_impl(IO_START + 0xb0, dma0_source, data)
+            .unwrap();
+        machine
+            .system
+            .write32_impl(IO_START + 0xb4, destination, data)
+            .unwrap();
+        machine
+            .system
+            .write32_impl(IO_START + 0xb8, (u32::from(0xa240u16) << 16) | 1, data)
+            .unwrap();
+
+        let edge = machine.system.next_visible_hblank();
+        machine.system.advance_time(edge - machine.system.cycles);
+        assert!(machine.system.dma[0].active);
+        assert!(machine.system.dma[3].active);
+
+        let dma3_before = machine.system.dma[3].source;
+        machine.step().unwrap();
+        assert_eq!(machine.inspect16(destination).unwrap(), 0x1111);
+        assert!(!machine.system.dma[0].active);
+        assert!(machine.system.dma[3].active);
+        assert_eq!(machine.system.dma[3].source, dma3_before);
+
+        machine.step().unwrap();
+        assert_eq!(machine.inspect16(destination).unwrap(), 0x3333);
+        assert!(!machine.system.dma[3].active);
+        assert_eq!(machine.executed_instructions(), 0);
+    }
+
+    #[test]
+    fn dma0_latches_14_bit_count_and_27_bit_addresses() {
+        let mut system = System::new();
+        let data = Access {
+            kind: AccessKind::Data,
+            sequential: false,
+        };
+
+        system
+            .write32_impl(IO_START + 0xb0, 0x0fff_fffd, data)
+            .unwrap();
+        system
+            .write32_impl(IO_START + 0xb4, 0x0fff_fffd, data)
+            .unwrap();
+        // DMA0's 14-bit CNT_L turns 0x4001 into one transfer.
+        system
+            .write32_impl(IO_START + 0xb8, (u32::from(0xa000u16) << 16) | 0x4001, data)
+            .unwrap();
+
+        assert_eq!(system.dma[0].source, 0x07ff_fffc);
+        assert_eq!(system.dma[0].destination, 0x07ff_fffc);
+        assert_eq!(system.dma[0].count, 1);
     }
 
     #[test]

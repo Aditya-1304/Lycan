@@ -4,6 +4,8 @@
 mod blend_contract;
 #[path = "../../../roms/affine-object/contract.rs"]
 mod object_contract;
+#[path = "../../../roms/raster/contract.rs"]
+mod raster_contract;
 #[path = "../../../roms/window/contract.rs"]
 mod window_contract;
 
@@ -2428,6 +2430,45 @@ fn probe_bios(args: &[String], diagnostic: bool) -> Result<()> {
 
 fn run() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().map(String::as_str) == Some("verify-raster") {
+        let identity: toml::Value = toml::from_str(&fs::read_to_string(
+            root().join("roms/raster/manifest.toml"),
+        )?)?;
+        let bytes = fs::read(root().join("roms/raster.gba"))?;
+        if identity["bytes"].as_integer() != Some(bytes.len() as i64) {
+            return Err("Raster ROM size mismatch".into());
+        }
+        let actual_hash = hash(&bytes);
+        if identity["sha256"].as_str() != Some(actual_hash.as_str()) {
+            return Err("Raster ROM identity mismatch".into());
+        }
+        let directory = root().join("target/raster-captures");
+        fs::create_dir_all(&directory)?;
+        raster_contract::verify_with_capture(|frame, pixels| {
+            let mut ppm = b"P6\n240 160\n255\n".to_vec();
+            for pixel in pixels {
+                for shift in [0, 5, 10] {
+                    let channel = ((pixel >> shift) & 31) as u8;
+                    ppm.push((channel << 3) | (channel >> 2));
+                }
+            }
+            fs::write(directory.join(format!("frame-{frame}.ppm")), ppm)
+                .expect("write raster capture");
+        });
+        return Ok(());
+    }
+    if args.first().map(String::as_str) == Some("bench-raster") {
+        let mut machine = Machine::new();
+        machine.load_rom(include_bytes!("../../../roms/raster.gba"))?;
+        machine.advance_to(Cycle(12 * CYCLES_PER_FRAME), 2_000_000)?;
+        let image = machine.framebuffer().to_vec();
+        benchmark_machine("raster", &mut machine, 600, 2_000_000)?;
+        assert_eq!(machine.framebuffer(), image);
+        assert_eq!(machine.inspect16(0x0300_0000)?, 0x00a6);
+        assert_eq!(machine.inspect16(0x0300_0002)?, 0);
+        assert_eq!(machine.inspect16(0x0300_0004)?, 0x0100);
+        return Ok(());
+    }
     if args.first().map(String::as_str) == Some("verify-blend") {
         let identity: toml::Value = toml::from_str(&fs::read_to_string(
             root().join("roms/blend/manifest.toml"),
