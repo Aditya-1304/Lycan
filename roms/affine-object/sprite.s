@@ -45,7 +45,7 @@ palette:
     mov r6, #0                 @ Enlargement (source step halved).
     mov r7, #0                 @ Expanded bounds.
     mov r8, #0                 @ 256-color mode.
-    mov r9, #0                 @ 2D tile mapping.
+    mov r9, #0                 @ 1D tile mapping; toggle selects 2D.
     mov r10, #0                @ Behind background.
     mov r11, #0                @ Wrapped top/left position.
     mov r12, #0                @ Previous keys.

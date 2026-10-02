@@ -45,6 +45,23 @@ jobs:
         with:
           node-version: '26.10.0'
 
+      - name: Affine display contracts
+        run: |
+          python3 roms/affine/build.py
+          python3 roms/affine-object/build.py
+
+          git diff --exit-code -- \
+            roms/affine-mode-1.gba \
+            roms/affine-mode-2.gba \
+            roms/affine-mode-3.gba \
+            roms/affine-mode-4.gba \
+            roms/affine-mode-5.gba \
+            roms/affine-object.gba \
+            roms/affine-object-degenerate.gba
+
+          python3 roms/affine/verify.py
+          python3 roms/affine-object/verify.py
+
       - name: WASM timing runtime
         run: |
           python3 roms/cartridge/verify_wasm.py --diagnostics --vblank --keypad --dma --pcm

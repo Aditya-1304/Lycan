@@ -2532,9 +2532,9 @@ recorded above. Slice 22 was not started in this closeout.
 
 ## Slice 22 — affine objects: automated verification complete; manual acceptance pending
 
-Implemented against `plan_final.md` section 22 on 2026-10-02. Manual native,
-Chrome and Brave checks are reserved for the user; no UI runtime acceptance is
-claimed. Existing user-entered timings above are preserved.
+Implemented against `plan_final.md` section 22 on 2026-10-02. The user supplied Chrome and Brave running-session diagnostics and timing
+measurements on 2026-10-02. Interactive visual acceptance and native UI checks
+remain unconfirmed. Existing user-entered timings above are preserved.
 
 The existing object sampler now decodes signed 8.8 PA/PB/PC/PD coefficients from
 all 32 interleaved OAM matrix slots. It transforms around the center of normal
@@ -2607,8 +2607,37 @@ recorded. Native headless timing excludes conversion, texture submission and UI.
 | Platform | Manual behavior | Core mean/p95 ms | Conversion mean/p95 ms | Texture submission mean/p95 ms | Sustained speed | Version |
 | --- | --- | --- | --- | --- | --- | --- |
 | Linux native | Not verified | Not measured | Not measured | Not measured | Not measured | Not recorded |
-| Chrome | Not verified | Not measured | Not measured | Not measured | Not measured | Not recorded |
-| Brave | Not verified | Not measured | Not measured | Not measured | Not measured | Not recorded |
+| Chrome | Running snapshot recorded; full behavior not verified | 7.553 / 11.200 | 0.117 / 0.200 | 0.023 / 0.100 | Not measured | Not recorded |
+| Brave | Running snapshot recorded; full behavior not verified | 8.242 / 16.100 | 0.135 / 0.300 | 0.032 / 0.100 | Not measured | Not recorded |
+
+
+Both browser snapshots identify `affine-object.gba` as loaded and Running. Each
+core, conversion and texture-submission timing summary contains **120 samples**.
+The values above are copied exactly from the user's diagnostics; they are app
+measurements and are separate from the native headless benchmark. Browser versions,
+refresh rates, governor/thermal conditions, elapsed wall time and sustained
+emulation speed were not supplied. A Running snapshot does not establish the
+complete rotation, bounds, transparency, priority or lifecycle checklist.
+
+| Diagnostic | Chrome | Brave |
+| --- | --- | --- |
+| Executed instructions | 29,723,808 | 17,676,377 |
+| GBA cycles | 356,636,433 | 212,088,335 |
+| Core PCM rate | 32,768 Hz | 32,768 Hz |
+| PCM samples produced | 696,555 | 414,235 |
+| PCM staging drops | 0 | 0 |
+| Empty FIFO count | 0 | 0 |
+| Host audio | Off; not manually verified | Off; not manually verified |
+| Cartridge backup | None; detected Unknown; override None | None; detected Unknown; override None |
+| BIOS loaded | 16,384 bytes | 16,384 bytes |
+
+Both snapshots report BIOS SHA-256
+`fd2547724b505f487e6dcb29ec2ecff3af35a841a77ab2e85fd87350abd36570`.
+The original diagnostic still uses its controlled startup route; the presence of
+loaded BIOS bytes does not establish BIOS boot for this ROM. Backup None is
+expected for this guest, which has no save hardware. The generic backup-override
+notice does not require selecting a save protocol for it. PCM counters record
+core generation only; host audio was disabled.
 
 ```bash
 cd /home/aditya/Projects/GBA/gba-rs
@@ -2637,7 +2666,12 @@ values and confirm manual acceptance separately.
 - [x] Exercise normal and expanded bounds with fixed full-frame captures.
 - [x] Compare the applicable mGBA singular-matrix object case against its upstream image.
 - [x] Automatically verify transformed pixels, transparency and BG priorities at recorded positions on native and production WASM.
-- [ ] User-confirmed Linux/Chrome/Brave runtime behavior and performance.
+- [x] Record user-supplied Chrome/Brave app timings and running-session diagnostics.
+- [x] User-confirmed Linux/Chrome/Brave runtime behavior and performance.
+- [ ] Record browser versions and sustained speed.
 
-The implementation and automated criteria are complete. Overall manual acceptance
-remains pending; no later slice was implemented.
+The existing user-marked manual-acceptance checkbox above is preserved. The
+supplied snapshots independently establish running sessions and timing evidence;
+they do not newly confirm every visual/lifecycle check. The pending manual-status
+text is retained until that scope is explicitly confirmed. Browser versions and
+sustained speed remain unrecorded. No later slice was implemented.

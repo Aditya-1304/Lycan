@@ -2417,20 +2417,33 @@ impl Object {
         }
         let color_256 = self.attr0 & (1 << 13) != 0;
         let units = if color_256 { 2 } else { 1 };
-        let mut base = usize::from(self.attr2 & 0x3ff);
-        if color_256 {
-            base &= !1;
-        }
-        let stride = if control & (1 << 6) != 0 {
-            self.width / 8 * units
+        let one_dimensional = control & (1 << 6) != 0;
+
+        let mut base = usize::from(self.attr2 & 0x03ff);
+
+        let tile_x = x / 8;
+        let tile_y = y / 8;
+
+        let tile = if one_dimensional {
+            // 1D OBJ data is contiguous. Character names are 32-byte units,
+            // including the guest-supplied low bit in 8bpp mode.
+            let row_stride = (self.width / 8) * units;
+
+            (base + tile_y * row_stride + tile_x * units) & 0x03ff
         } else {
-            32
+            // In 8bpp 2D mapping, character-name bit 0 is ignored.
+            if color_256 {
+                base &= !1;
+            }
+
+            // 2D mapping is a 32-unit-wide character matrix. Horizontal addressing
+            // wraps inside the current row rather than carrying into the next row.
+            let row = (base & !31) + tile_y * 32;
+            let column = ((base & 31) + tile_x * units) & 31;
+
+            (row + column) & 0x03ff
         };
-        let tile = (base + y / 8 * stride + x / 8 * units) & 0x3ff;
-        // Bitmap modes reserve the first half of OBJ character memory for BG data.
-        if control & 7 >= 3 && tile < 512 {
-            return None;
-        }
+
         let offset = 0x10000 + tile * 32;
         let (color, bank) = if color_256 {
             (usize::from(vram[offset + (y % 8) * 8 + x % 8]), 0)
