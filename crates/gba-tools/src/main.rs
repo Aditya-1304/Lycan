@@ -1,5 +1,7 @@
 #![forbid(unsafe_code)]
 
+#[path = "../../../roms/blend/contract.rs"]
+mod blend_contract;
 #[path = "../../../roms/affine-object/contract.rs"]
 mod object_contract;
 #[path = "../../../roms/window/contract.rs"]
@@ -2426,6 +2428,42 @@ fn probe_bios(args: &[String], diagnostic: bool) -> Result<()> {
 
 fn run() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().map(String::as_str) == Some("verify-blend") {
+        let identity: toml::Value = toml::from_str(&fs::read_to_string(
+            root().join("roms/blend/manifest.toml"),
+        )?)?;
+        let bytes = fs::read(root().join("roms/blend.gba"))?;
+        if identity["bytes"].as_integer() != Some(bytes.len() as i64) {
+            return Err("Blend ROM size mismatch".into());
+        }
+        let actual_hash = hash(&bytes);
+        if identity["sha256"].as_str() != Some(actual_hash.as_str()) {
+            return Err("Blend ROM identity mismatch".into());
+        }
+        let directory = root().join("target/blend-captures");
+        fs::create_dir_all(&directory)?;
+        blend_contract::verify_with_capture(|frame, pixels| {
+            let mut ppm = b"P6\n240 160\n255\n".to_vec();
+            for pixel in pixels {
+                for shift in [0, 5, 10] {
+                    let channel = ((pixel >> shift) & 31) as u8;
+                    ppm.push((channel << 3) | (channel >> 2));
+                }
+            }
+            fs::write(directory.join(format!("frame-{frame}.ppm")), ppm).unwrap();
+        });
+        return Ok(());
+    }
+    if args.first().map(String::as_str) == Some("bench-blend") {
+        let mut machine = Machine::new();
+        machine.load_rom(include_bytes!("../../../roms/blend.gba"))?;
+        machine.advance_to(Cycle(12 * CYCLES_PER_FRAME), 2_000_000)?;
+        let image = machine.framebuffer().to_vec();
+        benchmark_machine("blend", &mut machine, 600, 2_000_000)?;
+        assert_eq!(machine.framebuffer(), image);
+        assert_eq!(machine.inspect16(0x0300_0000)?, 0x00a5);
+        return Ok(());
+    }
     if args.first().map(String::as_str) == Some("verify-window") {
         let identity: toml::Value = toml::from_str(&fs::read_to_string(
             root().join("roms/window/manifest.toml"),

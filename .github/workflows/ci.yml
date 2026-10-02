@@ -50,6 +50,7 @@ jobs:
           python3 roms/affine/build.py
           python3 roms/affine-object/build.py
           python3 roms/window/build.py
+          python3 roms/blend/build.py
 
           git diff --exit-code -- \
             roms/affine-mode-1.gba \
@@ -59,11 +60,13 @@ jobs:
             roms/affine-mode-5.gba \
             roms/affine-object.gba \
             roms/affine-object-degenerate.gba \
-            roms/window.gba
+            roms/window.gba \
+            roms/blend.gba
 
           python3 roms/affine/verify.py
           python3 roms/affine-object/verify.py
           python3 roms/window/verify.py
+          python3 roms/blend/verify.py
 
       - name: WASM timing runtime
         run: |
