@@ -7,6 +7,8 @@ mod browser;
 mod native;
 #[cfg(target_arch = "wasm32")]
 use browser::Output;
+use std::num::NonZeroU32;
+
 use gba_session::{Session, StereoResampler};
 #[cfg(not(target_arch = "wasm32"))]
 use native::Output;
@@ -88,13 +90,13 @@ impl Audio {
         let Some(output) = &mut self.output else {
             return;
         };
-        let rate = output.rate();
-        if rate == 0 {
+        let Some(output_rate) = NonZeroU32::new(output.rate()) else {
             return;
-        }
+        };
+        let rate = output_rate.get();
         if rate != self.rate {
             self.rate = rate;
-            self.resampler = Some(StereoResampler::new(rate));
+            self.resampler = Some(StereoResampler::new(output_rate));
             output.clear();
         }
         output.set_gain(if self.muted { 0.0 } else { self.volume });
@@ -136,8 +138,8 @@ pub fn probe(scene: &str) -> Result<(), String> {
     session.enable_test_firmware();
     let mut audio = Audio::default();
     audio.start();
-    if let Some(error) = &audio.error {
-        return Err(error.clone());
+    if let Some(error) = audio.error.take() {
+        return Err(error);
     }
     let origin = Instant::now();
     let mut phase = 0;

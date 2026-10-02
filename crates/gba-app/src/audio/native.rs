@@ -43,9 +43,15 @@ impl Output {
         let shared = Arc::new(Shared::default());
         shared.gain.store(0.5_f32.to_bits(), Ordering::Relaxed);
         let stream = match supported.sample_format() {
-            cpal::SampleFormat::F32 => stream::<f32>(&device, &config, consumer, shared.clone()),
-            cpal::SampleFormat::I16 => stream::<i16>(&device, &config, consumer, shared.clone()),
-            cpal::SampleFormat::U16 => stream::<u16>(&device, &config, consumer, shared.clone()),
+            cpal::SampleFormat::F32 => {
+                stream::<f32>(&device, &config, consumer, Arc::clone(&shared))
+            }
+            cpal::SampleFormat::I16 => {
+                stream::<i16>(&device, &config, consumer, Arc::clone(&shared))
+            }
+            cpal::SampleFormat::U16 => {
+                stream::<u16>(&device, &config, consumer, Arc::clone(&shared))
+            }
             format => return Err(format!("Unsupported audio format: {format}")),
         }
         .map_err(|e| e.to_string())?;
@@ -70,22 +76,23 @@ impl Output {
             return;
         }
         let epoch = self.shared.epoch.load(Ordering::Acquire);
-        let available = self.producer.slots();
-        let accepted = available.min(samples.len());
+        let accepted = self.producer.slots().min(samples.len());
 
-        if accepted != 0 {
-            self.producer
-                .write_chunk_uninit(accepted)
-                .expect("queried producer capacity must remain available")
-                .fill_from_iter(
+        let written = if accepted == 0 {
+            0
+        } else {
+            match self.producer.write_chunk_uninit(accepted) {
+                Ok(chunk) => chunk.fill_from_iter(
                     samples[..accepted]
                         .iter()
                         .copied()
                         .map(|sample| (epoch, sample)),
-                );
-        }
+                ),
+                Err(_) => 0,
+            }
+        };
 
-        self.overflows += (samples.len() - accepted) as u64;
+        self.overflows += (samples.len() - written) as u64;
         self.max_depth = self.max_depth.max(self.capacity - self.producer.slots());
     }
 
@@ -125,7 +132,7 @@ fn stream<T: cpal::SizedSample + cpal::FromSample<f32>>(
 ) -> Result<cpal::Stream, cpal::Error> {
     let channels = usize::from(config.channels);
     let target = config.sample_rate as usize * 60 / 1000;
-    let errors = shared.clone();
+    let errors = Arc::clone(&shared);
     let mut epoch = 0;
     let mut primed = false;
     device.build_output_stream(

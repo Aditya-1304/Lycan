@@ -45,31 +45,45 @@ fn main() -> eframe::Result {
 }
 
 #[cfg(target_arch = "wasm32")]
+/// Writes startup failures to the browser console for detached async startup.
+fn report_web_error(message: &str) {
+    web_sys::console::error_1(&wasm_bindgen::JsValue::from_str(message));
+}
+
+#[cfg(target_arch = "wasm32")]
+/// Resolves the Trunk canvas and returns WebRunner startup failures to the caller.
+async fn start_web() -> Result<(), String> {
+    use wasm_bindgen::JsCast as _;
+
+    let window = web_sys::window().ok_or_else(|| "browser window unavailable".to_owned())?;
+
+    let document = window
+        .document()
+        .ok_or_else(|| "browser document unavailable".to_owned())?;
+
+    let element = document
+        .get_element_by_id("gba_canvas")
+        .ok_or_else(|| "missing #gba_canvas".to_owned())?;
+
+    let canvas = element
+        .dyn_into::<web_sys::HtmlCanvasElement>()
+        .map_err(|_| "#gba_canvas is not a canvas".to_owned())?;
+
+    eframe::WebRunner::new()
+        .start(
+            canvas,
+            eframe::WebOptions::default(),
+            Box::new(|cc| Ok(Box::new(GbaApp::new(cc, false)))),
+        )
+        .await
+        .map_err(|error| format!("failed to start eframe: {error:?}"))
+}
+
+#[cfg(target_arch = "wasm32")]
 fn main() {
-    use eframe::wasm_bindgen::JsCast as _;
-
-    let web_options = eframe::WebOptions::default();
-
-    // Mount the same shared app implementation on the canvas owned by Trunk's page.
-    wasm_bindgen_futures::spawn_local(async move {
-        let document = eframe::web_sys::window()
-            .expect("browser window unavailable")
-            .document()
-            .expect("browser document unavailable");
-
-        let canvas = document
-            .get_element_by_id("gba_canvas")
-            .expect("missing #gba_canvas")
-            .dyn_into::<eframe::web_sys::HtmlCanvasElement>()
-            .expect("#gba_canvas is not a canvas");
-
-        eframe::WebRunner::new()
-            .start(
-                canvas,
-                web_options,
-                Box::new(|cc| Ok(Box::new(GbaApp::new(cc, false)))),
-            )
-            .await
-            .expect("failed to start eframe");
+    wasm_bindgen_futures::spawn_local(async {
+        if let Err(error) = start_web().await {
+            report_web_error(&error);
+        }
     });
 }

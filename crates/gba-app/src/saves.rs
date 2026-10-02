@@ -11,7 +11,7 @@ const FLASH128_MAGIC: &[u8; 8] = b"GBAFL128";
 const FLASH_MAGIC: &[u8; 8] = b"GBAFLS64";
 
 /// SHA-256 of the original cartridge bytes, independent of filenames and titles.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Identity(pub [u8; 32]);
 
 impl Identity {
@@ -124,7 +124,14 @@ impl Storage {
         F: std::future::Future<Output = Outcome> + 'static,
         F: PlatformFuture,
     {
-        assert!(!self.busy, "storage operations must be serialized");
+        if self.busy {
+            self.failed = true;
+            self.status =
+                "Storage operation rejected because another operation is still in flight".into();
+
+            return;
+        }
+
         self.busy = true;
         let sender = self.sender.clone();
         let ctx = ctx.clone();
@@ -153,7 +160,7 @@ impl Storage {
 
     pub fn load(&mut self, ctx: &eframe::egui::Context, identity: Identity, generation: u64) {
         self.status = "Loading initial backup; guest paused".into();
-        let key = identity.clone();
+        let key = identity;
         self.dispatch(ctx, identity, generation, 0, async move {
             Outcome::Loaded(read(&key).await)
         });
@@ -171,7 +178,7 @@ impl Storage {
             image.revision
         );
         let data = encode(&identity, &image.bytes);
-        let key = identity.clone();
+        let key = identity;
         self.dispatch(ctx, identity, generation, image.revision, async move {
             Outcome::Written(write(&key, &data).await)
         });
@@ -179,7 +186,7 @@ impl Storage {
 
     pub fn import(&mut self, ctx: &eframe::egui::Context, identity: Identity, generation: u64) {
         self.status = "Selecting backup import; guest paused".into();
-        let key = identity.clone();
+        let key = identity;
         // Construct the picker during the click to retain browser user activation.
         let picker = rfd::AsyncFileDialog::new()
             .add_filter("Cartridge backup", &["gbasav"])
@@ -478,18 +485,31 @@ pub fn probe(mode: &str) -> Result<(), String> {
         _ => return Err("Use --save-probe [flash-|banked-|eeprom512-|eeprom8k-]write or [flash-|banked-|eeprom512-|eeprom8k-]read".into()),
     };
     let portable = encode(&identity, &image.bytes);
-    assert_eq!(decode(&identity, &portable)?, image.bytes);
-    assert!(decode(&Identity::of(b"different cartridge"), &portable).is_err());
+
+    let decoded = decode(&identity, &portable)?;
+
+    if decoded.as_slice() != image.bytes.as_slice() {
+        return Err("Portable save round-trip changed backup bytes".into());
+    }
+
+    if decode(&Identity::of(b"different cartridge"), &portable).is_ok() {
+        return Err("Portable save accepted the wrong ROM identity".into());
+    }
+
     let export_path = path(&identity)?.with_extension("export.gbasav");
+
     replace(&export_path, &portable)?;
-    assert_eq!(
-        decode(
-            &identity,
-            &std::fs::read(&export_path).map_err(|e| e.to_string())?
-        )?,
-        image.bytes
-    );
-    assert!(replace(std::path::Path::new("/dev/null/gba-save"), &portable).is_err());
+
+    let exported = std::fs::read(&export_path).map_err(|error| error.to_string())?;
+    let decoded_export = decode(&identity, &exported)?;
+
+    if decoded_export.as_slice() != image.bytes.as_slice() {
+        return Err("Exported save round-trip changed backup bytes".into());
+    }
+
+    if replace(std::path::Path::new("/dev/null/gba-save"), &portable).is_ok() {
+        return Err("Invalid replacement target unexpectedly succeeded".into());
+    }
     println!(
         "Native backup {mode} PASS: ROM={}, save={}, export/import validated, failed replacement rejected",
         identity.key(),
