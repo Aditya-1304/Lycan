@@ -3,6 +3,8 @@
 mod backup;
 mod eeprom;
 pub use eeprom::{EEPROM8K_BYTES, EEPROM512_BYTES};
+#[cfg(feature = "eeprom-trace")]
+pub use eeprom::{EepromTrace, EepromTraceEvent};
 mod flash;
 mod sram;
 pub use backup::{BackupDetection, BackupSelection, BackupType, detect_backup};
@@ -1769,6 +1771,22 @@ impl System {
             self.gamepak = GamePak::default();
             self.advance_time(2);
         }
+        // Observe both DMA directions before any serial clocks are consumed.
+        #[cfg(feature = "eeprom-trace")]
+        if channel == 3
+            && !self.dma[channel].sequential
+            && (self.eeprom_address(self.dma[channel].source)
+                || self.eeprom_address(self.dma[channel].destination))
+            && let Some(eeprom) = self.eeprom.as_mut()
+        {
+            eeprom.trace_cycle(self.cycles);
+            eeprom.record(EepromTraceEvent::Dma {
+                source: self.dma[channel].source,
+                destination: self.dma[channel].destination,
+                count: self.dma[channel].count,
+                width,
+            });
+        }
         if channel == 3
             && width == 2
             && !self.dma[channel].sequential
@@ -1897,6 +1915,8 @@ impl System {
             && matches!(access.kind, AccessKind::Data)
             && let Some(eeprom) = self.eeprom.as_mut()
         {
+            #[cfg(feature = "eeprom-trace")]
+            eeprom.trace_cycle(self.cycles);
             let value = eeprom.read();
             self.open_bus = u32::from(value) * 0x0001_0001;
             return Ok(value);
@@ -1973,6 +1993,8 @@ impl System {
 
         if self.eeprom_address(address) {
             if let Some(eeprom) = self.eeprom.as_mut() {
+                #[cfg(feature = "eeprom-trace")]
+                eeprom.trace_cycle(self.cycles);
                 eeprom.write(value);
             }
 
@@ -3600,6 +3622,23 @@ impl Machine {
     /// Reports cartridge evidence and the effective save-hardware selection.
     pub fn backup_selection(&self) -> &BackupSelection {
         &self.backup
+    }
+
+    /// Start diagnostic capture after cartridge loading; production builds omit it.
+    #[cfg(feature = "eeprom-trace")]
+    pub fn enable_eeprom_trace(&mut self) {
+        if let Some(eeprom) = &mut self.system.eeprom {
+            eeprom.enable_trace();
+        }
+    }
+
+    /// Drain transaction records without reading or clocking the cartridge bus.
+    #[cfg(feature = "eeprom-trace")]
+    pub fn drain_eeprom_trace(&mut self) -> (Vec<EepromTrace>, u64) {
+        self.system
+            .eeprom
+            .as_mut()
+            .map_or_else(|| (Vec::new(), 0), eeprom::Eeprom::drain_trace)
     }
 
     /// Copies cartridge bytes and their revision for asynchronous host storage.

@@ -2349,6 +2349,32 @@ fn probe_bios(args: &[String], diagnostic: bool) -> Result<()> {
     let mut machine = Machine::new();
     machine.load_bios(&bios)?;
     machine.boot_rom_with_bios(&rom, backup)?;
+    // Raw backup images are deliberate probe inputs, separate from app envelopes.
+    if let Some(path) = option(args, "--load-save")? {
+        machine.load_save(&fs::read(path)?).map_err(fail)?;
+    }
+    #[cfg(not(feature = "eeprom-trace"))]
+    if option(args, "--trace-eeprom")?.is_some() {
+        return Err(fail("--trace-eeprom requires --features eeprom-trace"));
+    }
+    #[cfg(feature = "eeprom-trace")]
+    let mut trace_file = option(args, "--trace-eeprom")?
+        .map(fs::File::create)
+        .transpose()?;
+    #[cfg(feature = "eeprom-trace")]
+    if let Some(file) = &mut trace_file {
+        use std::io::Write as _;
+        writeln!(
+            file,
+            "rom_sha256={} bios_sha256={} frames={} press_start={} save_input={:?}",
+            hash(&rom),
+            hash(&bios),
+            frames,
+            args.iter().any(|arg| arg == "--press-start"),
+            option(args, "--load-save")?
+        )?;
+        machine.enable_eeprom_trace();
+    }
     let mut entered_rom = false;
     let mut failure = None;
     let mut pcm = Vec::new();
@@ -2375,6 +2401,19 @@ fn probe_bios(args: &[String], diagnostic: bool) -> Result<()> {
                 failure = Some(error.to_string());
                 break;
             }
+        }
+        #[cfg(feature = "eeprom-trace")]
+        if let Some(file) = &mut trace_file {
+            use std::io::Write as _;
+            let (events, dropped) = machine.drain_eeprom_trace();
+            for event in events {
+                writeln!(file, "cycle={} {:?}", event.cycle, event.event)?;
+            }
+            if dropped != 0 {
+                writeln!(file, "TRACE_INCOMPLETE dropped={dropped}")?;
+            }
+            // Preserve every completed frame's evidence even if the probe fails.
+            file.flush()?;
         }
         machine.drain_stereo_pcm(&mut pcm);
         pcm.clear();
@@ -2416,6 +2455,15 @@ fn probe_bios(args: &[String], diagnostic: bool) -> Result<()> {
         capture(Path::new(&path), machine.framebuffer())?;
     }
     let save = machine.save_image();
+    if let Some(path) = option(args, "--save-out")? {
+        let image = save
+            .as_ref()
+            .ok_or_else(|| fail("cartridge has no backup image"))?;
+        if image.bytes.is_empty() {
+            return Err(fail("backup capacity is unresolved; no image exported"));
+        }
+        fs::write(path, &image.bytes)?;
+    }
     machine.reset();
     let reset_save = machine.save_image();
     if machine.registers()[15] != 0
