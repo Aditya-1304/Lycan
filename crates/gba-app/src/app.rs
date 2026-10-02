@@ -31,7 +31,8 @@ const FLASH_ROM: &[u8] = include_bytes!("../../../roms/flash-score.gba");
 const SRAM_ROM: &[u8] = include_bytes!("../../../roms/sram.gba");
 
 /// Original display diagnostics use controlled ARM startup; retail ROMs retain BIOS boot.
-const DISPLAY_DIAGNOSTIC_ROMS: [&[u8]; 8] = [
+const DISPLAY_DIAGNOSTIC_ROMS: [&[u8]; 9] = [
+    include_bytes!("../../../roms/raster.gba"),
     include_bytes!("../../../roms/blend.gba"),
     include_bytes!("../../../roms/window.gba"),
     include_bytes!("../../../roms/affine-object.gba"),
@@ -1114,6 +1115,27 @@ impl GbaApp {
 
             if self.rom_name == "affine-object.gba" {
                 ui.label("Sprite: Right rotates; Up enlarges; Z expands bounds; X changes color depth; S changes tile layout; A changes priority; Left clips position.");
+            }
+
+            if self.rom_name == "raster.gba"
+                && let (Ok(state), Ok(flags)) = (
+                    self.session.inspect16(0x0300_0002),
+                    self.session.inspect16(0x0300_0004),
+                )
+            {
+                let description = match state {
+                    0 => "DMA0: increasing brightness",
+                    1 => "DMA3: decreasing brightness",
+                    2 => "DMA0 + DMA3: DMA3 final values",
+                    _ => "unexpected raster state",
+                };
+
+                ui.monospace(format!(
+                    "Raster state {state}: {description} | DMA IF snapshot {flags:#06x}"
+                ));
+                ui.label(
+                    "Left/Right change raster state. State 2 should visually match state 1.",
+                );
             }
 
             if self.rom_name.starts_with("affine-mode-")
