@@ -2758,12 +2758,30 @@ impl WindowMasks {
             }
         }
         for window in (0..2).rev() {
-            let read = |offset| u16::from_le_bytes([io[offset], io[offset + 1]]);
-            if control & (0x2000 << window) != 0 && Self::contains(read(0x44 + window * 2), line) {
-                for (x, mask) in layers.iter_mut().enumerate() {
-                    if Self::contains(read(0x40 + window * 2), x) {
-                        *mask = io[0x48 + window] & 0x3f;
-                    }
+            let horizontal_offset = 0x40 + window * 2;
+            let vertical_offset = 0x44 + window * 2;
+
+            let horizontal = u16::from_le_bytes([io[horizontal_offset], io[horizontal_offset + 1]]);
+
+            let vertical = u16::from_le_bytes([io[vertical_offset], io[vertical_offset + 1]]);
+
+            if control & (0x2000 << window) == 0 || !Self::contains(vertical, line) {
+                continue;
+            }
+
+            let x_start = usize::from(horizontal >> 8);
+            let x_end = usize::from(horizontal & 0xff);
+            let window_mask = io[0x48 + window] & 0x3f;
+
+            for (x, mask) in layers.iter_mut().enumerate() {
+                let inside = if x_start <= x_end {
+                    x >= x_start && x < x_end
+                } else {
+                    x >= x_start || x < x_end
+                };
+
+                if inside {
+                    *mask = window_mask;
                 }
             }
         }
@@ -3122,11 +3140,22 @@ impl Display {
                      * Produce visible BG surfaces independently of final priority
                      * composition. PixelStack retains exactly the two nearest
                      * nontransparent surfaces required by the effects hardware.
+                     *
+                     * MOSAIC's BG dimensions are scanline-global register state, so
+                     * decode them once rather than once per pixel.
                      */
+                    let mosaic_width = usize::from(io[0x4c] & 0x0f) + 1;
+                    let mosaic_height = usize::from(io[0x4c] >> 4) + 1;
+
                     for priority in (0..4).rev() {
                         for background in (0..4).rev() {
+                            let control_offset = 8 + background * 2;
+
+                            let bg_control =
+                                u16::from_le_bytes([io[control_offset], io[control_offset + 1]]);
+
                             if self.control & (1 << (8 + background)) == 0
-                                || io[8 + background * 2] & 3 != priority
+                                || bg_control & 3 != u16::from(priority)
                             {
                                 continue;
                             }
@@ -3141,54 +3170,91 @@ impl Display {
                                 continue;
                             }
 
-                            let text_layer = TextBackground::from_registers(io, background);
+                            let mosaic = bg_control & 0x40 != 0;
 
-                            for (x, stack) in stacks.iter_mut().enumerate() {
-                                if masks.layers[x] & (1u8 << background) == 0 {
-                                    continue;
+                            let sample_y = if mosaic {
+                                self.line / mosaic_height * mosaic_height
+                            } else {
+                                self.line
+                            };
+
+                            if text {
+                                /*
+                                 * TextBackground contains only scanline-invariant register
+                                 * state, so construct it once for the complete BG scanline.
+                                 */
+                                let text_layer = TextBackground::from_registers(io, background);
+
+                                for (x, stack) in stacks.iter_mut().enumerate() {
+                                    if masks.layers[x] & (1u8 << background) == 0 {
+                                        continue;
+                                    }
+
+                                    let sample_x = if mosaic {
+                                        x / mosaic_width * mosaic_width
+                                    } else {
+                                        x
+                                    };
+
+                                    if let Some(color) =
+                                        text_layer.pixel(sample_x, sample_y, vram, palette)
+                                    {
+                                        stack.insert(LayerPixel {
+                                            color,
+                                            layer: background as u8,
+                                            priority,
+                                            semitransparent: false,
+                                        });
+                                    }
                                 }
+                            } else {
+                                /*
+                                 * Vertical affine deltas and the scanline's affine origin
+                                 * are invariant across X. The old code rebuilt this
+                                 * AffineBackground for every destination pixel.
+                                 */
+                                let origin = std::array::from_fn(|axis| {
+                                    let offset = 0x22 + (background - 2) * 16 + axis * 4;
 
-                                let mosaic = text_layer.control & 0x40 != 0;
-                                let width = usize::from(io[0x4c] & 15) + 1;
-                                let height = usize::from(io[0x4c] >> 4) + 1;
+                                    let delta =
+                                        i16::from_le_bytes([io[offset], io[offset + 1]]) as i32;
 
-                                let sample_x = if mosaic { x / width * width } else { x };
+                                    /*
+                                     * Vertical mosaic samples the first scanline of the
+                                     * current mosaic group while the hardware affine
+                                     * accumulator itself continues advancing each line.
+                                     */
+                                    self.affine_origin[background - 2][axis]
+                                        .wrapping_sub(delta * (self.line - sample_y) as i32)
+                                });
 
-                                let sample_y = if mosaic {
-                                    self.line / height * height
-                                } else {
-                                    self.line
-                                };
+                                /*
+                                 * PA/PC horizontal steps, BGCNT and the adjusted line origin
+                                 * remain constant across all 240 pixels.
+                                 */
+                                let affine_layer = AffineBackground::new(io, background, origin);
 
-                                let color = if text {
-                                    text_layer.pixel(sample_x, sample_y, vram, palette)
-                                } else {
-                                    AffineBackground::new(
-                                        io,
-                                        background,
-                                        std::array::from_fn(|axis| {
-                                            let offset = 0x22 + (background - 2) * 16 + axis * 4;
+                                for (x, stack) in stacks.iter_mut().enumerate() {
+                                    if masks.layers[x] & (1u8 << background) == 0 {
+                                        continue;
+                                    }
 
-                                            let delta =
-                                                i16::from_le_bytes([io[offset], io[offset + 1]])
-                                                    as i32;
+                                    let sample_x = if mosaic {
+                                        x / mosaic_width * mosaic_width
+                                    } else {
+                                        x
+                                    };
 
-                                            // Vertical mosaic reuses the group's
-                                            // first-line affine origin.
-                                            self.affine_origin[background - 2][axis]
-                                                .wrapping_sub(delta * (self.line - sample_y) as i32)
-                                        }),
-                                    )
-                                    .pixel(sample_x, mode, page, vram, palette)
-                                };
-
-                                if let Some(color) = color {
-                                    stack.insert(LayerPixel {
-                                        color,
-                                        layer: background as u8,
-                                        priority,
-                                        semitransparent: false,
-                                    });
+                                    if let Some(color) =
+                                        affine_layer.pixel(sample_x, mode, page, vram, palette)
+                                    {
+                                        stack.insert(LayerPixel {
+                                            color,
+                                            layer: background as u8,
+                                            priority,
+                                            semitransparent: false,
+                                        });
+                                    }
                                 }
                             }
                         }
