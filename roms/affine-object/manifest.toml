@@ -1,0 +1,19 @@
+# Frozen original guest identity; controlled ARM startup, no BIOS or backup.
+sha256 = "48f4107eb9697d810aad537ec0fe94b2de7d736c1909444882bc3b028f463b6f"
+bytes = 16956
+checkpoint_pc_start = 0x0800017c
+checkpoint_pc_end = 0x08000190
+mailbox_address = 0x03000000
+completion_id = 0x00a2
+max_instructions_per_checkpoint = 2000000
+max_frames = 72
+checkpoint_frames = [20,24,28,32,36,40,44,48,52,56,60,64,68,72]
+
+[mgba_degenerate]
+upstream_revision = "e6942030d25ffe3ba76c72b73a86da073ec857cc"
+sha256 = "44b2cbb7bba8a13da6475c07e76e091297aa4f43409f8e958d40eb2975ab7fe1"
+bytes = 404
+terminal_pc = 0x080000dc
+completion_id = 0x00a3
+expected_bmp_sha256 = "3bb3f88e4f6062c82ed263d88f990a04d5db514606a56186b8e606dea2ecfbc0"
+expected_bgr555_sha256 = "a8152933fe0ca63420d3b869d6c5e97789e60c45c8f074a3d5e5fda9cb2d5149"

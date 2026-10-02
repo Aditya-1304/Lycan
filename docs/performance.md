@@ -2528,3 +2528,116 @@ Open `http://127.0.0.1:8080` in Chrome and Brave and repeat the same controls.
 Slice 21 is complete: implemented, automatically verified and manually accepted
 by the user on Linux, Chrome and Brave. Supplied browser performance evidence is
 recorded above. Slice 22 was not started in this closeout.
+
+
+## Slice 22 — affine objects: automated verification complete; manual acceptance pending
+
+Implemented against `plan_final.md` section 22 on 2026-10-02. Manual native,
+Chrome and Brave checks are reserved for the user; no UI runtime acceptance is
+claimed. Existing user-entered timings above are preserved.
+
+The existing object sampler now decodes signed 8.8 PA/PB/PC/PD coefficients from
+all 32 interleaved OAM matrix slots. It transforms around the center of normal
+or doubled display bounds, floors negative fractional coordinates with arithmetic
+shifts, clips against original source dimensions, and ignores regular flip bits
+for affine objects. Source dimensions continue to determine 1D/2D tile stride;
+expanded bounds never change addressing. Transparent color zero and the existing
+OAM-order/BG-priority compositor are shared with regular objects. The renderer
+retains its documented scanline approximation. Windows, mosaic and blending stay
+outside this slice.
+
+### Fixtures and acceptance evidence
+
+Original guest and reproducible commands: [affine-object README](../roms/affine-object/README.md).
+Frozen identities: [manifest](../roms/affine-object/manifest.toml).
+Independent source-geometry oracle: [contract](../roms/affine-object/contract.rs).
+Frozen capture hashes: [captures](../roms/affine-object/captures.json).
+
+| Evidence | Result |
+| --- | --- |
+| Original interactive ROM | `affine-object.gba`, 16956 bytes; SHA-256 `48f4107eb9697d810aad537ec0fe94b2de7d736c1909444882bc3b028f463b6f` |
+| Startup | Controlled direct ARM, no BIOS, no backup; app startup exception requires exact shipped bytes |
+| Interactive completion rules | Continuous guest, polling PC `0x0800017c..=0x08000190`, mailbox ID `0x00a2`, seven exact control slots, completed framebuffer generation |
+| Work bounds | 2,000,000 instructions per advance; at most 32 cycles of instruction-boundary overshoot; final target 72 frames / 20,224,512 cycles |
+| RED before GREEN | Pre-feature renderer fails frame 20 at `(116,60)`: expected sprite `0x1405`, got BG `0x03e0`; `/tmp/gba-affine-object-red.txt` |
+| Interactive native captures | PASS: 14 full-frame captures, 537,600 pixel comparisons; identity, 45/90/180-degree rotation, enlargement, normal/expanded bounds, color depths, tile layouts, transparent holes, BG priority, clipped top/left position |
+| Final interactive state | Frame 72; PC `0x08000180`; cycles 20,224,513; instructions 1,683,561; mailbox state `[3,1,0,0,0,0,1]` |
+| Applicable mGBA object comparison | PASS: standalone translation of `degenerateObjTransform`, six singular matrices, all 38,400 pixels against upstream BMP; full suite not executed |
+| Upstream comparison identity | Revision `e6942030d25ffe3ba76c72b73a86da073ec857cc`; unmodified BMP SHA-256 `3bb3f88e4f6062c82ed263d88f990a04d5db514606a56186b8e606dea2ecfbc0`; MIT license retained |
+| Standalone comparison ROM | `affine-object-degenerate.gba`, 404 bytes; SHA-256 `44b2cbb7bba8a13da6475c07e76e091297aa4f43409f8e958d40eb2975ab7fe1` |
+| Standalone completion | Terminal PC `0x080000dc`, mailbox `0x00a3` / result 1; frame 4, cycles 1,123,588, instructions 57,266; 200,000-instruction bound |
+| Production WASM contract | PASS: same 14 interactive captures and upstream comparison executed in Node |
+| Capture artifacts | `target/affine-object-captures/frame-{4,20,24,28,32,36,40,44,48,52,56,60,64,68,72}.ppm`; independent geometry/BMP checks precede frozen SHA-256 comparisons |
+
+The upstream comparison uses the
+[mGBA object case](https://github.com/mgba-emu/suite/blob/e6942030d25ffe3ba76c72b73a86da073ec857cc/src/video.c#L106)
+with its original palette, texels, object locations and matrices. Its libgba/menu
+wrapper is replaced by standalone ARM startup. The pinned 256x128 expected image
+is cropped to LCD width and its white backdrop extended to 160 rows; `verify.py`
+checks this derivation against the retained raw BGR555 image. This comparison does
+not claim mGBA runtime execution or completion of HBlank/window/effect tests.
+
+### Automated gates and native core performance
+
+| Check | Result |
+| --- | --- |
+| Core/session tests | PASS: 33 core unit tests, 1 backup integration test, 13 session tests |
+| Workspace all-target Clippy | PASS with `-D warnings` |
+| Formatting / whitespace | PASS: `cargo fmt --all -- --check`, `git diff --check`; the previous affine-background oracle received only rustfmt import ordering |
+| Broad fixture runner | PASS; `/tmp/gba-affine-object-fixtures.txt` |
+| Previous affine backgrounds | PASS: 35 native and production WASM captures in modes 1–5; `/tmp/gba-affine-object-backgrounds.txt` |
+| Native release app | PASS: `cargo build --locked -p gba-app --release` |
+| WASM app check | PASS: `cargo check --locked -p gba-app --target wasm32-unknown-unknown` |
+| Release Trunk artifact | PASS with isolated absolute output `target/affine-object-web`; the first default-output attempt failed while writing the staged JS loader |
+| Final object verifier | PASS: identity checks, independent BMP derivation, frozen capture hashes, native and production WASM contracts; `/tmp/gba-affine-object-green.txt` |
+| Native steady core benchmark | 600 frames after frame-20 initialization; mean **2.663 ms**, p95 **2.752 ms**; stable final image/mailbox; `/tmp/gba-affine-object-bench.txt` |
+
+Reproduce the isolated browser release artifact with:
+
+```bash
+env -u NO_COLOR trunk --config web/Trunk.toml build --release --dist /home/aditya/Projects/GBA/gba-rs/target/affine-object-web
+```
+
+Environment: Linux 7.2.7-arch1-1, Intel Core i7-13620H, Rust 1.98.1;
+Trunk 0.21.14. Governor, thermals, display refresh and audio device were not
+recorded. Native headless timing excludes conversion, texture submission and UI.
+
+### User-owned manual measurements
+
+| Platform | Manual behavior | Core mean/p95 ms | Conversion mean/p95 ms | Texture submission mean/p95 ms | Sustained speed | Version |
+| --- | --- | --- | --- | --- | --- | --- |
+| Linux native | Not verified | Not measured | Not measured | Not measured | Not measured | Not recorded |
+| Chrome | Not verified | Not measured | Not measured | Not measured | Not measured | Not recorded |
+| Brave | Not verified | Not measured | Not measured | Not measured | Not measured | Not recorded |
+
+```bash
+cd /home/aditya/Projects/GBA/gba-rs
+cargo run --locked -p gba-app --release -- --debug-ui
+```
+
+Load `roms/affine-object.gba`, then Resume. Right rotates, Up enlarges, Z toggles
+expanded bounds, X toggles color depth, S toggles tile layout, A toggles BG
+priority, and Left moves the sprite across the top/left clipping boundary. Release
+each key between presses. X/S preserve the image. Transparent holes show green;
+A hides/restores the sprite. Verify pause/resume/reset, input release on focus
+loss and crisp resizing. Reset restores frame 20. F1 shows timing summaries.
+
+```bash
+cd /home/aditya/Projects/GBA/gba-rs
+env -u NO_COLOR trunk --config web/Trunk.toml serve --release --dist /home/aditya/Projects/GBA/gba-rs/target/affine-object-web --address 127.0.0.1 --port 8080
+```
+
+Open `http://127.0.0.1:8080` in Chrome and Brave, load the same ROM, and repeat.
+The README gives the exact capture replay sequence. Enter only observed timing
+values and confirm manual acceptance separately.
+
+### Comparison against plan section 22
+
+- [x] Add affine object parameters, normal/expanded bounds and source addressing.
+- [x] Exercise normal and expanded bounds with fixed full-frame captures.
+- [x] Compare the applicable mGBA singular-matrix object case against its upstream image.
+- [x] Automatically verify transformed pixels, transparency and BG priorities at recorded positions on native and production WASM.
+- [ ] User-confirmed Linux/Chrome/Brave runtime behavior and performance.
+
+The implementation and automated criteria are complete. Overall manual acceptance
+remains pending; no later slice was implemented.
