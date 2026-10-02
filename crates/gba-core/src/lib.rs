@@ -1546,6 +1546,11 @@ struct System {
     oam: Vec<u8>,
     display: Display,
     cycles: u64,
+    /// Device state is materialized at this clock; ordinary RAM/ROM accesses
+    /// may advance the bus clock without revisiting devices before an event.
+    devices_at: u64,
+    /// Earliest observable device/input edge, invalidated by MMIO mutations.
+    next_device_event: u64,
     gamepak: GamePak,
     /// Last driven word supplies otherwise unmapped data reads.
     open_bus: u32,
@@ -1578,6 +1583,8 @@ impl System {
             oam: vec![0; OAM_BYTES],
             display: Display::new(),
             cycles: 0,
+            devices_at: 0,
+            next_device_event: 0,
             gamepak: GamePak::default(),
             open_bus: 0,
             cpu_open_bus: 0,
@@ -1628,7 +1635,7 @@ impl System {
             display = display.min(vcount);
         }
 
-        let display = display.min(self.audio.next_event(self.cycles));
+        let display = display.min(self.audio.next_event(self.devices_at));
 
         self.inputs
             .front()
@@ -1830,16 +1837,55 @@ impl System {
     /// Refreshes read-only register bits from hardware time, even during blank lines.
     /// Interrupt requests are latched at event crossings, not status reads.
     fn refresh_status(&mut self) {
+        let status = self.display_status();
+        self.io[4..8].copy_from_slice(&status);
+        self.audio
+            .refresh_timers_at(&mut self.io, self.cycles - self.devices_at);
+        self.audio.refresh_controls(&mut self.io);
+        self.io[0x130..0x132].copy_from_slice(&(!self.buttons.0 & 0x03ff).to_le_bytes());
+    }
+
+    /// DISPSTAT flags are derived from time; reading them never raises IF.
+    fn display_status(&self) -> [u8; 4] {
         let line = (self.cycles / CYCLES_PER_SCANLINE % SCANLINES_PER_FRAME) as u16;
         let control = u16::from_le_bytes([self.io[4], self.io[5]]) & 0xff38;
         let flags = u16::from((160..227).contains(&line))
             | (u16::from(self.cycles % CYCLES_PER_SCANLINE >= HBLANK_FLAG_CYCLE) << 1)
             | (u16::from(line == control >> 8) << 2);
-        self.io[4..6].copy_from_slice(&(control | flags).to_le_bytes());
-        self.io[6..8].copy_from_slice(&line.to_le_bytes());
-        self.audio.refresh_timers(&mut self.io);
-        self.audio.refresh_controls(&mut self.io);
-        self.io[0x130..0x132].copy_from_slice(&(!self.buttons.0 & 0x03ff).to_le_bytes());
+        let status = (control | flags).to_le_bytes();
+        let count = line.to_le_bytes();
+        [status[0], status[1], count[0], count[1]]
+    }
+
+    /// Materialize only the register family touched by this MMIO transfer.
+    /// VCOUNT polling must not copy timer and sound readbacks on every iteration.
+    fn refresh_io_access(&mut self, address: u32, width: usize) {
+        let start = (address - IO_START) as usize;
+        let end = start + width;
+        if start < 8 && end > 4 {
+            let status = self.display_status();
+            self.io[4..8].copy_from_slice(&status);
+        }
+        if start < 0xa0 && end > 0x60 {
+            self.audio.refresh_controls(&mut self.io);
+        }
+        if start < 0x110 && end > 0x100 {
+            self.audio
+                .refresh_timers_at(&mut self.io, self.cycles - self.devices_at);
+        }
+        if start < 0x132 && end > 0x130 {
+            self.io[0x130..0x132].copy_from_slice(&(!self.buttons.0 & 0x03ff).to_le_bytes());
+        }
+    }
+
+    /// A diagnostic snapshot projects counters without changing timing, IF or
+    /// FIFO state. Live accesses instead materialize their own register family.
+    fn refresh_readback(&self, io: &mut [u8]) {
+        io[4..8].copy_from_slice(&self.display_status());
+        self.audio
+            .refresh_timers_at(io, self.cycles - self.devices_at);
+        self.audio.refresh_controls(io);
+        io[0x130..0x132].copy_from_slice(&(!self.buttons.0 & 0x03ff).to_le_bytes());
     }
 
     fn read16_impl(&mut self, address: u32, access: Access) -> Result<u16, CoreError> {
@@ -1917,6 +1963,8 @@ impl System {
     /// Applies a bus beat after its access time has synchronized scanout. Word
     /// transfers reuse this path without charging the hardware clock twice.
     fn write_halfword(&mut self, address: u32, value: u16) -> Result<(), CoreError> {
+        self.synchronize_video_write(address);
+        self.synchronize_io_write(address);
         // BIOS and the remainder of regions 00h/01h are not writable memory.
         // The enclosing bus operation has already charged its timing.
         if address < EWRAM_START {
@@ -2148,34 +2196,26 @@ impl System {
     }
 
     fn read_bytes(&self, address: u32, width: usize) -> Result<&[u8], CoreError> {
-        if self.test_firmware
-            && let Some(range) = range_for(address, 0, TEST_FIRMWARE.len(), width)
-        {
-            return Ok(&TEST_FIRMWARE[range]);
-        }
-        if (0x08000000..0x0e000000).contains(&address)
-            && let Some(range) = range_for(address & 0x01ffffff, 0, self.rom.len(), width)
-        {
-            return Ok(&self.rom[range]);
-        }
-        if let Some(range) = ram_range(address, EWRAM_START, self.ewram.len(), width) {
-            return Ok(&self.ewram[range]);
-        }
-        if let Some(range) = ram_range(address, IWRAM_START, self.iwram.len(), width) {
-            return Ok(&self.iwram[range]);
-        }
-        if let Some(range) = range_for(address, IO_START, self.io.len(), width) {
-            return Ok(&self.io[range]);
-        }
-        if let Some(range) = palette_range(address, width) {
-            return Ok(&self.palette[range]);
-        }
-        if let Some(range) = vram_range(address, width) {
-            return Ok(&self.vram[range]);
-        }
-
-        if let Some(range) = ram_range(address, OAM_START, OAM_BYTES, width) {
-            return Ok(&self.oam[range]);
+        // Decode the bus region once, retaining physical bounds and mirror
+        // rules. Out-of-range ROM accesses keep the existing open-bus policy.
+        let bytes = match address >> 24 {
+            0x00 if self.test_firmware => {
+                range_for(address, 0, TEST_FIRMWARE.len(), width).map(|range| &TEST_FIRMWARE[range])
+            }
+            0x02 => ram_range(address, EWRAM_START, self.ewram.len(), width)
+                .map(|range| &self.ewram[range]),
+            0x03 => ram_range(address, IWRAM_START, self.iwram.len(), width)
+                .map(|range| &self.iwram[range]),
+            0x04 => range_for(address, IO_START, self.io.len(), width).map(|range| &self.io[range]),
+            0x05 => palette_range(address, width).map(|range| &self.palette[range]),
+            0x06 => vram_range(address, width).map(|range| &self.vram[range]),
+            0x07 => ram_range(address, OAM_START, OAM_BYTES, width).map(|range| &self.oam[range]),
+            0x08..=0x0d => range_for(address & 0x01ffffff, 0, self.rom.len(), width)
+                .map(|range| &self.rom[range]),
+            _ => None,
+        };
+        if let Some(bytes) = bytes {
+            return Ok(bytes);
         }
         Err(CoreError::UnmappedAddress { address, width })
     }
@@ -2186,45 +2226,82 @@ impl System {
         let waitcnt = u16::from_le_bytes([self.io[0x204], self.io[0x205]]);
         let beats = (width / 2).max(1) as u64;
         let cartridge = (0x08000000..0x10000000).contains(&address);
-        let cycles = if (0x08000000..0x0e000000).contains(&address) {
-            self.gamepak.access(waitcnt, address, width, access)
-        } else if (0x0e000000..0x10000000).contains(&address) {
-            self.gamepak = GamePak::default();
-            [5, 4, 3, 9][(waitcnt & 3) as usize]
-        } else if ram_range(address, EWRAM_START, 256 * 1024, 1).is_some() {
-            3 * beats
-        } else if ram_range(address, IWRAM_START, 32 * 1024, 1).is_some()
-            || range_for(address, IO_START, IO_BYTES, 1).is_some()
-            || ram_range(address, OAM_START, OAM_BYTES, 1).is_some()
-        {
-            1
-        } else {
-            beats
+        let cycles = match address >> 24 {
+            0x08..=0x0d => self.gamepak.access(waitcnt, address, width, access),
+            0x0e..=0x0f => {
+                self.gamepak = GamePak::default();
+                [5, 4, 3, 9][(waitcnt & 3) as usize]
+            }
+            0x02 => 3 * beats,
+            0x03 | 0x07 => 1,
+            0x04 if address - IO_START < IO_BYTES as u32 => 1,
+            _ => beats,
         };
         if !cartridge {
             self.gamepak.fill(waitcnt, cycles);
         }
         self.advance_time(cycles);
+        if address >> 24 == 0x04 {
+            // Dynamic readbacks are projected without advancing devices again.
+            // Actual register mutations synchronize and invalidate separately.
+            self.refresh_io_access(address, width);
+        }
     }
 
     /// Advances display events before any access changes the state observed by scanout.
     fn advance_time(&mut self, cycles: u64) {
         let deadline = self.cycles.saturating_add(cycles);
+        if self.next_device_event <= self.cycles {
+            self.synchronize_devices();
+        }
+        while self.next_device_event <= deadline {
+            self.cycles = self.next_device_event;
+            self.synchronize_devices();
+        }
+        self.cycles = deadline;
+    }
 
-        loop {
-            let mut target = deadline.min(self.audio.next_event(self.cycles));
+    /// Materializes deferred time before a device observation or mutation.
+    /// All event calculations use the previous device clock, so IRQ/DMA edges
+    /// cannot be skipped when multiple bus accesses share one cached deadline.
+    fn synchronize_devices(&mut self) {
+        let target = self.cycles;
+        self.cycles = self.devices_at;
+        self.advance_devices(target);
+        self.devices_at = target;
+        self.next_device_event = self
+            .audio
+            .next_event(target)
+            .min(self.display.next_event)
+            .min(self.next_vblank());
+        if self.dma.iter().any(|dma| dma.enabled_for(2)) {
+            self.next_device_event = self.next_device_event.min(self.next_visible_hblank());
+        }
+        if self.io[4] & 0x20 != 0
+            && let Some(edge) = self.next_vcount_match()
+        {
+            self.next_device_event = self.next_device_event.min(edge);
+        }
+        if let Some(event) = self.inputs.front() {
+            self.next_device_event = self.next_device_event.min(event.cycle.0);
+        }
+    }
 
-            if self.io[4] & 0x20 != 0
-                && let Some(vcount) = self.next_vcount_match()
-            {
-                target = target.min(vcount);
-            }
+    /// Complete elapsed device work before changing MMIO configuration.
+    fn synchronize_io_write(&mut self, address: u32) {
+        if address >> 24 == 0x04 {
+            self.synchronize_devices();
+            // Recompute after the caller changes device controls. No further
+            // guest time may advance using the old register configuration.
+            self.next_device_event = self.cycles;
+        }
+    }
 
-            self.advance_devices(target);
-
-            if self.cycles >= deadline {
-                break;
-            }
+    /// Video stores must render every preceding drawing boundary using the old
+    /// memory contents. RAM and cartridge stores need no device synchronization.
+    fn synchronize_video_write(&mut self, address: u32) {
+        if matches!(address >> 24, 0x05..=0x07) && self.devices_at != self.cycles {
+            self.synchronize_devices();
         }
     }
 
@@ -2290,7 +2367,6 @@ impl System {
             }
         }
         self.cycles = target;
-        self.refresh_status();
     }
 }
 
@@ -2343,6 +2419,8 @@ impl CpuBus for System {
     /// while OBJ VRAM and OAM ignore byte stores. RAM bytes retain ordinary semantics.
     fn write8(&mut self, address: u32, value: u8, access: Access) -> Result<(), CoreError> {
         self.charge(address, 1, access);
+        self.synchronize_video_write(address);
+        self.synchronize_io_write(address);
         if self.backup_write(address, value) {
             return Ok(());
         }
@@ -3403,6 +3481,7 @@ impl Machine {
             button,
             pressed,
         });
+        self.system.next_device_event = self.system.cycles;
         self.system.advance_time(0);
         Ok(())
     }
@@ -3723,8 +3802,12 @@ impl Machine {
             return Err(CoreError::InvalidAccessAlignment { address, width: 2 });
         }
 
+        if let Some(range) = range_for(address, IO_START, IO_BYTES, 2) {
+            let mut io = self.system.io.clone();
+            self.system.refresh_readback(&mut io);
+            return Ok(u16::from_le_bytes([io[range.start], io[range.start + 1]]));
+        }
         let bytes = self.system.read_bytes(address, 2)?;
-
         Ok(u16::from_le_bytes([bytes[0], bytes[1]]))
     }
 
