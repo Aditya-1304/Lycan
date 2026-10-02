@@ -27,7 +27,10 @@ pub const BUTTONS: [Button; 10] = [
     Button::L,
 ];
 
-const LIVE_CYCLE_BUDGET: u128 = CYCLES_PER_FRAME as u128;
+// Recover ordinary callback jitter while bounding work to 1.5 guest frames.
+const LIVE_CYCLE_BUDGET: u64 = CYCLES_PER_FRAME + CYCLES_PER_FRAME / 2;
+// Scheduler suspension cannot create an unbounded recovery workload.
+const LIVE_MAX_BACKLOG: u64 = CYCLES_PER_FRAME * 3;
 const LIVE_INSTRUCTION_BUDGET: usize = 400_000;
 
 /// Owns one core machine and session-level input and pause state.
@@ -179,8 +182,9 @@ impl Session {
         if self.paused || !self.active || !self.loaded {
             return Ok(None);
         }
-        self.frame_target.0 += CYCLES_PER_FRAME;
+        let target = Cycle(self.frame_target.0 + CYCLES_PER_FRAME);
         self.reanchor();
+        self.frame_target = target;
         self.machine
             .advance_to(self.frame_target, instruction_limit)
             .map(Some)
@@ -188,8 +192,8 @@ impl Session {
 
     /// Converts an absolute monotonic host timestamp to an integer cycle deadline.
     /// Fractional cycles survive callbacks, so refresh rate does not change speed.
-    /// At most one frame runs per callback; excess host delay is dropped and reported
-    /// as slow emulation rather than building an unbounded catch-up backlog.
+    /// Each callback executes at most 1.5 frames and retains up to three frames
+    /// of recovery debt. Longer suspension is clipped and reported as slowdown.
     pub fn advance_host_time(&mut self, now: Duration) -> Result<Option<RunReport>, RunError> {
         self.advance_host_time_to(now, None)
     }
@@ -234,29 +238,31 @@ impl Session {
         let numerator = elapsed.as_nanos() * u128::from(GBA_CLOCK_HZ) + self.fractional_cycles;
         let due = numerator / 1_000_000_000;
         self.fractional_cycles = numerator % 1_000_000_000;
-        self.slowed = due > LIVE_CYCLE_BUDGET;
-
-        if self.slowed {
-            self.fractional_cycles = 0;
-        }
-
+        let actual = self.machine.cycles().0;
+        // Keep an absolute wall-clock target. Instruction overshoot belongs to
+        // the next callback and must not be added back as fresh elapsed time.
         self.frame_target.0 = self
             .frame_target
             .0
-            .saturating_add(due.min(LIVE_CYCLE_BUDGET) as u64);
-
+            .saturating_add(due.min(u128::from(u64::MAX)) as u64);
         if let Some(deadline) = deadline {
             self.frame_target = self.frame_target.min(deadline);
         }
-        if self.machine.cycles() >= self.frame_target {
+        let maximum_target = actual.saturating_add(LIVE_MAX_BACKLOG);
+        self.slowed = self.frame_target.0 > maximum_target;
+        self.frame_target.0 = self.frame_target.0.min(maximum_target);
+        if actual >= self.frame_target.0 {
             return Ok(None);
         }
+        let work_target = Cycle(
+            self.frame_target
+                .0
+                .min(actual.saturating_add(LIVE_CYCLE_BUDGET)),
+        );
+        self.slowed |= work_target < self.frame_target;
         let before = self.machine.cycles();
 
-        match self
-            .machine
-            .advance_to(self.frame_target, instruction_budget)
-        {
+        match self.machine.advance_to(work_target, instruction_budget) {
             Ok(report) => Ok(Some(report)),
 
             Err(RunError::StepLimitExceeded {
@@ -265,10 +271,13 @@ impl Session {
                 cycles,
             }) if cycles > before => {
                 // This is a live-work budget, not a guest correctness failure.
-                // Drop the catch-up backlog and continue from actual guest time.
+                // Retain at most one frame of recovery debt after a work yield.
+                // The fractional host clock remains valid across ordinary jitter.
                 self.slowed = true;
-                self.fractional_cycles = 0;
-                self.frame_target = cycles;
+                self.frame_target.0 = self
+                    .frame_target
+                    .0
+                    .min(cycles.0.saturating_add(CYCLES_PER_FRAME));
 
                 Ok(Some(RunReport {
                     instructions: limit,
@@ -284,6 +293,7 @@ impl Session {
     /// Clears the host time anchor at lifecycle boundaries, retaining guest time.
     fn reanchor(&mut self) {
         self.host_anchor = None;
+        self.frame_target = self.machine.cycles();
         self.fractional_cycles = 0;
         self.slowed = false;
     }
@@ -428,10 +438,10 @@ mod tests {
     }
 
     // Ordinary pacing tests never exhaust the instruction cap. This catches a
-    // live work yield being propagated as a fatal error, retaining catch-up debt,
+    // live work yield being propagated as a fatal error, discarding recoverable debt,
     // or preventing the next callback from continuing guest execution.
     #[test]
-    fn live_work_yield_preserves_progress_and_drops_catch_up_debt() {
+    fn live_work_yield_preserves_progress_and_bounded_catch_up_debt() {
         let mut session = Session::new();
         session
             .load_rom(include_bytes!("../../../roms/buttons.gba"))
@@ -448,13 +458,14 @@ mod tests {
         assert_eq!(report.instructions, 1);
         assert!(session.slowed());
         assert!(!session.paused());
-        assert_eq!(session.frame_target, session.cycles());
-        assert_eq!(session.fractional_cycles, 0);
+        assert!(session.frame_target > session.cycles());
+        assert!(session.frame_target.0 - session.cycles().0 <= CYCLES_PER_FRAME);
+        assert_ne!(session.fractional_cycles, 0);
         assert!(
             session
                 .advance_host_time_with_budget(Duration::from_millis(10), None, 1)
                 .unwrap()
-                .is_none()
+                .is_some()
         );
         let next = session
             .advance_host_time_with_budget(Duration::from_millis(11), None, 1)
@@ -462,6 +473,55 @@ mod tests {
             .expect("the next callback should resume guest work");
         assert!(next.cycles > report.cycles);
         assert!(!session.paused());
+    }
+
+    /// A 23 ms callback must retain all elapsed cycles rather than losing the
+    /// portion above one frame. Frequent callbacks must also retain instruction
+    /// overshoot instead of adding it to every subsequent wall-clock target.
+    #[test]
+    fn callback_jitter_preserves_the_absolute_guest_clock() {
+        let mut session = Session::new();
+        session
+            .load_rom(include_bytes!("../../../roms/buttons.gba"))
+            .unwrap();
+        session.advance_host_time(Duration::ZERO).unwrap();
+        session
+            .advance_host_time(Duration::from_millis(23))
+            .unwrap();
+        let expected = 23 * GBA_CLOCK_HZ / 1000;
+        assert!(session.cycles().0 >= expected && session.cycles().0 < expected + 40);
+        for millisecond in 24..=1000 {
+            session
+                .advance_host_time(Duration::from_millis(millisecond))
+                .unwrap();
+        }
+        assert!(session.cycles().0 >= GBA_CLOCK_HZ && session.cycles().0 < GBA_CLOCK_HZ + 40);
+    }
+
+    /// Suspension must cancel pre-pause recovery debt as well as elapsed host
+    /// time. The existing focus test reaches suspension without pending debt.
+    #[test]
+    fn pause_discards_pending_recovery_work() {
+        let mut session = Session::new();
+        session
+            .load_rom(include_bytes!("../../../roms/buttons.gba"))
+            .unwrap();
+        session.advance_host_time(Duration::ZERO).unwrap();
+        session
+            .advance_host_time_with_budget(Duration::from_millis(10), None, 1)
+            .unwrap();
+        assert!(session.frame_target > session.cycles());
+        session.toggle_pause();
+        session.toggle_pause();
+        let before = session.cycles();
+        session.advance_host_time(Duration::from_secs(100)).unwrap();
+        assert!(
+            session
+                .advance_host_time(Duration::from_secs(100))
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(session.cycles(), before);
     }
 
     // A zero-work result must stay fatal rather than masquerading as slowdown.
@@ -563,7 +623,8 @@ mod tests {
         session
             .advance_host_time(Duration::from_millis(200_050))
             .unwrap();
-        assert_eq!(session.cycles(), reached);
+        assert!(session.cycles() > reached);
+        assert!(session.cycles().0 <= before.0 + 3 * CYCLES_PER_FRAME + 80);
     }
 
     // Catches logical input stopping at the session while the actual guest sees
