@@ -3,4 +3,7 @@ name = "gba-core"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+eeprom-trace = []
+
 [dependencies]

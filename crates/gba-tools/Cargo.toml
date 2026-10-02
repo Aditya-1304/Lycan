@@ -3,6 +3,9 @@ name = "gba-tools"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+eeprom-trace = ["gba-core/eeprom-trace"]
+
 [dependencies]
 gba-core = { path = "../gba-core" }
 gba-session = { path = "../gba-session" }
