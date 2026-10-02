@@ -1820,6 +1820,26 @@ impl System {
 
         if let Some(range) = range_for(address, IO_START, self.io.len(), 2) {
             let offset = range.start;
+            if matches!(offset, 0x50 | 0x52 | 0x54) {
+                let stored = match offset {
+                    // BLDCNT: bits 14..15 are unused.
+                    0x50 => value & 0x3fff,
+
+                    // BLDALPHA: only EVA and EVB fields are writable.
+                    // Values above 16 remain representable in the register; the
+                    // blender clamps them when used.
+                    0x52 => value & 0x1f1f,
+
+                    // BLDY: effective EVY saturates at 16.
+                    0x54 => (value & 0x001f).min(16),
+
+                    _ => unreachable!(),
+                };
+
+                self.io[range].copy_from_slice(&stored.to_le_bytes());
+                return Ok(());
+            }
+
             if matches!(offset, 0xc6 | 0xd2 | 0xde) {
                 self.io[range].copy_from_slice(&bytes);
                 self.configure_dma((offset - 0xba) / 12, value);
@@ -2322,7 +2342,7 @@ impl TextBackground {
             return None;
         }
         let offset = (bank + color) * 2;
-        Some(u16::from_le_bytes([palette[offset], palette[offset + 1]]) & 0x7fff)
+        Some(u16::from_le_bytes([palette[offset], palette[offset + 1]]))
     }
 }
 
@@ -2345,7 +2365,7 @@ impl Object {
         // Bit 9 disables regular objects but doubles affine display bounds.
         // Object-window texels select masks; semitransparent effects arrive separately.
         let affine = attr0 & 0x100 != 0;
-        if matches!(attr0 & 0x0c00, 0x0400 | 0x0c00) || (!affine && attr0 & 0x200 != 0) {
+        if attr0 & 0x0c00 == 0x0c00 || (!affine && attr0 & 0x200 != 0) {
             return None;
         }
         let dimensions = match attr0 >> 14 {
@@ -2497,7 +2517,7 @@ impl Object {
             return None;
         }
         let offset = 0x200 + (bank + color) * 2;
-        Some(u16::from_le_bytes([palette[offset], palette[offset + 1]]) & 0x7fff)
+        Some(u16::from_le_bytes([palette[offset], palette[offset + 1]]))
     }
 }
 
@@ -2551,7 +2571,7 @@ impl AffineBackground {
         let (x, y) = (x as usize, y as usize);
         if mode == 3 || mode == 5 {
             let offset = (if mode == 5 { page } else { 0 }) + (y * width as usize + x) * 2;
-            return Some(u16::from_le_bytes([vram[offset], vram[offset + 1]]) & 0x7fff);
+            return Some(u16::from_le_bytes([vram[offset], vram[offset + 1]]));
         }
         let color = if mode == 4 {
             vram[page + y * 240 + x]
@@ -2565,7 +2585,7 @@ impl AffineBackground {
             return None;
         }
         let offset = usize::from(color) * 2;
-        Some(u16::from_le_bytes([palette[offset], palette[offset + 1]]) & 0x7fff)
+        Some(u16::from_le_bytes([palette[offset], palette[offset + 1]]))
     }
 }
 
@@ -2646,6 +2666,226 @@ impl WindowMasks {
     }
 }
 
+const BLEND_LAYER_OBJ: u8 = 4;
+const BLEND_LAYER_BACKDROP: u8 = 5;
+
+/// One opaque surface after layer/window filtering but before color effects.
+///
+/// `color` intentionally retains RGB555 bit 15 until the final mixer because
+/// GBA blend hardware exposes that bit as an additional green precision bit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct LayerPixel {
+    color: u16,
+    layer: u8,
+    priority: u8,
+    semitransparent: bool,
+}
+
+impl LayerPixel {
+    #[inline]
+    fn backdrop(color: u16) -> Self {
+        Self {
+            color,
+            layer: BLEND_LAYER_BACKDROP,
+            priority: 0,
+            semitransparent: false,
+        }
+    }
+
+    /// Lower values are visually closer to the viewer.
+    ///
+    /// At equal BG/OBJ priority the OBJ wins. Among equal-priority BGs,
+    /// lower BG number wins. The backdrop is always below ordinary layers.
+    #[inline]
+    fn order(self) -> u8 {
+        match self.layer {
+            BLEND_LAYER_OBJ => self.priority * 5,
+            0..=3 => self.priority * 5 + self.layer + 1,
+            BLEND_LAYER_BACKDROP => 20,
+            _ => unreachable!("invalid display layer"),
+        }
+    }
+}
+
+/// Only the first two visible surfaces matter to the GBA color-effects stage.
+///
+/// Keeping exactly two is intentional: alpha blending may not skip a visible
+/// non-second-target surface in order to find a deeper eligible target.
+#[derive(Clone, Copy, Debug)]
+struct PixelStack {
+    top: LayerPixel,
+    second: Option<LayerPixel>,
+}
+
+impl PixelStack {
+    #[inline]
+    fn new(backdrop: u16) -> Self {
+        Self {
+            top: LayerPixel::backdrop(backdrop),
+            second: None,
+        }
+    }
+
+    #[inline]
+    fn insert(&mut self, pixel: LayerPixel) {
+        let order = pixel.order();
+        let top_order = self.top.order();
+
+        if order < top_order {
+            self.second = Some(self.top);
+            self.top = pixel;
+            return;
+        }
+
+        if order > top_order && self.second.is_none_or(|second| order < second.order()) {
+            self.second = Some(pixel);
+        }
+    }
+}
+
+/// Snapshot of BLDCNT/BLDALPHA/BLDY at one drawing boundary.
+#[derive(Clone, Copy, Debug)]
+struct ColorEffects {
+    first: u8,
+    second: u8,
+    mode: u8,
+    eva: u8,
+    evb: u8,
+    evy: u8,
+}
+
+impl ColorEffects {
+    fn from_io(io: &[u8]) -> Self {
+        let read = |offset| u16::from_le_bytes([io[offset], io[offset + 1]]);
+
+        let control = read(0x50);
+        let alpha = read(0x52);
+        let y = read(0x54);
+
+        Self {
+            first: (control & 0x003f) as u8,
+            second: ((control >> 8) & 0x003f) as u8,
+            mode: ((control >> 6) & 3) as u8,
+            eva: ((alpha & 0x001f).min(16)) as u8,
+            evb: (((alpha >> 8) & 0x001f).min(16)) as u8,
+            evy: ((y & 0x001f).min(16)) as u8,
+        }
+    }
+
+    #[inline]
+    fn is_first_target(self, layer: u8) -> bool {
+        self.first & (1u8 << layer) != 0
+    }
+
+    #[inline]
+    fn is_second_target(self, layer: u8) -> bool {
+        self.second & (1u8 << layer) != 0
+    }
+
+    /// Uses the hardware-observed extra green precision bit and rounds to nearest.
+    #[inline]
+    fn alpha_blend(first: u16, second: u16, eva: u8, evb: u8) -> u16 {
+        let eva = u32::from(eva.min(16));
+        let evb = u32::from(evb.min(16));
+
+        let r1 = u32::from(first & 31);
+        let g1 = u32::from(((first >> 4) & 62) | (first >> 15));
+        let b1 = u32::from((first >> 10) & 31);
+
+        let r2 = u32::from(second & 31);
+        let g2 = u32::from(((second >> 4) & 62) | (second >> 15));
+        let b2 = u32::from((second >> 10) & 31);
+
+        let r = ((r1 * eva + r2 * evb + 8) >> 4).min(31);
+        let g = ((g1 * eva + g2 * evb + 8) >> 4).min(63) >> 1;
+        let b = ((b1 * eva + b2 * evb + 8) >> 4).min(31);
+
+        (r | (g << 5) | (b << 10)) as u16
+    }
+
+    #[inline]
+    fn brighten(color: u16, evy: u8) -> u16 {
+        let evy = u32::from(evy.min(16));
+
+        let mut r = u32::from(color & 31);
+        let mut g = u32::from(((color >> 4) & 62) | (color >> 15));
+        let mut b = u32::from((color >> 10) & 31);
+
+        r += ((31 - r) * evy + 8) >> 4;
+        g += ((63 - g) * evy + 8) >> 4;
+        b += ((31 - b) * evy + 8) >> 4;
+
+        (r | ((g >> 1) << 5) | (b << 10)) as u16 & 0x7fff
+    }
+
+    #[inline]
+    fn darken(color: u16, evy: u8) -> u16 {
+        let evy = u32::from(evy.min(16));
+
+        let mut r = u32::from(color & 31);
+        let mut g = u32::from(((color >> 4) & 62) | (color >> 15));
+        let mut b = u32::from((color >> 10) & 31);
+
+        r -= (r * evy + 7) >> 4;
+        g -= (g * evy + 7) >> 4;
+        b -= (b * evy + 7) >> 4;
+
+        (r | ((g >> 1) << 5) | (b << 10)) as u16 & 0x7fff
+    }
+
+    #[inline]
+    fn resolve(self, stack: PixelStack, effects_allowed: bool) -> u16 {
+        let top = stack.top;
+
+        /*
+         * A semi-transparent OBJ forces alpha mode and is a first target
+         * regardless of BLDCNT's OBJ-first bit.
+         *
+         * This forced alpha decision precedes the ordinary window SFX gate.
+         * If the immediately lower surface is an enabled second target, alpha
+         * wins even when BLDCNT selected brighten/darken.
+         */
+        if top.layer == BLEND_LAYER_OBJ
+            && top.semitransparent
+            && let Some(second) = stack.second
+            && self.is_second_target(second.layer)
+        {
+            return Self::alpha_blend(top.color, second.color, self.eva, self.evb);
+        }
+
+        // Ordinary alpha/brightness is controlled by the selected window's
+        // special-effects bit and BLDCNT first-target selection.
+        if !effects_allowed || !self.is_first_target(top.layer) {
+            return top.color & 0x7fff;
+        }
+
+        match self.mode {
+            // None
+            0 => top.color & 0x7fff,
+
+            // Alpha. The immediate lower visible surface must itself be an
+            // eligible second target; never search further down the stack.
+            1 => {
+                if let Some(second) = stack.second
+                    && self.is_second_target(second.layer)
+                {
+                    Self::alpha_blend(top.color, second.color, self.eva, self.evb)
+                } else {
+                    top.color & 0x7fff
+                }
+            }
+
+            // Brighten
+            2 => Self::brighten(top.color, self.evy),
+
+            // Darken
+            3 => Self::darken(top.color, self.evy),
+
+            _ => unreachable!("two-bit color-effect mode"),
+        }
+    }
+}
+
 /// Display timing is independent of VRAM writes and frontend presentation.
 struct Display {
     control: u16,
@@ -2684,47 +2924,62 @@ impl Display {
         }
     }
 
-    /// Selects the first opaque OBJ texel in OAM order, then compares that
-    /// winning object's BG priority. A later OBJ cannot bypass a hidden winner.
+    /// Isolates the first opaque OBJ texel in OAM order before combining that
+    /// single OBJ surface with backgrounds. A later OBJ cannot participate in
+    /// OBJ-to-OBJ blending through the color-effects stage.
     fn render_objects(
-        &mut self,
+        &self,
         vram: &[u8],
         palette: &[u8],
         oam: &[u8],
-        bg_priority: &[u8; SCREEN_WIDTH],
         masks: &WindowMasks,
         io: &[u8],
+        stacks: &mut [PixelStack; SCREEN_WIDTH],
     ) {
-        let mut objects = [None; SCREEN_WIDTH];
+        let mut objects: [Option<LayerPixel>; SCREEN_WIDTH] = [None; SCREEN_WIDTH];
+
         for entry in oam.as_chunks::<8>().0 {
             let Some(object) = Object::from_oam(entry, oam) else {
                 continue;
             };
-            if object.attr0 & 0x0c00 == 0x0800 {
+
+            let object_mode = object.attr0 & 0x0c00;
+
+            // Object-window pixels affect WindowMasks but are not visible OBJ pixels.
+            if object_mode == 0x0800 {
                 continue;
             }
+
             let y = (self.line + 256 - usize::from(object.attr0 & 255)) & 255;
             let (_, bound_height) = object.bounds();
+
             if y >= bound_height {
                 continue;
             }
+
             for local_x in 0..object.horizontal_coverage(io) {
                 let x = (usize::from(object.attr1 & 511) + local_x) & 511;
+
                 if x >= SCREEN_WIDTH || masks.layers[x] & 0x10 == 0 || objects[x].is_some() {
                     continue;
                 }
+
                 let (sample_x, sample_y) = object.mosaic(local_x, y, x, self.line, io);
+
                 if let Some(color) = object.pixel(sample_x, sample_y, self.control, vram, palette) {
-                    objects[x] = Some((color, ((object.attr2 >> 10) & 3) as u8));
+                    objects[x] = Some(LayerPixel {
+                        color,
+                        layer: BLEND_LAYER_OBJ,
+                        priority: ((object.attr2 >> 10) & 3) as u8,
+                        semitransparent: object_mode == 0x0400,
+                    });
                 }
             }
         }
-        let start = self.line * SCREEN_WIDTH;
-        for (x, pixel) in objects.into_iter().enumerate() {
-            if let Some((color, priority)) = pixel
-                && priority <= bg_priority[x]
-            {
-                self.drawing[start + x] = color;
+
+        for (stack, object) in stacks.iter_mut().zip(objects) {
+            if let Some(object) = object {
+                stack.insert(object);
             }
         }
     }
@@ -2735,24 +2990,34 @@ impl Display {
         while self.next_event <= target {
             if self.line < SCREEN_HEIGHT {
                 let mode = self.control & 7;
+
                 if self.line == 0 {
                     for offset in [0x28, 0x2c, 0x38, 0x3c] {
                         self.write_reference(offset, io);
                     }
                 }
+
                 let page = if self.control & 0x10 != 0 { 0xa000 } else { 0 };
+
                 let forced_blank = self.control & 0x80 != 0;
                 let start = self.line * SCREEN_WIDTH;
-                let backdrop = u16::from_le_bytes([palette[0], palette[1]]) & 0x7fff;
-                self.drawing[start..start + SCREEN_WIDTH].fill(if forced_blank {
-                    0x7fff
+
+                if forced_blank {
+                    self.drawing[start..start + SCREEN_WIDTH].fill(0x7fff);
                 } else {
-                    backdrop
-                });
-                let masks = WindowMasks::scanline(self.control, self.line, io, oam, vram, palette);
-                let mut bg_priority = [4u8; SCREEN_WIDTH];
-                if !forced_blank {
-                    // Back-to-front composition preserves lower-numbered BG ties.
+                    // Preserve the raw palette bit 15 until color effects finish.
+                    let backdrop = u16::from_le_bytes([palette[0], palette[1]]);
+
+                    let masks =
+                        WindowMasks::scanline(self.control, self.line, io, oam, vram, palette);
+
+                    let mut stacks = [PixelStack::new(backdrop); SCREEN_WIDTH];
+
+                    /*
+                     * Produce visible BG surfaces independently of final priority
+                     * composition. PixelStack retains exactly the two nearest
+                     * nontransparent surfaces required by the effects hardware.
+                     */
                     for priority in (0..4).rev() {
                         for background in (0..4).rev() {
                             if self.control & (1 << (8 + background)) == 0
@@ -2760,27 +3025,36 @@ impl Display {
                             {
                                 continue;
                             }
+
                             let text = mode == 0 || (mode == 1 && background < 2);
+
                             let affine = (mode == 1 && background == 2)
                                 || (mode == 2 && background >= 2)
                                 || ((3..=5).contains(&mode) && background == 2);
+
                             if !text && !affine {
                                 continue;
                             }
+
                             let text_layer = TextBackground::from_registers(io, background);
-                            for (x, pixel_priority) in bg_priority.iter_mut().enumerate() {
-                                if masks.layers[x] & (1 << background) == 0 {
+
+                            for (x, stack) in stacks.iter_mut().enumerate() {
+                                if masks.layers[x] & (1u8 << background) == 0 {
                                     continue;
                                 }
+
                                 let mosaic = text_layer.control & 0x40 != 0;
                                 let width = usize::from(io[0x4c] & 15) + 1;
                                 let height = usize::from(io[0x4c] >> 4) + 1;
+
                                 let sample_x = if mosaic { x / width * width } else { x };
+
                                 let sample_y = if mosaic {
                                     self.line / height * height
                                 } else {
                                     self.line
                                 };
+
                                 let color = if text {
                                     text_layer.pixel(sample_x, sample_y, vram, palette)
                                 } else {
@@ -2789,35 +3063,59 @@ impl Display {
                                         background,
                                         std::array::from_fn(|axis| {
                                             let offset = 0x22 + (background - 2) * 16 + axis * 4;
+
                                             let delta =
                                                 i16::from_le_bytes([io[offset], io[offset + 1]])
                                                     as i32;
-                                            // Vertical mosaic reuses the group's first line origin.
+
+                                            // Vertical mosaic reuses the group's
+                                            // first-line affine origin.
                                             self.affine_origin[background - 2][axis]
                                                 .wrapping_sub(delta * (self.line - sample_y) as i32)
                                         }),
                                     )
                                     .pixel(sample_x, mode, page, vram, palette)
                                 };
+
                                 if let Some(color) = color {
-                                    self.drawing[start + x] = color;
-                                    *pixel_priority = priority;
+                                    stack.insert(LayerPixel {
+                                        color,
+                                        layer: background as u8,
+                                        priority,
+                                        semitransparent: false,
+                                    });
                                 }
                             }
                         }
                     }
+
+                    if self.control & (1 << 12) != 0 {
+                        self.render_objects(vram, palette, oam, &masks, io, &mut stacks);
+                    }
+
+                    let effects = ColorEffects::from_io(io);
+
+                    for (x, stack) in stacks.into_iter().enumerate() {
+                        self.drawing[start + x] =
+                            effects.resolve(stack, masks.layers[x] & 0x20 != 0);
+                    }
                 }
+
+                /*
+                 * Affine internal reference points keep advancing even if this
+                 * particular scanline was forced blank.
+                 */
                 for (background, origin) in self.affine_origin.iter_mut().enumerate() {
                     for (axis, coordinate) in origin.iter_mut().enumerate() {
                         let offset = 0x22 + background * 16 + axis * 4;
                         let delta = i16::from_le_bytes([io[offset], io[offset + 1]]) as i32;
+
                         *coordinate = (coordinate.wrapping_add(delta) << 4) >> 4;
                     }
                 }
-                if !forced_blank && self.control & (1 << 12) != 0 {
-                    self.render_objects(vram, palette, oam, &bg_priority, &masks, io);
-                }
+
                 self.line += 1;
+
                 self.next_event = self.frame_start
                     + self.line as u64 * CYCLES_PER_SCANLINE
                     + if self.line == SCREEN_HEIGHT { 0 } else { 960 };
@@ -3365,15 +3663,16 @@ mod tests {
         };
         for (line, color) in [(61, 1), (62, 1), (63, 3)] {
             bus.display.line = line;
+            let mut stacks = [PixelStack::new(0); SCREEN_WIDTH];
             bus.display.render_objects(
                 &bus.vram,
                 &bus.palette,
                 &bus.oam,
-                &[4; SCREEN_WIDTH],
                 &masks,
                 &bus.io,
+                &mut stacks,
             );
-            let row = &bus.display.drawing[line * SCREEN_WIDTH..(line + 1) * SCREEN_WIDTH];
+            let row: [u16; SCREEN_WIDTH] = std::array::from_fn(|x| stacks[x].top.color);
             assert_eq!(row[100], 0);
             assert!(
                 row[101..111].iter().all(|pixel| *pixel == color),
@@ -4239,5 +4538,122 @@ mod tests {
         bus.write16_impl(ROM_START, 0x1234, access).unwrap();
 
         assert_eq!(&bus.rom[..16], original_prefix.as_slice());
+    }
+
+    #[test]
+    fn blend_targets_use_the_immediate_visible_second_surface() {
+        let mut io = [0u8; IO_BYTES];
+
+        // BG0 first target, BG1 second target, alpha mode.
+        io[0x50..0x52].copy_from_slice(&0x0241u16.to_le_bytes());
+
+        // Values above 16 clamp to 16 when used.
+        io[0x52..0x54].copy_from_slice(&0x1f1fu16.to_le_bytes());
+
+        let effects = ColorEffects::from_io(&io);
+
+        assert_eq!(effects.eva, 16);
+        assert_eq!(effects.evb, 16);
+
+        let red = LayerPixel {
+            color: 0x001f,
+            layer: 0,
+            priority: 0,
+            semitransparent: false,
+        };
+
+        let blue = LayerPixel {
+            color: 0x7c00,
+            layer: 1,
+            priority: 1,
+            semitransparent: false,
+        };
+
+        let green = LayerPixel {
+            color: 0x03e0,
+            layer: 2,
+            priority: 0,
+            semitransparent: false,
+        };
+
+        let mut direct = PixelStack::new(0);
+        direct.insert(blue);
+        direct.insert(red);
+
+        // 16/16 + 16/16 saturates red and blue.
+        assert_eq!(effects.resolve(direct, true), 0x7c1f);
+
+        let mut blocked = PixelStack::new(0);
+        blocked.insert(blue);
+        blocked.insert(green);
+        blocked.insert(red);
+
+        /*
+         * BG2 is immediately below BG0 but is not selected as target 2.
+         * Hardware must not skip BG2 and blend against deeper BG1.
+         */
+        assert_eq!(effects.resolve(blocked, true), 0x001f);
+    }
+
+    #[test]
+    fn semitransparent_obj_forces_alpha_before_window_effect_gate() {
+        let effects = ColorEffects {
+            // Ordinary fallback selects OBJ for darkening.
+            first: 1 << BLEND_LAYER_OBJ,
+
+            // Only BG0 is eligible beneath the semitransparent OBJ.
+            second: 1 << 0,
+
+            mode: 3,
+            eva: 8,
+            evb: 8,
+            evy: 8,
+        };
+
+        let mut stack = PixelStack::new(0);
+
+        stack.insert(LayerPixel {
+            color: 0x001f,
+            layer: 0,
+            priority: 0,
+            semitransparent: false,
+        });
+
+        stack.insert(LayerPixel {
+            color: 0x7fff,
+            layer: BLEND_LAYER_OBJ,
+            priority: 0,
+            semitransparent: true,
+        });
+
+        /*
+         * Forced semitransparent alpha wins over BLDCNT darken and occurs even
+         * when the ordinary window special-effects bit is clear.
+         */
+        assert_eq!(effects.resolve(stack, false), 0x41ff);
+
+        let no_second_target = ColorEffects {
+            second: 0,
+            ..effects
+        };
+
+        // No eligible second surface and SFX disabled: unchanged.
+        assert_eq!(no_second_target.resolve(stack, false), 0x7fff);
+
+        // Without a forced blend source, normal darken behavior is allowed.
+        assert_eq!(no_second_target.resolve(stack, true), 0x41f0);
+    }
+
+    #[test]
+    fn color_effect_arithmetic_matches_hardware_rounding_and_green_precision() {
+        // Nearest-rounded 50/50 red + blue.
+        assert_eq!(ColorEffects::alpha_blend(0x001f, 0x7c00, 8, 8), 0x4010);
+
+        // RGB555 bit 15 contributes the hidden sixth green precision bit.
+        assert_eq!(ColorEffects::alpha_blend(0x8000, 0x03e0, 8, 8), 0x0200);
+
+        assert_eq!(ColorEffects::brighten(0x001f, 8), 0x421f);
+
+        assert_eq!(ColorEffects::darken(0x001f, 8), 0x0010);
     }
 }

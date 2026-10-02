@@ -2866,3 +2866,92 @@ The first correction Clippy run flagged the test's OAM chunk iteration; switchin
 to typed eight-byte chunks resolved it and the final gate passed. Existing
 headless timings also describe the earlier build; no new performance measurements
 were fabricated for this correction.
+
+## Slice 24 — alpha blending, brightness and target selection: automated verification complete; runtime diagnostics recorded
+
+Implemented against `plan_final.md` section 24. The renderer now retains the two
+nearest visible surfaces after window filtering and priority resolution, then
+applies BLDCNT target selection, BLDALPHA blending, or BLDY brightness at the
+scanline drawing boundary. Alpha uses only the immediately lower visible
+surface. Semi-transparent OBJs enter the color-effects stage as the top OBJ;
+they force alpha over an eligible second target before the ordinary window SFX
+gate. A later OBJ cannot blend through the top OBJ. Raw RGB555 bit 15 remains
+available to blend arithmetic and is discarded at final composition.
+
+### Guest contract and automated evidence
+
+The original [blend guest](../roms/blend/README.md), [frozen manifest](../roms/blend/manifest.toml),
+and independent [framebuffer oracle](../roms/blend/contract.rs) build and verify
+with:
+
+```bash
+cd /home/aditya/Projects/GBA/gba-rs
+python3 roms/blend/build.py
+python3 roms/blend/verify.py
+cargo run --locked -p gba-tools --release -- bench-blend
+```
+
+| Evidence | Result |
+| --- | --- |
+| ROM identity | `blend.gba`, 612 bytes; SHA-256 `525bdb984a951fc7a757585a363599d87c7eb022fc802577fb81727023eff2d8` |
+| Startup | Controlled ARM, no BIOS and no backup; app uses the controlled path only for the exact shipped ROM bytes |
+| Completion | Interactive guest; code PC window `0x08000000..0x08000400`; mailbox `0x03000000` ID `0x00a5`, state 7 at the final capture |
+| Execution bounds | At most 2,000,000 instructions per advance; at most 32 cycles of instruction-boundary overshoot |
+| Meaningful RED | Against unchanged HEAD, state 0 passed; state 1 failed at frame 16 pixel `(0,0)`: old output `0x001f`, expected alpha result `0x4010` |
+| Native GREEN | 8 full-frame captures, frames 12–40; 307,200 exact pixel comparisons against the independent oracle |
+| Production WASM GREEN | The same 8 guest captures and 307,200 pixel comparisons passed in Node |
+| Final guest state | Frame 40; PC `0x080001c8`; cycles 11,235,846 (6-cycle overshoot); 936,866 instructions; mailbox state 7 |
+| Captured behavior | BG0/BG1 alpha; brighten/darken; coefficient saturation; transparent OBJ texels; semitransparent OBJ forced alpha; immediate lower target; WIN0 layer and SFX masks |
+| Native captures | `target/blend-captures/frame-{12,16,20,24,28,32,36,40}.ppm` |
+| Focused core regressions | PASS: immediate visible second target; semitransparent OBJ forced-alpha ordering and window gate; rounded arithmetic and hidden green precision |
+| Prior display regressions | PASS: 11 window captures, 14 affine-object captures including its mGBA singular-matrix comparison, and 35 affine captures across modes 1–5 |
+| Broad fixture runner | PASS: `cargo run --locked -p gba-tools --release -- fixtures run` |
+| Workspace tests | PASS: 37 core tests, 1 backup integration test, 13 session tests, and 1 app test |
+| Static gates | PASS: all-target workspace Clippy with `-D warnings`, formatting, and `git diff --check` |
+| Application builds | PASS: native release app, WASM app check, production release Trunk build |
+
+The pinned mGBA suite revision `e6942030d25ffe3ba76c72b73a86da073ec857cc`
+contains no standalone blend ROM. The applicable hardware-confirmed behavior
+from [mGBA issue #3804](https://github.com/mgba-emu/mgba/issues/3804) is
+reproduced in state 4: a semi-transparent OBJ overlapping a valid second target
+uses BLDALPHA even when BLDCNT requests brighten or darken. The issue attachment
+was not copied or run; its redistribution terms were not established. This is a
+source-behavior comparison, not a direct mGBA execution.
+
+### Performance and user-supplied runtime diagnostics
+
+The 2026-10-02 native, Chrome, and Brave diagnostics below were supplied by the
+user. All three report `blend.gba` loaded and the app `Running`.
+
+| Platform | Core mean/p95 ms | Pixel conversion mean/p95 ms | Texture submission mean/p95 ms | Samples (core / conversion / texture) | Sustained speed |
+| --- | --- | --- | --- | --- | --- |
+| Native headless | 2.549 / 2.569 | Not applicable | Not applicable | 600-frame benchmark; per-stage count not emitted | Not measured |
+| Linux native UI | 8.215 / 10.696 | 0.077 / 0.101 | 0.019 / 0.027 | 120 / 120 / 120 | Not measured |
+| Chrome | 6.732 / 8.300 | 0.079 / 0.200 | 0.024 / 0.100 | 120 / 120 / 12 | Not measured |
+| Brave | 7.716 / 12.400 | 0.109 / 0.200 | 0.019 / 0.100 | 120 / 120 / 120 | Not measured |
+
+### Runtime snapshots supplied by the user
+
+| Diagnostic | Linux native UI | Chrome | Brave |
+| --- | ---: | ---: | ---: |
+| Loaded ROM / status | `blend.gba` / Running | `blend.gba` / Running | `blend.gba` / Running |
+| Executed instructions | 54,102,041 | 26,450,459 | 15,158,307 |
+| GBA cycles | 649,090,086 | 317,337,835 | 181,862,765 |
+| BIOS | Not loaded | Not loaded | Not loaded |
+| Core PCM rate | 32,768 Hz | 32,768 Hz | 32,768 Hz |
+| PCM samples produced | 1,267,754 | 619,800 | 355,200 |
+| PCM staging drops | 0 | 0 | 0 |
+| Empty FIFO count | 0 | 0 | 0 |
+| Host audio | Off | Off | Off |
+| Backup / detected / override | None / Unknown / None | None / Unknown / None | None / Unknown / None |
+
+The reported core p95 values are below the 16.74 ms frame budget. These are
+per-stage summaries and do not establish sustained speed or end-to-end frame
+time. The snapshots establish that the ROM was loaded and running; they do not
+identify which guest state was displayed or explicitly confirm the visual
+transition and overlap checks. State-by-state visual acceptance remains
+unconfirmed. Browser versions, display refresh, and sustained wall time were
+not supplied. For the manual sequence and launch commands, use the [blend
+README](../roms/blend/README.md).
+
+Environment for automated measurements: Linux 7.2.7-arch1-1, Intel Core i7-13620H, Rust 1.98.1, Node 26.10.0, Trunk 0.21.14. Governor, thermals, display refresh, audio device, and browser versions were not recorded.
