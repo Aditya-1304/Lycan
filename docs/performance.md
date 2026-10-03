@@ -3816,3 +3816,96 @@ env -u NO_COLOR trunk --config web/Trunk.toml serve --release
 Check normal startup without `--debug-ui` for both file orders. Use the existing
 diagnostic view for the same ROM/checkpoint, viewport/scale, toolchain and audio
 conditions as the baseline. No native/browser UI was controlled automatically.
+
+
+## UI launch and player shell — implementation evidence
+
+Pass 2 of `../UI.md` was implemented on 2026-10-03 under the user's explicit
+implementation request. The recorded native/browser baseline and all supplied
+measurements above remain unchanged. This entry does not complete subsequent UI
+passes or Slice 32.
+
+Normal startup now presents a centered, scrollable Lycan card with large BIOS/ROM
+actions, successful filenames, textual readiness/progress, audio controls,
+Settings and keyboard/drop guidance. An installed game uses a compact wrapping
+toolbar, a separately truncated cartridge-title row and the existing large 3:2
+nearest-neighbor framebuffer. Layout helpers live in `gba-app/src/app/views.rs`;
+the controlled diagnostic startup and F1 view remain available.
+
+Pause/Resume and immediate Reset use the existing shared predicates and session
+operations. Reset retains cartridge data and explicit pause and includes the
+specified tooltip. Game exposes ROM loading, BIOS replacement, cartridge-save
+import/export/retry and the existing request-local backup override choices.
+Save failures provide readable, scrollable recovery in normal play. Notices use
+explicit state rather than searching human-readable status strings for failure.
+
+BIOS bytes are validated before staging. The current firmware/session remains
+installed until the existing cartridge-save barrier clears; filenames change
+only after successful installation. Picker completions carry the ROM request
+generation so a newer drop cannot be restarted by an older BIOS selection.
+Cancel replacement removes queued assets without cancelling an issued write.
+No persistence adapter or session save algorithm was changed.
+
+Settings temporarily suspends the existing session/audio without changing user
+pause. Opening UI releases logical buttons immediately, and a ten-slot held-key
+suppression array prevents interaction keys from reaching gameplay until released.
+Menu ownership gates input without requiring machine suspension. Settings currently
+shows the installed bindings and existing audio controls; remapping/legend and
+fullscreen/expanded audio integration remain in their named subsequent passes.
+Cartridge import cancellation retains explicit pause; successful import retains
+the existing paused restart behavior.
+
+### Automated verification
+
+| Check | Result |
+|---|---|
+| Meaningful RED before implementation | Settings failed to suspend/release held Right; valid BIOS replacement was discarded during an outstanding save write |
+| `cargo test --locked -p gba-core -p gba-session -p gba-app` | PASS: 70 tests, zero failures; doc tests pass |
+| `cargo clippy --locked --workspace --all-targets -- -D warnings` | PASS |
+| `cargo check --locked -p gba-app` | PASS |
+| `cargo check --locked -p gba-app --target wasm32-unknown-unknown` | PASS |
+| `cargo run --locked --release -p gba-tools -- verify-raster` | PASS: frozen guest identity, timing/state/scanout contracts |
+| Core/session source, dependency and feature configuration diff | Unchanged |
+
+`cargo build --locked --release -p gba-app`: PASS.
+`env -u NO_COLOR trunk --config web/Trunk.toml build --release`: PASS;
+production browser assets rebuilt in `dist/`. Formatting and diff whitespace
+checks passed. Logs are retained in `target/ui-shell-evidence/`, including the
+focused RED run.
+
+### Performance boundary and remaining acceptance
+
+The framebuffer texture/image buffers, conversion/upload generation checks,
+bounded session advancement, host pacing and PCM/audio adapters are unchanged.
+The only audio module additions are borrowed player-status accessors; callbacks,
+Worklet and queue behavior were not modified. Drawing performs no guest execution
+or PCM draining. Cartridge snapshots are obtained only for an explicit export or
+an existing scheduled write; status rendering uses metadata and borrowed text.
+No new dependency, execution thread, Worker, lock, animated asset or gameplay log
+was introduced. Failed save restoration no longer schedules an idle repaint loop
+when no storage operation is in flight.
+
+- [x] Centered launch and game-focused player shell implemented.
+- [x] Existing loading, pause/reset and save operations wired through shared predicates/barriers.
+- [x] Focused regressions demonstrated RED then GREEN; required automated checks passed.
+- [x] Core/session hardware, timing, renderer, PCM, pacing and save algorithms unchanged.
+- [ ] User-confirmed Linux, Chrome and Brave visual/interaction acceptance.
+- [ ] Post-change UI/total-work timing, audio/speed and memory compared with the recorded baseline.
+
+Unchanged core code and passing checks establish isolation/regression results;
+they do not establish measured end-to-end performance parity. No new manual or
+performance result is inferred from the previously accepted baseline.
+
+Run from `gba-rs`:
+
+```sh
+./target/release/gba-app
+env -u NO_COLOR trunk --config web/Trunk.toml serve --release
+```
+
+On Linux, Chrome and Brave, check BIOS-first/ROM-first startup, wrong BIOS size,
+file cancellation/drop, paused/reset behavior, Settings with a held key, return
+with a fresh press, long filenames/small windows, pending replacement cancellation,
+and Game-menu cartridge-save import/export/retry. Retain the same ROM/checkpoint,
+viewport/scale and audio conditions for post-change baseline comparison. F1 still
+opens the existing diagnostics. No native/browser UI was controlled automatically.
