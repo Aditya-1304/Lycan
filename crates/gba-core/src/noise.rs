@@ -93,14 +93,23 @@ impl Noise {
         if self.active {
             let total = self.phase + elapsed;
             let period = self.period();
-            for _ in 0..total / period {
+            // Avoid runtime division at the usual zero/one-edge boundary.
+            // A longer explicit advance still clocks every polynomial step.
+            let (steps, phase) = if total < period {
+                (0, total)
+            } else if total - period < period {
+                (1, total - period)
+            } else {
+                (total / period, total % period)
+            };
+            for _ in 0..steps {
                 self.high = self.polynomial & 1 != 0;
                 self.polynomial >>= 1;
                 if self.high {
                     self.polynomial ^= if self.control & 8 != 0 { 0x60 } else { 0x6000 };
                 }
             }
-            self.phase = total % period;
+            self.phase = phase;
         }
     }
 

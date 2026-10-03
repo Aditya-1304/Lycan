@@ -4321,3 +4321,141 @@ fullscreen and audio/lifecycle interactions. No UI was launched or controlled
 automatically; visual and sustained host-performance acceptance remains user-owned.
 
 Slice 32 compatibility, packaging, deployment and wider release work remain separate.
+
+
+## Approved core hot-path optimization — 2026-10-03
+
+The user approved the eight-area implementation after the native CPU profile in
+`target/profiles/20261003T142738Z-before/`. This pass changes core execution and
+scanout only. It preserves timing, sampling, priority, blend rounding and existing
+features; native/browser presentation and persistence code are unchanged.
+
+### Implemented areas
+
+| Area | Unnecessary work removed | Lifetime and correctness boundary |
+| --- | --- | --- |
+| CPU and bus | Share instruction execution state; skip peripheral checks outside their address regions; decode WAITCNT once per register write | Timed writes finish using the old timing; byte/halfword/word MMIO updates refresh the cache; pipeline, BIOS/open-bus and prefetch rules remain intact |
+| Text backgrounds | Prepare source Y/map row once and decode each encountered tile row once, including flips/palette colors | Fixed eight-texel cache exists only during immutable scanline sampling; invalid character rows remain transparent |
+| Pixel composition | Decode BG controls once, visit BGs front-to-back, and stop sampling deeper BGs after two opaque surfaces | Retains the immediate second visible surface for alpha; OBJ still uses general insertion and its original OAM ordering |
+| Affine backgrounds | Prepare dimensions/addressing once; advance raw coordinates with additions per pixel/mosaic group; mask power-of-two wrap dimensions | Coordinates advance across masked/occluded pixels; signed flooring, bitmap clipping, page selection and vertical reference accumulation are preserved |
+| Scheduling | Compute HBlank/VCOUNT deadlines only when needed and reuse future video edges | Consumed edges are recalculated; original IRQ, DMA request and arbitration boundaries remain intact |
+| PSG oscillators | Use comparison/subtraction for zero or one divider edge | General quotient/remainder fallback retains arbitrary multi-edge advances and oscillator phase |
+| Sprites and object windows | Prepare depth, stride, base, palette bank, vertical mosaic/flip and affine Y terms per object row | Both passes use the same row helper; screen-grid mosaic, partial final blocks, affine clipping and 1D/2D addressing remain intact |
+| Color effects | Replace repeated brightness arithmetic with exact compile-time channel tables | 3,264 bytes of static tables; all coefficients, hidden green precision and rounding match the original; alpha and semitransparent OBJ gating are preserved |
+
+No SIMD, persistent tile/OAM cache, new heap allocation in these rendering helpers,
+frame skipping or reduced rendering/audio quality was introduced. Cache lifetimes
+avoid guest-write invalidation machinery.
+
+### Before/after core measurements
+
+Preserved original executable: `target/perf-optimization/gba-tools-before`.
+Final optimized executable: `target/release/gba-tools`. Frozen workloads run for
+600 frames per sample, three paired trials each, reversing execution order in the
+second trial. Builds/tests were idle during measurements. The final controlled
+comparison pins both binaries to logical CPU 3 and warms each with a 600-frame
+pixels run. Values below are medians of the three reported means/p95s, not a
+pooled percentile. These are headless core timings, not game FPS or host UI/audio
+cost. Differences in the earlier unpinned comparison are included to expose host
+variation rather than imply a guaranteed gain.
+
+| Scenario | Before mean / p95 (ms), pinned | After mean / p95 (ms), pinned | Core mean reduction, pinned | Earlier unpinned reduction |
+| --- | --- | --- | --- | --- |
+| pixels | 1.025 / 1.053 | 0.852 / 0.895 | 16.9% | 14.3% |
+| tiled | 1.568 / 1.627 | 1.265 / 1.311 | 19.3% | 11.3% |
+| sprites | 1.612 / 1.660 | 1.359 / 1.407 | 15.7% | 9.3% |
+| vblank | 0.250 / 0.262 | 0.223 / 0.246 | 10.8% | 0.9% |
+| irq-sprites | 0.387 / 0.408 | 0.335 / 0.349 | 13.4% | 13.1% |
+| dma | 0.321 / 0.336 | 0.271 / 0.286 | 15.6% | 17.9% |
+| pcm | 0.268 / 0.284 | 0.232 / 0.247 | 13.4% | 2.4% |
+| window | 1.646 / 1.692 | 1.451 / 1.491 | 11.8% | 7.1% |
+| blend | 1.778 / 1.829 | 1.514 / 1.553 | 14.8% | 9.1% |
+| raster | 1.642 / 1.686 | 1.378 / 1.417 | 16.1% | 12.0% |
+| affine-object | 1.662 / 1.724 | 1.406 / 1.474 | 15.4% | 9.2% |
+
+The earlier run preceded the final sprite non-mosaic fast path; the final unpinned
+run is also preserved separately. All paired trials and raw outputs are retained
+in `target/perf-optimization/bench-{paired,final,pinned}.txt` and their JSON summaries.
+These aggregate timings cannot assign a gain independently to each of the eight
+changes. In a separate renderer-only comparison against the same optimized code
+using scalar brightness arithmetic, the tables reduced time by 2.63–2.87% across
+three trials (`brightness-bench.txt`).
+
+### Regression and build evidence
+
+| Check | Result |
+| --- | --- |
+| Workspace tests | PASS: 85 tests, zero failures; doc tests pass |
+| Formatting, diff whitespace, workspace/all-target Clippy with warnings denied | PASS |
+| Native release application/tools and WASM application compile | PASS |
+| Trunk browser release bundle | PASS; `dist` rebuilt |
+| Frozen fixture manifest | PASS on final executable |
+| Native and production-WASM affine, affine-object, window, blend and raster contracts | PASS |
+| WASM timing, diagnostics, VBlank, keypad, DMA and PCM contracts | PASS |
+| Backup, SRAM, Flash64/128 and EEPROM contracts | PASS |
+| Pulse, wave and noise native/WASM contracts; RTC frozen contract | PASS |
+| Browser input, audio, PCM Worklet and presentation regression scripts; audio/Worklet syntax | PASS |
+| Independent original/optimized comparison | PASS: 512 randomized full frames across six display modes; all 65,536 colors × 32 coefficients × two brightness modes; 131,072 audio advances and 262,144 bus sequences, including WAITCNT byte/halfword writes |
+
+Existing realistic regressions were reused. No new behavior or artificial failing
+test was introduced for a behavior-preserving optimization. The independent
+comparison harness and both source copies are under the ignored
+`target/perf-optimization/differential/`; no public experiment API was added to
+the production crate. Raw gate logs are under `target/perf-optimization/`.
+
+### Interactive profiling acceptance
+
+The after executable uses release opt-level 3, thin LTO, debug information level 2
+and no stripping, matching the before capture's profiling build settings. The
+recording uses `perf record -e cpu-clock:u -F 199 --call-graph dwarf,16384` and the
+native application's `--debug-ui` option. Heaptrack is not run concurrently;
+allocation counts remain **not measured**. The earlier profile's low allocation
+CPU percentage does not establish allocation counts.
+
+- [x] Eight approved areas implemented and automated regression/build checks pass.
+- [x] Original executable/source and paired timing evidence preserved.
+- [ ] User gameplay confirms sustained speed, audio and any remaining stuttering.
+- [x] After CPU recording stopped/analyzed and remaining hotspots compared.
+- [ ] Chrome and Brave independently confirm sustained performance/visual/audio behavior.
+
+The earlier native recording has no precise low-FPS marker, saved game/input
+replay or frame-time series. The new gameplay capture can identify remaining CPU
+hotspots, but cannot by itself establish an identical-workload FPS improvement.
+Native/browser core and conversion diagnostic timings for this pass are
+**not measured** until recorded during the interactive checks. Existing user-entered
+millisecond timings elsewhere in this document are preserved.
+
+
+### Native after-recording analysis
+
+User gameplay capture completed in `target/profiles/20261003T152939Z-after/`:
+23,258 samples, zero lost samples, 247.667655-second sample span; application and
+profiler exited successfully. Same sampling and build settings as the before run.
+Both captures were reclassified with the same ELF-inline-context method; the
+original analysis is preserved. The 120–200s windows contain 8,559 before samples
+and 8,297 after samples. These activity windows are not a matched input replay or
+marked low-FPS episode.
+
+| Context / area | Before active CPU share | After active CPU share |
+| --- | --- | --- |
+| CPU + bus | 55.84% | 56.39% |
+| Text tile rows | 4.81% | 4.44% |
+| Pixel composition | 4.30% | 3.22% |
+| Affine BG sampling | 3.53% | 3.01% |
+| Device scheduling / DMA / input | 7.79% | 8.03% |
+| Pulse / noise advancement | 2.65% | 1.42% |
+| Sprites / OBJ windows | 1.87% | 1.74% |
+| Color effects, including tables | 2.35% | 1.65% |
+
+Rows include overlapping inline contexts and broad categories; do not sum them.
+The overall scheduler share is similar, while its HBlank and VCOUNT deadline
+contexts decreased. CPU/bus remains the leading remaining area. Named allocator
+leaf shares are 0.34% before / 0.38% after for the whole captures; counts/hitches
+remain unmeasured. Equal-length later windows contain 43.01 / 41.69 approximate
+sampled userspace CPU seconds, but differing manual gameplay prevents treating
+that as a controlled FPS gain. No frame-time series or audio-underrun delta was
+captured, so sustained stutter-free native/Chrome/Brave acceptance remains pending.
+
+The full report, revised priority/complexity table, raw samples and reproducible
+classifier are in `target/profiles/20261003T152939Z-after/analysis.md` and
+`comparison.json`. Additional candidate fixes were not implemented.
