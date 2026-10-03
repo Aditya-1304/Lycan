@@ -70,6 +70,9 @@ impl GbaApp {
             enabled,
             egui::Button::new(label).min_size(egui::vec2(0.0, 30.0)),
         );
+        if response.gained_focus() {
+            response.scroll_to_me(Some(egui::Align::Center));
+        }
         if response.clicked() {
             self.own_ui_keys(ui.ctx());
             if !self.settings_open {
@@ -149,6 +152,10 @@ impl GbaApp {
                                 ui.add_space(16.0);
                             });
                             self.draw_startup_assets(ui);
+                            ui.collapsing("Backup override for next ROM", |ui| {
+                                self.draw_backup_override(ui);
+                                ui.small("Choose only when automatic detection is unresolved; this choice belongs to the next ROM load.");
+                            });
                             if let Some(progress) = self.operation().label() {
                                 ui.add_space(8.0);
                                 ui.label(progress);
@@ -161,7 +168,7 @@ impl GbaApp {
                             self.draw_notices(ui);
                             ui.add_space(12.0);
                             ui.separator();
-                            self.draw_audio_controls(ui, 220.0);
+                            self.draw_audio_controls(ui, 220.0, !self.settings_open);
                             ui.add_space(12.0);
                             ui.vertical_centered(|ui| {
                                 if self.action(ui, true, "Settings") {
@@ -183,7 +190,7 @@ impl GbaApp {
                 ui.label("Reading…");
             } else if let Some(name) = &self.bios_name {
                 ui.label("Ready");
-                ui.label(name);
+                ui.add(egui::Label::new(name).wrap());
             } else {
                 ui.label("Missing · supply your 16 KiB BIOS file");
             }
@@ -194,7 +201,7 @@ impl GbaApp {
                 ui.label("Reading…");
             } else if let Some(pending) = &self.pending_rom {
                 ui.label("Ready · pending startup");
-                ui.label(&pending.name);
+                ui.add(egui::Label::new(&pending.name).wrap());
             } else {
                 ui.label("Missing · select a .gba cartridge");
             }
@@ -204,6 +211,16 @@ impl GbaApp {
     /// A bounded toolbar and restrained frame give the remaining area to the
     /// existing nearest-neighbor texture. Long cartridge names get only spare width.
     fn draw_player_ui(&mut self, ui: &mut egui::Ui) -> bool {
+        let height = ui.available_height();
+        egui::ScrollArea::vertical()
+            .id_salt("player-overflow")
+            .auto_shrink([false, false])
+            .show(ui, |ui| self.draw_player_contents(ui, height))
+            .inner
+    }
+
+    fn draw_player_contents(&mut self, ui: &mut egui::Ui, viewport_height: f32) -> bool {
+        let top = ui.cursor().top();
         self.sync_texture(ui.ctx());
         let narrow = ui.available_width() < 640.0;
         let menu_open = ui
@@ -234,15 +251,17 @@ impl GbaApp {
                 if self.action(ui, true, "Settings") {
                     self.open_settings(ui.ctx());
                 }
-                self.draw_fullscreen_control(ui);
+                self.draw_fullscreen_control(ui, !self.settings_open);
                 let mut audio_open = false;
                 if narrow {
                     audio_open = ui
-                        .menu_button("Audio", |ui| self.draw_audio_controls(ui, 160.0))
+                        .menu_button("Audio", |ui| {
+                            self.draw_audio_controls(ui, 160.0, !self.settings_open)
+                        })
                         .inner
                         .is_some();
                 } else {
-                    self.draw_audio_controls(ui, 150.0);
+                    self.draw_audio_controls(ui, 150.0, !self.settings_open);
                 }
                 if menu.inner.is_none() && menu.response.clicked() {
                     menu.response.surrender_focus();
@@ -254,8 +273,15 @@ impl GbaApp {
         ui.add(egui::Label::new(&self.rom_name).truncate())
             .on_hover_text(&self.rom_name);
         ui.separator();
-        self.draw_player_status(ui);
-        let available = ui.available_size();
+        egui::ScrollArea::vertical()
+            .id_salt("player-status")
+            .max_height((viewport_height * 0.3).clamp(40.0, 180.0))
+            .auto_shrink([false, true])
+            .show(ui, |ui| self.draw_player_status(ui));
+        let available = egui::vec2(
+            ui.available_width(),
+            (viewport_height - (ui.cursor().top() - top)).max(0.0),
+        );
         // Automatic hiding never changes the saved preference, and hidden legends
         // reserve no space. Short views keep the framebuffer as the primary content.
         let deck = available.x >= 600.0 && available.y >= 430.0;
@@ -272,7 +298,17 @@ impl GbaApp {
             0.0
         };
         let screen_area = available - egui::vec2(0.0, legend_height);
-        let size = player_screen_size((screen_area - egui::vec2(12.0, 12.0)).max(egui::Vec2::ZERO));
+        let layout = player_screen_layout(
+            (screen_area - egui::vec2(12.0, 12.0)).max(egui::Vec2::ZERO),
+            self.settings.preferences.scaling,
+            ui.ctx().pixels_per_point(),
+        );
+        self.integer_fallback = layout.integer_fallback;
+        let size = layout.size;
+        if size.x <= 0.0 || size.y <= 0.0 {
+            self.game_rect = None;
+            return menu_open;
+        }
         ui.allocate_ui_with_layout(
             available,
             egui::Layout::top_down(egui::Align::Center),
@@ -284,12 +320,21 @@ impl GbaApp {
                     .corner_radius(6)
                     .show(ui, |ui| {
                         if let Some(texture) = &self.texture {
-                            let response = ui.add(
-                                egui::Image::from_texture(texture)
-                                    .fit_to_exact_size(size)
-                                    .sense(egui::Sense::click()),
+                            let (id, rect) = ui.allocate_space(size);
+                            let pixels_per_point = ui.ctx().pixels_per_point();
+                            let origin = egui::pos2(
+                                (rect.min.x * pixels_per_point).round() / pixels_per_point,
+                                (rect.min.y * pixels_per_point).round() / pixels_per_point,
                             );
-                            self.game_rect = Some(response.rect);
+                            let rect = egui::Rect::from_min_size(origin, size);
+                            ui.painter().image(
+                                texture.id(),
+                                rect,
+                                egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)),
+                                egui::Color32::WHITE,
+                            );
+                            let response = ui.interact(rect, id, egui::Sense::click());
+                            self.game_rect = Some(rect);
                             if response.clicked() {
                                 ui.ctx().memory_mut(|memory| {
                                     if let Some(id) = memory.focused() {
@@ -386,6 +431,8 @@ impl GbaApp {
     /// Reuses the application actions; opening this menu gates keys without
     /// introducing another machine owner, save route or execution clock.
     fn draw_game_menu(&mut self, ui: &mut egui::Ui) {
+        ui.set_max_width((ui.ctx().content_rect().width() - 32.0).clamp(1.0, 380.0));
+        ui.add(egui::Label::new(&self.rom_name).wrap());
         if self.action(ui, self.can_pick_rom(), "Load ROM…") {
             self.pick_rom(ui.ctx());
             ui.close();
@@ -398,25 +445,7 @@ impl GbaApp {
             ui.close();
         }
         ui.separator();
-        if self.action(ui, self.can_import_save(), "Import cartridge save…") {
-            self.import_cartridge_save(ui.ctx());
-            ui.close();
-        }
-        if self.action(ui, self.can_export_save(), "Export cartridge save…") {
-            self.export_cartridge_save(ui.ctx());
-            ui.close();
-        }
-        if self.storage.failed && self.action(ui, !self.storage.busy, "Retry save storage") {
-            self.storage.failed = false;
-            ui.ctx().request_repaint();
-            ui.close();
-        }
-        if !self.can_import_save() {
-            ui.small("Import requires an idle cartridge save operation.");
-        }
-        if !self.can_export_save() {
-            ui.small("Export requires a detected cartridge save capacity.");
-        }
+        self.draw_save_controls(ui);
         ui.separator();
         ui.strong("Backup override for next ROM");
         self.draw_backup_override(ui);
@@ -463,37 +492,86 @@ impl GbaApp {
         }
         if self.execution_faulted {
             ui.strong("Emulation stopped · Reset or load another ROM to recover.");
-            if self.notice.is_none() {
-                ui.label(&self.status);
-            }
+            // Export feedback must not hide the stopped guest’s actual reason.
+            ui.add(egui::Label::new(&self.status).wrap());
         } else if self.user_paused {
             ui.label("Paused");
         }
         if self.save_identity.is_some() {
-            let status = if self.storage.failed {
-                "Cartridge save needs attention"
-            } else if self.restoring_save {
-                "Restoring cartridge save"
+            let status = if self.restoring_save {
+                "Restoring save…"
             } else if self.storage.busy || self.session.persistence_dirty() {
-                "Saving cartridge data"
+                "Saving…"
+            } else if self
+                .session
+                .save_status()
+                .is_some_and(|status| status.len == 0)
+            {
+                "Save capacity unresolved"
             } else {
-                "Cartridge save up to date"
+                "Saved"
             };
-            ui.small(status).on_hover_text(&self.storage.status);
-            if self.storage.failed {
-                egui::Frame::NONE
-                    .fill(SURFACE)
-                    .inner_margin(10)
-                    .corner_radius(6)
-                    .show(ui, |ui| {
-                        egui::ScrollArea::vertical()
-                            .id_salt("save-recovery")
-                            .max_height(160.0)
-                            .show(ui, |ui| self.draw_save_controls(ui));
-                    });
-            }
+            ui.small(status);
+        }
+        if self.storage.failed || self.save_failure.is_some() {
+            egui::Frame::NONE.fill(SURFACE).inner_margin(10).corner_radius(6)
+                .show(ui, |ui| {
+                    if let Some(failure) = &self.save_failure {
+                        ui.strong(failure.kind.label());
+                        ui.add(egui::Label::new(&failure.message).wrap());
+                    } else {
+                        ui.strong("Save storage needs attention");
+                        ui.add(egui::Label::new(&self.storage.status).wrap());
+                    }
+                    ui.label("Closing or refreshing may lose unsaved changes. Export does not release a replacement or close barrier.");
+                    self.draw_save_controls(ui);
+                });
         }
         self.draw_notices(ui);
+    }
+
+    /// One set of recovery actions serves the menu, persistent banner and debug
+    /// view. Rendering reads metadata only; snapshots belong to actual exports.
+    pub(super) fn draw_save_controls(&mut self, ui: &mut egui::Ui) {
+        if self.save_identity.is_none() {
+            ui.label("Cartridge save import/export unavailable: no supported backup hardware is selected.");
+            ui.small("For unresolved detection, choose a backup override and reload the ROM. No type is inferred from its filename.");
+            return;
+        }
+        if self.restoring_save {
+            ui.label("Stored save has not been restored. Retry or import a validated backup; Export cannot recover unvalidated cartridge bytes.");
+        } else if self.session.save_status().is_none() {
+            ui.label("Clock settings persist automatically; this cartridge has no raw backup to import/export.");
+        } else if self
+            .session
+            .save_status()
+            .is_some_and(|status| status.len == 0)
+        {
+            ui.label("Backup capacity is unresolved. Supported restore/import can resolve EEPROM capacity; Export becomes available afterward.");
+            ui.small("You can also select an explicit capacity under Backup override for next ROM, then reload through the existing save barrier.");
+        }
+        ui.horizontal_wrapped(|ui| {
+            if self.storage.failed && self.action(ui, !self.storage.busy, "Retry save storage") {
+                self.storage.failed = false;
+                ui.ctx().request_repaint();
+            }
+            if self.action(ui, self.can_import_save(), "Import cartridge save…") {
+                self.import_cartridge_save(ui.ctx());
+            }
+            if self.action(ui, self.can_export_save(), "Export cartridge save…") {
+                self.export_cartridge_save(ui.ctx());
+            }
+        });
+        if self.storage.busy {
+            ui.label("Save operation in progress; import/export wait for its completion.");
+        } else if self.pending_rom.is_some() || self.pending_bios.is_some() || self.close_pending()
+        {
+            ui.small("Import waits until replacement/close is cancelled. Export leaves the save barrier intact.");
+        }
+        ui.small("Import validates format, ROM identity and capacity, then restarts paused. Resume explicitly when ready.");
+        ui.small(
+            "Export prepares a file/download; it does not acknowledge a failed automatic write.",
+        );
     }
 
     /// Error details wrap and scroll; the game remains installed beneath recoverable errors.
@@ -504,7 +582,8 @@ impl GbaApp {
                 .max_height(120.0)
                 .show(ui, |ui| {
                     if let Some(notice) = &self.notice {
-                        ui.label(notice);
+                        ui.strong(notice.kind.label());
+                        ui.add(egui::Label::new(&notice.message).wrap());
                     }
                     if let Some(warning) = &self.settings.warning {
                         ui.label(warning);
@@ -547,16 +626,22 @@ impl GbaApp {
         self.own_ui_keys(ctx);
     }
 
-    fn draw_fullscreen_control(&mut self, ui: &mut egui::Ui) {
+    fn draw_fullscreen_control(&mut self, ui: &mut egui::Ui, enabled: bool) {
         let label = if self.is_fullscreen(ui.ctx()) {
             "Exit fullscreen"
         } else {
             "Fullscreen"
         };
-        let response = ui.add(egui::Button::new(label).min_size(egui::vec2(0.0, 30.0)));
+        let response = ui.add_enabled(
+            enabled,
+            egui::Button::new(label).min_size(egui::vec2(0.0, 30.0)),
+        );
+        if response.gained_focus() {
+            response.scroll_to_me(Some(egui::Align::Center));
+        }
         #[cfg(target_arch = "wasm32")]
-        if !self.settings_open {
-            crate::presentation::register("fullscreen", &response);
+        if enabled {
+            crate::presentation::register("fullscreen", &response, ui.clip_rect());
         }
         if response.clicked() {
             self.own_ui_keys(ui.ctx());
@@ -575,60 +660,64 @@ impl GbaApp {
 
     /// All controls edit the same remembered volume and independent mute. Device
     /// readiness is asynchronous on web; diagnostics stay in the debug view.
-    pub(super) fn draw_audio_controls(&mut self, ui: &mut egui::Ui, width: f32) {
+    pub(super) fn draw_audio_controls(&mut self, ui: &mut egui::Ui, width: f32, enabled: bool) {
         use crate::audio::AudioState;
         let state = self.audio.state();
-        ui.horizontal_wrapped(|ui| {
-            if matches!(
-                state,
-                AudioState::NeedsInteraction | AudioState::Unavailable
-            ) {
-                let label = if state == AudioState::Unavailable {
-                    "Retry audio"
-                } else {
-                    "Enable audio"
-                };
-                let response = ui.add(egui::Button::new(label).min_size(egui::vec2(0.0, 30.0)));
-                #[cfg(target_arch = "wasm32")]
-                crate::presentation::register("audio", &response);
-                if response.clicked() {
-                    self.own_ui_keys(ui.ctx());
-                    response.surrender_focus();
-                    #[cfg(not(target_arch = "wasm32"))]
-                    self.audio.start();
+        ui.add_enabled_ui(enabled, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                if matches!(
+                    state,
+                    AudioState::NeedsInteraction | AudioState::Unavailable
+                ) {
+                    let label = if state == AudioState::Unavailable {
+                        "Retry audio"
+                    } else {
+                        "Enable audio"
+                    };
+                    let response = ui.add(egui::Button::new(label).min_size(egui::vec2(0.0, 30.0)));
+                    #[cfg(target_arch = "wasm32")]
+                    if enabled {
+                        crate::presentation::register("audio", &response, ui.clip_rect());
+                    }
+                    if response.clicked() {
+                        self.own_ui_keys(ui.ctx());
+                        response.surrender_focus();
+                        #[cfg(not(target_arch = "wasm32"))]
+                        self.audio.start();
+                    }
                 }
-            }
-            let mute = ui
-                .checkbox(&mut self.audio.muted, "Mute")
-                .on_hover_text("Mute the speaker without changing remembered volume");
-            let mut percent = self.audio.volume * 100.0;
-            let slider = ui
-                .scope(|ui| {
-                    ui.spacing_mut().slider_width = width.min(ui.available_width().max(40.0));
-                    ui.add(
-                        egui::Slider::new(&mut percent, 0.0..=100.0)
-                            .suffix("%")
-                            .text("Volume"),
-                    )
-                })
-                .inner;
-            if slider.changed() || mute.changed() {
-                self.audio.volume = percent / 100.0;
-                self.audio.apply_gain();
-                self.own_ui_keys(ui.ctx());
-            }
-            ui.label(match state {
-                #[cfg(target_arch = "wasm32")]
-                AudioState::Starting => "Starting",
-                AudioState::Ready if self.audio.muted => "Muted",
-                AudioState::Ready => "Ready",
-                AudioState::NeedsInteraction => "Needs interaction",
-                AudioState::Unavailable => "Unavailable",
+                let mute = ui
+                    .checkbox(&mut self.audio.muted, "Mute")
+                    .on_hover_text("Mute the speaker without changing remembered volume");
+                let mut percent = self.audio.volume * 100.0;
+                let slider = ui
+                    .scope(|ui| {
+                        ui.spacing_mut().slider_width = width.min(ui.available_width().max(40.0));
+                        ui.add(
+                            egui::Slider::new(&mut percent, 0.0..=100.0)
+                                .suffix("%")
+                                .text("Volume"),
+                        )
+                    })
+                    .inner;
+                if slider.changed() || mute.changed() {
+                    self.audio.volume = percent / 100.0;
+                    self.audio.apply_gain();
+                    self.own_ui_keys(ui.ctx());
+                }
+                ui.label(match state {
+                    #[cfg(target_arch = "wasm32")]
+                    AudioState::Starting => "Starting",
+                    AudioState::Ready if self.audio.muted => "Muted",
+                    AudioState::Ready => "Ready",
+                    AudioState::NeedsInteraction => "Needs interaction",
+                    AudioState::Unavailable => "Unavailable",
+                });
             });
+            if let Some(error) = self.audio.error() {
+                ui.label(error);
+            }
         });
-        if let Some(error) = self.audio.error() {
-            ui.label(error);
-        }
     }
 
     /// Settings suspend execution while capture owns logical-key events.
@@ -705,11 +794,19 @@ impl GbaApp {
                     ui.add_space(12.0);
                     ui.separator();
                     ui.heading("Audio");
-                    self.draw_audio_controls(ui, 250.0);
+                    self.draw_audio_controls(ui, 250.0, true);
                     ui.add_space(12.0);
                     ui.separator();
                     ui.heading("Display");
-                    ui.label("The game fits the window with sharp nearest-neighbor scaling.");
+                    ui.horizontal_wrapped(|ui| {
+                        ui.selectable_value(&mut self.settings.preferences.scaling, crate::settings::Scaling::Fit, "Fit window");
+                        ui.selectable_value(&mut self.settings.preferences.scaling, crate::settings::Scaling::Integer, "Integer pixels");
+                    });
+                    ui.label("Integer uses whole physical pixels per GBA pixel; Fit fills the available 3:2 area. Both use nearest-neighbor filtering.");
+                    if self.settings.preferences.scaling == crate::settings::Scaling::Integer && self.integer_fallback {
+                        ui.label("Fit used because the window is too small for 1×.");
+                    }
+                    self.draw_fullscreen_control(ui, true);
                     ui.add_space(12.0);
                     if self.action(ui, true, "Close settings") {
                         close_clicked = true;

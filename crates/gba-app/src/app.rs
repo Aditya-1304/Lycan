@@ -66,6 +66,39 @@ impl Operation {
     }
 }
 
+/// Operation ownership keeps errors beside the relevant controls without parsing
+/// human-readable messages to select behavior or recovery actions.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NoticeKind {
+    Bios,
+    Rom,
+    SaveRestore,
+    SaveWrite,
+    SaveImport,
+    SaveExport,
+    Emulation,
+}
+impl NoticeKind {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Bios => "BIOS loading",
+            Self::Rom => "ROM loading",
+            Self::SaveRestore => "Save restoration failed",
+            Self::SaveWrite => "Automatic save failed",
+            Self::SaveImport => "Save import",
+            Self::SaveExport => "Save export",
+            Self::Emulation => "Emulation stopped",
+        }
+    }
+}
+
+/// Bounded feedback: one operation notice and one persistent storage failure.
+/// Export/import feedback cannot erase a failed automatic-write recovery banner.
+struct AppNotice {
+    kind: NoticeKind,
+    message: String,
+}
+
 /// Original score cartridges use the normal loader and persistence route.
 const FLASH_DIAGNOSTIC_ROM: &[u8] = include_bytes!("../../../roms/gba-tests/save/flash64.gba");
 const BANKED_DIAGNOSTIC_ROM: &[u8] = include_bytes!("../../../roms/gba-tests/save/flash128.gba");
@@ -200,7 +233,9 @@ pub struct GbaApp {
     browser_revision: u32,
     #[cfg(target_arch = "wasm32")]
     browser_gameplay: bool,
-    notice: Option<String>,
+    notice: Option<AppNotice>,
+    save_failure: Option<AppNotice>,
+    integer_fallback: bool,
     /// User intent survives file operations, restoration, focus loss and reset.
     user_paused: bool,
     /// Faults are independent of user pause and clear only after reset/install.
@@ -302,6 +337,8 @@ impl GbaApp {
             #[cfg(target_arch = "wasm32")]
             browser_gameplay: false,
             notice: None,
+            save_failure: None,
+            integer_fallback: false,
             user_paused: false,
             execution_faulted: false,
             session: Session::new(),
@@ -433,7 +470,8 @@ impl GbaApp {
 
     /// Presentation actions use the same predicates as their execution paths.
     fn can_import_save(&self) -> bool {
-        self.save_identity.is_some()
+        self.session.save_status().is_some()
+            && self.save_identity.is_some()
             && !self.storage.busy
             && !self.picker_open
             && !self.bios_picker_open
@@ -445,6 +483,7 @@ impl GbaApp {
 
     fn can_export_save(&self) -> bool {
         self.save_identity.is_some()
+            && !self.restoring_save
             && !self.storage.busy
             && self
                 .session
@@ -452,9 +491,9 @@ impl GbaApp {
                 .is_some_and(|status| status.len > 0)
     }
 
-    fn report_error(&mut self, message: String) {
+    fn report_error(&mut self, kind: NoticeKind, message: String) {
         self.status.clone_from(&message);
-        self.notice = Some(message);
+        self.notice = Some(AppNotice { kind, message });
     }
 
     /// Records key-up independently of focus-local egui state. Losing focus must
@@ -894,7 +933,7 @@ impl GbaApp {
             .spawn(move || pollster::block_on(task))
         {
             self.bios_picker_open = false;
-            self.report_error(format!("BIOS picker failed: {error}"));
+            self.report_error(NoticeKind::Bios, format!("BIOS picker failed: {error}"));
         }
         #[cfg(target_arch = "wasm32")]
         wasm_bindgen_futures::spawn_local(task);
@@ -909,10 +948,13 @@ impl GbaApp {
     /// while cartridge restoration or an outstanding save write blocks replacement.
     fn load_bios_request(&mut self, name: &str, bytes: &[u8]) {
         if bytes.len() != 16384 {
-            self.report_error(format!(
-                "BIOS must be 16 KiB (16384 bytes); received {} bytes.",
-                bytes.len()
-            ));
+            self.report_error(
+                NoticeKind::Bios,
+                format!(
+                    "BIOS must be 16 KiB (16384 bytes); received {} bytes.",
+                    bytes.len()
+                ),
+            );
             return;
         }
         if self.loaded
@@ -953,7 +995,7 @@ impl GbaApp {
                 }
                 .into();
             }
-            Err(error) => self.report_error(format!("BIOS load failed: {error}")),
+            Err(error) => self.report_error(NoticeKind::Bios, format!("BIOS load failed: {error}")),
         }
     }
 
@@ -1053,7 +1095,7 @@ impl GbaApp {
         {
             self.picker_open = false;
             self.restore_backup_override(fallback_override);
-            self.report_error(format!("ROM picker failed: {error}"));
+            self.report_error(NoticeKind::Rom, format!("ROM picker failed: {error}"));
         }
         #[cfg(target_arch = "wasm32")]
         wasm_bindgen_futures::spawn_local(task);
@@ -1083,7 +1125,7 @@ impl GbaApp {
             let mut validation = Session::new();
             if let Err(error) = validation.load_rom_with_backup(bytes, backup_override) {
                 self.restore_backup_override(backup_override);
-                self.report_error(format!("ROM load failed: {error}"));
+                self.report_error(NoticeKind::Rom, format!("ROM load failed: {error}"));
                 return;
             }
             self.pending_rom = Some(PendingRom {
@@ -1156,6 +1198,7 @@ impl GbaApp {
                 .then(|| crate::saves::Identity::of(bytes));
                 self.restoring_save = self.save_identity.is_some();
                 self.storage.failed = false;
+                self.save_failure = None;
                 self.execution_faulted = false;
                 self.notice = None;
                 self.pending_rom = None;
@@ -1196,7 +1239,7 @@ impl GbaApp {
             }
             Err(error) => {
                 self.restore_backup_override(requested_override);
-                self.report_error(format!("ROM load failed: {error}"));
+                self.report_error(NoticeKind::Rom, format!("ROM load failed: {error}"));
             }
         }
     }
@@ -1225,103 +1268,8 @@ impl GbaApp {
     /// Generation and identity checks prevent stale work from acknowledging a new
     /// machine; revision checks in the core preserve edits made during a write.
     fn poll_save_storage(&mut self, ctx: &egui::Context) {
-        if let Some(completion) = self.storage.poll()
-            && self.save_identity.as_ref() == Some(&completion.identity)
-            && self.save_generation == completion.generation
-        {
-            use crate::saves::Outcome;
-            match completion.outcome {
-                Outcome::Loaded(Ok(bytes)) => {
-                    let result = (|| {
-                        if let Some(record) = &bytes {
-                            if let Some(rtc) = &record.rtc {
-                                self.session.load_rtc(rtc)?;
-                            }
-                            if let Some(backup) = &record.backup {
-                                self.session.load_save(backup)?;
-                            }
-                        }
-                        Ok::<(), &'static str>(())
-                    })();
-                    match result {
-                        Ok(()) => {
-                            self.restoring_save = false;
-                            self.storage.status = if bytes.is_some() {
-                                "Backup restored"
-                            } else {
-                                "No stored backup; new cartridge"
-                            }
-                            .into();
-                            self.sync_execution(self.host_focused, self.host_visible);
-                        }
-                        Err(error) => {
-                            self.storage.failed = true;
-                            self.storage.status = error.into();
-                        }
-                    }
-                }
-                Outcome::Loaded(Err(error)) => {
-                    self.storage.failed = true;
-                    self.storage.status =
-                        format!("Initial backup load failed: {error}; guest remains paused");
-                }
-                Outcome::Written(Ok(())) => {
-                    self.session.acknowledge_save(completion.revision);
-                    if let Some(revision) = completion.rtc_revision {
-                        self.session.acknowledge_rtc(revision);
-                    }
-                    self.storage.failed = false;
-                    self.storage.status = if self.session.persistence_dirty() {
-                        "Stored snapshot; newer backup changes remain pending".into()
-                    } else {
-                        format!("Saved revision {}", completion.revision)
-                    };
-                }
-                Outcome::Written(Err(error)) => {
-                    self.storage.failed = true;
-                    self.storage.status =
-                        format!("Save failed: {error}; bytes pending — Retry or Export");
-                }
-                Outcome::Imported(Ok(Some(bytes))) => {
-                    self.save_import_open = false;
-                    match self.session.import_save(&bytes) {
-                        Ok(()) => {
-                            self.storage.failed = false;
-                            self.restoring_save = false;
-                            // Restart guest registers so the imported score is read
-                            // from cartridge bytes rather than overwritten by the old
-                            // score still held in CPU registers. Keep execution paused.
-                            self.reset_demo();
-                            self.user_paused = true;
-                            self.sync_execution(self.host_focused, self.host_visible);
-                            self.storage.status =
-                                "Imported; persistence pending — Resume to display".into();
-                        }
-                        Err(error) => {
-                            self.storage.status = format!("Import rejected: {error}");
-                            self.report_error(self.storage.status.clone());
-                            self.report_error(self.storage.status.clone());
-                        }
-                    }
-                }
-                Outcome::Imported(Ok(None)) => {
-                    self.save_import_open = false;
-                    self.storage.status = "Import cancelled".into();
-                }
-                Outcome::Imported(Err(error)) => {
-                    self.save_import_open = false;
-                    self.storage.status = format!("Import rejected: {error}")
-                }
-                Outcome::Exported(Ok(true)) => {
-                    self.storage.status =
-                        "Export prepared; storage acknowledgement unchanged".into()
-                }
-                Outcome::Exported(Ok(false)) => self.storage.status = "Export cancelled".into(),
-                Outcome::Exported(Err(error)) => {
-                    self.storage.status = format!("Export failed: {error}");
-                    self.report_error(self.storage.status.clone());
-                }
-            }
+        if let Some(completion) = self.storage.poll() {
+            self.apply_save_completion(completion);
         }
         if !self.storage.busy && !self.storage.failed {
             if self.restoring_save {
@@ -1349,45 +1297,143 @@ impl GbaApp {
                 self.install_rom(&pending.name, &pending.bytes, pending.backup_override);
             }
         }
+        // Worker-dispatch failures are host outcomes too. Retain their actual
+        // reason once; an export cannot replace it with download feedback.
+        if self.storage.failed && self.save_failure.is_none() {
+            self.remember_save_failure(if self.restoring_save {
+                NoticeKind::SaveRestore
+            } else {
+                NoticeKind::SaveWrite
+            });
+        }
         if self.storage.busy {
             ctx.request_repaint_after(Duration::from_millis(20));
         }
     }
 
-    /// Imports run with the guest paused and after any outstanding write. Exports
-    /// include identity and the latest bytes, including data from a failed write.
-    fn draw_save_controls(&mut self, ui: &mut egui::Ui) {
-        if self.save_identity.is_none() {
+    fn remember_save_failure(&mut self, kind: NoticeKind) {
+        self.save_failure = Some(AppNotice {
+            kind,
+            message: self.storage.status.clone(),
+        });
+    }
+
+    /// Applies one definitive result only to its matching installed cartridge.
+    /// Presentation feedback is separate from storage acknowledgement/barriers.
+    fn apply_save_completion(&mut self, completion: crate::saves::Completion) {
+        if self.save_identity.as_ref() != Some(&completion.identity)
+            || self.save_generation != completion.generation
+        {
             return;
         }
-        ui.label(&self.storage.status);
-        ui.horizontal_wrapped(|ui| {
-            if ui
-                .add_enabled(!self.storage.busy, egui::Button::new("Retry save storage"))
-                .clicked()
-            {
+        use crate::saves::Outcome;
+        match completion.outcome {
+            Outcome::Loaded(Ok(bytes)) => {
+                let result = (|| {
+                    if let Some(record) = &bytes {
+                        if let Some(rtc) = &record.rtc {
+                            self.session.load_rtc(rtc)?;
+                        }
+                        if let Some(backup) = &record.backup {
+                            self.session.load_save(backup)?;
+                        }
+                    }
+                    Ok::<(), &'static str>(())
+                })();
+                match result {
+                    Ok(()) => {
+                        self.restoring_save = false;
+                        self.save_failure = None;
+                        self.storage.status = if bytes.is_some() {
+                            "Backup restored"
+                        } else {
+                            "No stored backup; new cartridge"
+                        }
+                        .into();
+                        self.sync_execution(self.host_focused, self.host_visible);
+                    }
+                    Err(error) => {
+                        self.storage.failed = true;
+                        self.storage.status =
+                            format!("Save restoration failed: {error}; guest remains paused");
+                        self.remember_save_failure(NoticeKind::SaveRestore);
+                    }
+                }
+            }
+            Outcome::Loaded(Err(error)) => {
+                self.storage.failed = true;
+                self.storage.status =
+                    format!("Initial backup load failed: {error}; guest remains paused");
+                self.remember_save_failure(NoticeKind::SaveRestore);
+            }
+            Outcome::Written(Ok(())) => {
+                self.session.acknowledge_save(completion.revision);
+                if let Some(revision) = completion.rtc_revision {
+                    self.session.acknowledge_rtc(revision);
+                }
                 self.storage.failed = false;
-                ui.ctx().request_repaint();
+                self.save_failure = None;
+                self.storage.status = if self.session.persistence_dirty() {
+                    "Stored snapshot; newer backup changes remain pending".into()
+                } else {
+                    format!("Saved revision {}", completion.revision)
+                };
             }
-            if ui
-                .add_enabled(
-                    self.can_import_save(),
-                    egui::Button::new("Import cartridge save"),
-                )
-                .clicked()
-            {
-                self.import_cartridge_save(ui.ctx());
+            Outcome::Written(Err(error)) => {
+                self.storage.failed = true;
+                self.storage.status =
+                    format!("Save failed: {error}; bytes pending — Retry or Export");
+                self.remember_save_failure(NoticeKind::SaveWrite);
             }
-            if ui
-                .add_enabled(
-                    self.can_export_save(),
-                    egui::Button::new("Export cartridge save"),
-                )
-                .clicked()
-            {
-                self.export_cartridge_save(ui.ctx());
+            Outcome::Imported(Ok(Some(bytes))) => {
+                self.save_import_open = false;
+                match self.session.import_save(&bytes) {
+                    Ok(()) => {
+                        self.storage.failed = false;
+                        self.save_failure = None;
+                        self.restoring_save = false;
+                        // Restart guest registers so the imported score is read
+                        // from cartridge bytes rather than overwritten by the old
+                        // score still held in CPU registers. Keep execution paused.
+                        self.reset_demo();
+                        self.user_paused = true;
+                        self.sync_execution(self.host_focused, self.host_visible);
+                        self.storage.status =
+                            "Imported; persistence pending — Resume to display".into();
+                        self.notice = Some(AppNotice {
+                            kind: NoticeKind::SaveImport,
+                            message: self.storage.status.clone(),
+                        });
+                    }
+                    Err(error) => {
+                        self.storage.status = format!("Import rejected: {error}");
+                        self.report_error(NoticeKind::SaveImport, self.storage.status.clone());
+                    }
+                }
             }
-        });
+            Outcome::Imported(Ok(None)) => {
+                self.save_import_open = false;
+                self.storage.status = "Import cancelled".into();
+            }
+            Outcome::Imported(Err(error)) => {
+                self.save_import_open = false;
+                self.storage.status = format!("Import rejected: {error}");
+                self.report_error(NoticeKind::SaveImport, self.storage.status.clone());
+            }
+            Outcome::Exported(Ok(true)) => {
+                self.storage.status =
+                        "Export prepared. Check the saved file/download; automatic storage acknowledgement is unchanged.".into();
+                self.notice = Some(AppNotice {
+                    kind: NoticeKind::SaveExport,
+                    message: self.storage.status.clone(),
+                });
+            }
+            Outcome::Exported(Ok(false)) => self.storage.status = "Export cancelled".into(),
+            Outcome::Exported(Err(error)) => {
+                self.storage.status = format!("Export failed: {error}");
+                self.report_error(NoticeKind::SaveExport, self.storage.status.clone());
+            }
+        }
     }
 
     /// Converts the core's row-major BGR555 pixels into the shared egui image.
@@ -1769,7 +1815,7 @@ impl GbaApp {
             }
         });
 
-        self.draw_audio_controls(ui, 180.0);
+        self.draw_audio_controls(ui, 180.0, !self.settings_open);
         ui.label(self.audio.status());
         let (produced, dropped, empty) = self.session.pcm_counters();
         ui.label(format!("Core PCM: 32768 Hz | produced {produced} | staging drops {dropped} | empty FIFO {empty}"));
@@ -1996,7 +2042,9 @@ impl eframe::App for GbaApp {
             #[cfg(not(target_arch = "wasm32"))]
             match file.bytes() {
                 Ok(bytes) => self.load_rom_bytes(&name, &bytes),
-                Err(error) => self.report_error(format!("ROM read failed: {error}")),
+                Err(error) => {
+                    self.report_error(NoticeKind::Rom, format!("ROM read failed: {error}"))
+                }
             }
             #[cfg(target_arch = "wasm32")]
             {
@@ -2027,7 +2075,9 @@ impl eframe::App for GbaApp {
             self.bios_picker_open = false;
             match completion.result {
                 Some((name, Ok(bytes))) => self.load_bios_request(&name, &bytes),
-                Some((_, Err(error))) => self.report_error(format!("BIOS read failed: {error}")),
+                Some((_, Err(error))) => {
+                    self.report_error(NoticeKind::Bios, format!("BIOS read failed: {error}"))
+                }
                 None => {} // Cancellation preserves installed firmware and explicit pause.
             }
         }
@@ -2043,7 +2093,7 @@ impl eframe::App for GbaApp {
                     Ok(bytes) => self.load_rom_request(&name, &bytes, backup_override),
                     Err(error) => {
                         self.restore_backup_override(backup_override);
-                        self.report_error(format!("ROM read failed: {error}"));
+                        self.report_error(NoticeKind::Rom, format!("ROM read failed: {error}"));
                     }
                 }
             } else {
@@ -2108,7 +2158,10 @@ impl eframe::App for GbaApp {
             Ok(None) => {}
             Err(error) => {
                 self.audio.set_playing(false);
-                self.report_error(format!("Guest execution failed: {error}"));
+                self.report_error(
+                    NoticeKind::Emulation,
+                    format!("Guest execution failed: {error}"),
+                );
                 self.execution_faulted = true;
                 self.sync_execution(focused, visible);
                 return;
@@ -2266,10 +2319,129 @@ fn player_screen_size(available: egui::Vec2) -> egui::Vec2 {
     fitted_screen_size(available)
 }
 
+/// Display sizing is host presentation only. Integer multipliers count physical
+/// pixels; fractional Fit remains usable when a viewport cannot contain 1x.
+struct ScreenLayout {
+    size: egui::Vec2,
+    integer_fallback: bool,
+}
+
+fn player_screen_layout(
+    available: egui::Vec2,
+    scaling: crate::settings::Scaling,
+    pixels_per_point: f32,
+) -> ScreenLayout {
+    let integer = scaling == crate::settings::Scaling::Integer;
+    let multiplier = ((available.x * pixels_per_point / WIDTH as f32)
+        .min(available.y * pixels_per_point / HEIGHT as f32))
+    .floor();
+    let integer_fallback = integer && multiplier < 1.0;
+    let size = if integer && !integer_fallback {
+        egui::vec2(WIDTH as f32, HEIGHT as f32) * (multiplier / pixels_per_point)
+    } else {
+        player_screen_size(available)
+    };
+    ScreenLayout {
+        size,
+        integer_fallback,
+    }
+}
+
 /// Resizing must fill the available area without a scale cap or aspect distortion.
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Export is a recovery copy, never acknowledgement of a failed automatic
+    // write. Its completion must not replace the persistent underlying reason.
+    #[test]
+    fn export_keeps_the_failed_write_reason_and_dirty_revision() {
+        let mut app = GbaApp::create(false);
+        app.load_rom_bytes("sram.gba", SRAM_ROM);
+        app.restoring_save = false;
+        app.sync_execution(true, true);
+        app.session.advance_frame().unwrap();
+        assert!(app.session.persistence_dirty());
+        let completion = |outcome| crate::saves::Completion {
+            identity: app.save_identity.unwrap(),
+            generation: app.save_generation,
+            revision: 0,
+            rtc_revision: None,
+            outcome,
+        };
+        let failed = completion(crate::saves::Outcome::Written(Err("disk full".into())));
+        let exported = completion(crate::saves::Outcome::Exported(Ok(true)));
+        app.apply_save_completion(failed);
+        let dirty = app.session.persistence_dirty();
+        app.apply_save_completion(exported);
+        assert!(app.storage.failed);
+        assert_eq!(app.session.persistence_dirty(), dirty);
+        assert!(
+            app.save_failure
+                .as_ref()
+                .is_some_and(|failure| failure.message.contains("disk full"))
+        );
+    }
+
+    // A rejected file read/format never reaches session.import_save. Previously
+    // its reason appeared only in debug storage text, leaving normal players blind.
+    #[test]
+    fn rejected_import_is_visible_without_changing_cartridge_data() {
+        let mut app = GbaApp::create(false);
+        app.load_rom_bytes("sram.gba", SRAM_ROM);
+        app.restoring_save = false;
+        app.save_import_open = true;
+        let before = app.session.save_image().unwrap().bytes;
+        app.apply_save_completion(crate::saves::Completion {
+            identity: app.save_identity.unwrap(),
+            generation: app.save_generation,
+            revision: 0,
+            rtc_revision: None,
+            outcome: crate::saves::Outcome::Imported(Err("ROM identity mismatch".into())),
+        });
+        assert!(!app.save_import_open);
+        assert_eq!(app.session.save_image().unwrap().bytes, before);
+        assert_eq!(
+            app.notice.as_ref().map(|notice| notice.message.as_str()),
+            Some("Import rejected: ROM identity mismatch")
+        );
+    }
+
+    // Restoring SRAM exposes initialized bytes, not a validated stored save. An
+    // export here would present blank data as recovery after a failed storage read.
+    #[test]
+    fn unresolved_restore_cannot_export_initialized_backup() {
+        let mut app = GbaApp::create(false);
+        app.load_rom_bytes("sram.gba", SRAM_ROM);
+        app.storage.failed = true;
+        assert!(app.restoring_save);
+        assert!(
+            app.can_import_save(),
+            "Validated import remains a recovery path"
+        );
+        assert!(
+            !app.can_export_save(),
+            "Export offered unvalidated blank backup"
+        );
+    }
+
+    // Fit-only tests miss fractional host scale: Integer must count physical
+    // pixels, fall back below 1x, and recover without changing the preference.
+    #[test]
+    fn integer_display_uses_physical_pixels_and_recovers_after_small_viewport() {
+        use crate::settings::Scaling;
+        let large = player_screen_layout(egui::vec2(500.0, 340.0), Scaling::Integer, 1.5);
+        assert_eq!(large.size, egui::vec2(480.0, 320.0));
+        assert!(!large.integer_fallback);
+        let small = player_screen_layout(egui::vec2(100.0, 80.0), Scaling::Integer, 1.5);
+        assert_eq!(small.size, egui::vec2(100.0, 100.0 * 2.0 / 3.0));
+        assert!(small.integer_fallback);
+        assert!(
+            !player_screen_layout(egui::vec2(500.0, 340.0), Scaling::Integer, 2.0).integer_fallback
+        );
+        let fit = player_screen_layout(egui::vec2(500.0, 340.0), Scaling::Fit, 1.5);
+        assert_eq!(fit.size, player_screen_size(egui::vec2(500.0, 340.0)));
+    }
 
     // A valid cartridge selected before firmware must survive until BIOS startup.
     #[test]

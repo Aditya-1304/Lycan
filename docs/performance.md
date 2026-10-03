@@ -4205,3 +4205,119 @@ post-change sustained speed/audio/memory and timing comparison.
 No native/browser UI was controlled automatically. The recorded baselines were
 not recaptured; automated regression/isolation evidence does not establish measured
 end-to-end performance parity. Pass 5 interaction acceptance remains pending.
+
+## UI errors, save recovery and responsive closeout — 2026-10-03
+
+Implemented `UI.md` Pass 6 under the explicit implementation request. Existing
+native/browser baseline records and user-supplied values remain unchanged. This
+entry records implementation/build evidence; platform interaction and sustained
+host performance acceptance remain pending and do not close Slice 32.
+
+### Resulting behavior
+
+Operation-owned BIOS, ROM, import, export and emulation notices show actual reasons
+with wrapping/scrolling. Save-restoration/write failures retain a separate persistent
+banner: export feedback cannot replace the failed automatic-write reason or
+acknowledge dirty data. Retry, validated Import and valid Export use the same action
+predicates in the normal Game menu, recovery banner and diagnostic view. Restoration
+blocks Resume and Export of initialized/unvalidated backup bytes, while safe Import
+remains available. RTC-only cartridges explain why raw backup actions are unavailable.
+
+Save status distinguishes Restoring, Saving, Saved and unresolved capacity. Recovery
+explains close/refresh risk, export preparation and unchanged storage acknowledgement.
+Unknown hardware and unresolved EEPROM capacity have explicit explanations and
+request-local loader overrides on both launch and player layouts. Cancellation of
+pending replacement still leaves issued storage writes intact; no discard/continue
+policy was introduced. Import success restarts paused through the existing path;
+read/format rejection now shows its actual reason without mutating cartridge data.
+
+Display settings expose persisted Fit/Integer preferences and platform fullscreen.
+Integer computes whole physical-pixel multipliers using current pixels-per-point,
+falls back to fractional Fit below 1x, and reports that fallback without changing the
+preference. Framebuffer origin is aligned to physical pixels; 3:2 aspect, nearest
+filtering, texture ownership and generation-based uploads remain intact. Long asset
+names wrap or truncate outside the action row, with the full installed ROM name in
+the Game menu. Bounded status scrolling and overflow scrolling keep recovery/actions
+reachable in short/high-scale layouts. Newly focused action buttons scroll into view.
+Browser gesture targets intersect the actual UI clip rectangle; obscured background
+controls do not publish targets while Settings owns the foreground.
+
+### Regression/build evidence
+
+| Check | Result |
+| --- | --- |
+| `cargo test --locked -p gba-core -p gba-session -p gba-app` | PASS: 85 tests, zero failures; doc tests pass |
+| `cargo clippy --locked --workspace --all-targets -- -D warnings` | PASS |
+| `cargo check --locked -p gba-app` | PASS |
+| `cargo check --locked -p gba-app --target wasm32-unknown-unknown` | PASS |
+| `cargo build --locked --release -p gba-app` | PASS |
+| `env -u NO_COLOR trunk --config web/Trunk.toml build --release` | PASS |
+| Existing browser input, Worklet, audio and presentation test files | PASS: four files, seven cases |
+| JavaScript syntax, Rust formatting and diff whitespace | PASS |
+| Release `verify-raster` | PASS: six frozen scanout/state/timing checkpoints |
+| Release `verify-noise` | PASS: 1800-frame contracts at both advance sizes; zero staging drops/underruns |
+| Native SRAM, EEPROM 8 KiB and RTC save probes | PASS: separate-process write/reopen, identity/export/import/replacement rejection checks in fresh temporary storage |
+
+Focused RED demonstrated Export offering unvalidated initialized SRAM after a restore
+failure, rejected import feedback missing from normal presentation, and export
+completion losing the automatic-write reason. Integer sizing tests initially failed
+because the sizing API did not exist. All are GREEN. Existing generation, revision,
+input capture, pause, lifecycle and save-barrier tests remain green. Raw test and
+post-change headless benchmark logs are in `target/ui-closeout-evidence/`.
+
+### Performance boundary and current measurements
+
+Only application presentation/completion feedback and browser control clipping
+changed. Core/session source, pacing, cartridge persistence algorithms, audio adapters,
+Worklet, dependency configuration and features are unchanged. View helpers do not
+advance the machine, drain PCM or clone save images; recovery actions clone snapshots
+only when actually exporting. No thread, Worker, lock, growing history, serialization
+loop, new timer or unconditional idle repaint was added. Feedback retains at most
+one operation notice and one storage-failure reason; sizing/scrolling work is bounded.
+
+A bounded headless sanity comparison used the existing released `gba-tools` binary,
+the same frozen workload/checkpoints and 600 complete advances. Builds were idle for
+the runs. These are core-only measurements, with no UI, texture or device audio cost.
+
+| Scenario | Before mean / p95 (ms) | After mean / p95 (ms) |
+| --- | --- | --- |
+| PCM | 0.259 / 0.342 | 0.248 / 0.260 |
+| IRQ sprites | 0.351 / 0.355 | 0.350 / 0.357 |
+
+Frozen outputs retained their hashes/cycle/instruction results. The paired core-only
+runs show no material change; a single pair does not establish statistical parity,
+and the small IRQ-sprites p95 difference is not evidence of a reproducible slowdown.
+The unchanged core binary does not measure additional host UI cost. Native/browser
+UI/total mean and p95, delivered speed, visible/hidden legend cost, sustained device
+audio and host memory after this pass are **not measured**. Existing baseline data
+alone does not establish those post-change results.
+
+### Acceptance checklist
+
+- [x] Operation-specific errors and persistent normal-player save recovery implemented.
+- [x] Import/export/retry and unresolved backup/capacity controls available outside F1.
+- [x] Fit/Integer, physical alignment, small-window fallback and overflow handling implemented.
+- [x] Required automated gates, release artifacts and applicable frozen guest/save probes pass.
+- [x] Core/session/audio/storage algorithms and recorded baselines preserved.
+- [ ] Linux, Chrome and Brave independently confirm the full `UI.md` interaction matrix.
+- [ ] Native/browser post-change timing and sustained speed/audio/memory checks against existing baselines.
+- [ ] Final UI acceptance: no unexplained UI-attributable performance regression.
+
+Run from `gba-rs`:
+
+```sh
+./target/release/gba-app
+env -u NO_COLOR trunk --config web/Trunk.toml serve --release
+```
+
+Use the existing recorded ROM/checkpoint, viewport, scale and audio conditions for
+post-change comparison. On all three platforms check long names, narrow/short
+windows and enlarged UI/zoom; Fit/Integer and sub-1x fallback/restoration; keyboard
+focus visibility and recovery controls inside scrolling regions. Check save restore
+and write failures separately, rejected/cancelled/valid imports, retry, export without
+barrier release, unresolved capacity and overrides, replacement cancellation and
+native close barriers. Recheck previous-pass controls/capture, pause/reset,
+fullscreen and audio/lifecycle interactions. No UI was launched or controlled
+automatically; visual and sustained host-performance acceptance remains user-owned.
+
+Slice 32 compatibility, packaging, deployment and wider release work remain separate.
