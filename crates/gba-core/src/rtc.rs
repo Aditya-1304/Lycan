@@ -47,6 +47,17 @@ impl RtcImage {
     }
 }
 
+/// S-3511 command selectors, independent of command bit order and read/write
+/// direction. Named registers keep wire IDs consistent across reads and writes.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Register {
+    Reset,
+    Control,
+    DateTime,
+    Time,
+    Unsupported,
+}
+
 pub(crate) struct Rtc {
     pub image: RtcImage,
     now: u64,
@@ -168,7 +179,7 @@ impl Rtc {
                 self.buffer = [0; 7];
                 if command & 0xf0 == 0x60 {
                     self.command = command;
-                    if command & 0x0e == 0 {
+                    if self.register() == Register::Reset {
                         self.image.control = 0;
                         self.changed();
                     }
@@ -183,12 +194,22 @@ impl Rtc {
         true
     }
 
+    fn register(&self) -> Register {
+        match (self.command >> 1) & 7 {
+            0 => Register::Reset,
+            1 => Register::Control,
+            2 => Register::DateTime,
+            3 => Register::Time,
+            _ => Register::Unsupported,
+        }
+    }
+
     fn length(&self) -> usize {
-        match self.command & 0x0e {
-            2 => 7,
-            4 => 1,
-            6 => 3,
-            _ => 0,
+        match self.register() {
+            Register::Control => 1,
+            Register::DateTime => 7,
+            Register::Time => 3,
+            Register::Reset | Register::Unsupported => 0,
         }
     }
 
@@ -217,11 +238,11 @@ impl Rtc {
             bcd((seconds / 60 % 60) as u8),
             bcd((seconds % 60) as u8),
         ];
-        match self.command & 0x0e {
-            2 => self.buffer = values,
-            4 => self.buffer[0] = self.image.control,
-            6 => self.buffer[..3].copy_from_slice(&values[4..]),
-            _ => self.buffer.fill(0xff),
+        match self.register() {
+            Register::Control => self.buffer[0] = self.image.control,
+            Register::DateTime => self.buffer = values,
+            Register::Time => self.buffer[..3].copy_from_slice(&values[4..]),
+            Register::Reset | Register::Unsupported => self.buffer.fill(0xff),
         }
         if self.command & 1 == 0 {
             self.buffer.fill(0);
@@ -231,12 +252,16 @@ impl Rtc {
     /// Accept only complete valid BCD settings; an interrupted transaction never
     /// changes persisted state. Time-only writes retain the current calendar day.
     fn commit(&mut self) {
-        if self.command & 0x0e == 4 {
+        let register = self.register();
+        if register == Register::Control {
             self.image.control = self.buffer[0] & 0x6a;
             self.changed();
             return;
         }
-        let full = self.command & 0x0e == 2;
+        if !matches!(register, Register::DateTime | Register::Time) {
+            return;
+        }
+        let full = register == Register::DateTime;
         let offset = if full { 4 } else { 0 };
         let raw_hour = self.buffer[offset];
         let Some(mut hour) = unbcd(raw_hour & 0x7f) else {
@@ -328,4 +353,94 @@ fn date(mut days: u64) -> (u8, u8, u8) {
         month += 1;
     }
     (year, month, days as u8 + 1)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Rtc;
+
+    const DATA: u32 = 0x0800_00c4;
+    const DIRECTION: u32 = 0x0800_00c6;
+    const ENABLE: u32 = 0x0800_00c8;
+
+    /// Drive the public GPIO interface using the SIIRTC_V001 wire protocol:
+    /// commands are MSB-first, parameters and response bytes are LSB-first.
+    /// Repeated low writes match the library's bit-banging without advancing bits.
+    fn send(chip: &mut Rtc, value: u8, command: bool) {
+        for index in 0..8 {
+            let shift = if command { 7 - index } else { index };
+            let low = 4 | (u16::from((value >> shift) & 1) << 1);
+            for _ in 0..3 {
+                chip.write(DATA, low);
+            }
+            chip.write(DATA, low | 1);
+        }
+    }
+
+    fn begin(chip: &mut Rtc, command: u8) {
+        chip.write(DATA, 1);
+        chip.write(DATA, 5);
+        chip.write(DIRECTION, 7);
+        send(chip, command, true);
+    }
+
+    fn write(chip: &mut Rtc, command: u8, bytes: &[u8]) {
+        begin(chip, command);
+        for byte in bytes {
+            send(chip, *byte, false);
+        }
+        chip.write(DATA, 1);
+    }
+
+    fn read<const N: usize>(chip: &mut Rtc, command: u8) -> [u8; N] {
+        begin(chip, command);
+        chip.write(DIRECTION, 5);
+        let mut bytes = [0; N];
+        for byte in &mut bytes {
+            for shift in 0..8 {
+                for _ in 0..5 {
+                    chip.write(DATA, 4);
+                }
+                chip.write(DATA, 5);
+                *byte |= (((chip.read(DATA).unwrap() >> 1) & 1) as u8) << shift;
+            }
+        }
+        chip.write(DATA, 1);
+        bytes
+    }
+
+    /// The original guest shared the emulator's swapped status/date commands.
+    /// This independent serial transaction catches retail software receiving a
+    /// year instead of status, or status bytes in place of calendar fields.
+    /// Expected commands and calendar bytes come from SIIRTC_V001, not chip internals.
+    #[test]
+    fn hardware_commands_read_and_write_distinct_clock_registers() {
+        let mut chip = Rtc::new();
+        chip.set_time(1_700_000_000);
+        chip.write(ENABLE, 1);
+        assert_eq!(read::<1>(&mut chip, 0x63), [0x40]);
+        assert_eq!(
+            read::<7>(&mut chip, 0x65),
+            [0x23, 0x11, 0x14, 2, 0x22, 0x13, 0x20]
+        );
+        assert_eq!(read::<3>(&mut chip, 0x67), [0x22, 0x13, 0x20]);
+
+        write(&mut chip, 0x62, &[0x42]);
+        assert_eq!(read::<1>(&mut chip, 0x63), [0x42]);
+        let configured = [0x24, 2, 0x29, 4, 0x23, 0x59, 0x58];
+        write(&mut chip, 0x64, &configured);
+        assert_eq!(read::<7>(&mut chip, 0x65), configured);
+        assert_eq!(read::<1>(&mut chip, 0x63), [0x42]);
+
+        write(&mut chip, 0x66, &[0x12, 0x34, 0x56]);
+        assert_eq!(
+            read::<7>(&mut chip, 0x65),
+            [0x24, 2, 0x29, 4, 0x12, 0x34, 0x56]
+        );
+        write(&mut chip, 0x60, &[]);
+        assert_eq!(read::<1>(&mut chip, 0x63), [0]);
+        write(&mut chip, 0x62, &[0x40]);
+        assert_eq!(read::<1>(&mut chip, 0x63), [0x40]);
+        assert_eq!(read::<3>(&mut chip, 0x67), [0x12, 0x34, 0x56]);
+    }
 }
