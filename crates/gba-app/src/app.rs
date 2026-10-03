@@ -253,7 +253,21 @@ pub struct GbaApp {
 impl GbaApp {
     /// Starts a clean player session, or loads the PCM fixture for diagnostics.
     pub fn new(cc: &eframe::CreationContext<'_>, debug_ui: bool) -> Self {
-        Self::create_with_settings(debug_ui, crate::settings::Settings::load(cc.storage))
+        let mut app =
+            Self::create_with_settings(debug_ui, crate::settings::Settings::load(cc.storage));
+        // Device startup is excluded from headless constructors. Saved gain/mute
+        // are installed before a native stream can play or a web gesture unlocks.
+        app.audio.initialize();
+        #[cfg(target_arch = "wasm32")]
+        crate::presentation::initialize(
+            &cc.egui_ctx,
+            if app.audio.muted {
+                0.0
+            } else {
+                app.audio.volume
+            },
+        );
+        app
     }
 
     #[cfg(test)]
@@ -1755,13 +1769,7 @@ impl GbaApp {
             }
         });
 
-        ui.horizontal(|ui| {
-            if ui.button("Enable audio").clicked() {
-                self.audio.start();
-            }
-            ui.checkbox(&mut self.audio.muted, "Mute");
-            ui.add(egui::Slider::new(&mut self.audio.volume, 0.0..=1.0).text("Volume"));
-        });
+        self.draw_audio_controls(ui, 180.0);
         ui.label(self.audio.status());
         let (produced, dropped, empty) = self.session.pcm_counters();
         ui.label(format!("Core PCM: 32768 Hz | produced {produced} | staging drops {dropped} | empty FIFO {empty}"));

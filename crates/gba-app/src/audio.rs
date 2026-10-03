@@ -13,6 +13,16 @@ use gba_session::{Session, StereoResampler};
 #[cfg(not(target_arch = "wasm32"))]
 use native::Output;
 
+/// Normal player states exclude queue/rate diagnostics and guest silence.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum AudioState {
+    #[cfg(target_arch = "wasm32")]
+    Starting,
+    Ready,
+    NeedsInteraction,
+    Unavailable,
+}
+
 /// Frontend-owned playback state and reusable sample staging for one session.
 pub struct Audio {
     output: Option<Output>,
@@ -43,21 +53,46 @@ impl Default for Audio {
 }
 
 impl Audio {
-    /// Invoked by an explicit frontend gesture on both platforms.
-    pub fn start(&mut self) {
-        if self.output.is_none() {
-            match Output::start() {
-                Ok(output) => {
-                    self.output = Some(output);
-                    self.error = None;
-                }
-                Err(error) => self.error = Some(error),
-            }
-        } else {
-            #[cfg(target_arch = "wasm32")]
-            let _ = Output::start();
+    /// Initializes the native stream once, with restored gain before playback.
+    /// Web construction attaches to the page bridge; DOM gestures unlock it.
+    pub fn initialize(&mut self) {
+        if self.output.is_some() {
+            return;
         }
-        self.clear();
+        match Output::start(self.effective_gain()) {
+            Ok(mut output) => {
+                output.set_playing(self.playing);
+                self.output = Some(output);
+                self.error = None;
+            }
+            Err(error) => self.error = Some(error),
+        }
+    }
+
+    /// Explicit retry preserves healthy queues and never changes remembered mute.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn start(&mut self) {
+        if self
+            .output
+            .as_ref()
+            .is_some_and(|output| output.failure().is_some())
+        {
+            self.output = None;
+            self.clear();
+        }
+        self.initialize();
+    }
+
+    fn effective_gain(&self) -> f32 {
+        if self.muted { 0.0 } else { self.volume }
+    }
+
+    /// Gain edits are event work, including while paused; streams are retained.
+    pub fn apply_gain(&mut self) {
+        let gain = self.effective_gain();
+        if let Some(output) = &mut self.output {
+            output.set_gain(gain);
+        }
     }
 
     /// Invalidates prepared host audio and resets interpolation history.
@@ -91,6 +126,13 @@ impl Audio {
             return;
         };
         let Some(output_rate) = NonZeroU32::new(output.rate()) else {
+            // A suspended/failed browser device is a host playback boundary.
+            // Do not interpolate across discarded PCM when its context resumes.
+            if self.rate != 0 {
+                self.rate = 0;
+                self.resampler = None;
+                output.clear();
+            }
             return;
         };
         let rate = output_rate.get();
@@ -110,13 +152,31 @@ impl Audio {
         output.submit(&self.converted);
     }
 
-    /// Lightweight player presentation; queue diagnostics remain in the debug view.
-    pub fn enabled(&self) -> bool {
-        self.output.is_some()
+    /// Adapter readiness, separate from remembered volume/mute and diagnostics.
+    pub fn state(&self) -> AudioState {
+        if self.error().is_some() {
+            return AudioState::Unavailable;
+        }
+        #[cfg(target_arch = "wasm32")]
+        if let Some(output) = &self.output {
+            return match output.state().as_str() {
+                "ready" => AudioState::Ready,
+                "starting" => AudioState::Starting,
+                "unavailable" => AudioState::Unavailable,
+                _ => AudioState::NeedsInteraction,
+            };
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        if self.output.is_some() {
+            return AudioState::Ready;
+        }
+        AudioState::NeedsInteraction
     }
 
-    pub fn error(&self) -> Option<&str> {
-        self.error.as_deref()
+    pub fn error(&self) -> Option<String> {
+        self.error
+            .clone()
+            .or_else(|| self.output.as_ref().and_then(Output::failure))
     }
 
     /// Formats negotiated rate, bounded queue state and adapter error counters.

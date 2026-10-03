@@ -4128,3 +4128,80 @@ no historical audio or catch-up burst, and reset/replacement barriers with save
 operations pending. Use the same recorded ROM/checkpoint, viewport/scale and audio
 conditions for post-change timing and sustained gameplay checks. Fullscreen and
 expanded audio UX remain in Pass 5.
+
+## UI audio and fullscreen implementation — 2026-10-03
+
+Implemented `UI.md` Pass 5 in the application and browser adapters. Linux attempts
+startup once with restored gain installed before stream playback; explicit retry
+replaces only a failed stream. Volume remains independent of mute and paused gain
+edits apply immediately. Normal controls show readiness/errors; queue and sample
+rate diagnostics remain in the debug view.
+
+The browser attaches to the existing audio bridge without claiming readiness.
+Trusted canvas pointer/keyboard gestures request context resume before asynchronous
+Worklet loading. Healthy unlocks preserve the queue and reuse the context/node;
+known initialization failures require the visible Retry action. Processor failure
+or a closed context reports reload recovery. Context suspension invalidates queued
+history even without a page blur, and an observed unavailable rate discards host
+interpolation history. Existing session lifecycle invalidation remains intact.
+
+Browser fullscreen targets `gba_canvas` directly from the actual pointer or focused
+keyboard event. Its label reads `document.fullscreenElement`; rejection and external
+exit request event-driven repaint. Native fullscreen uses viewport commands and F11.
+Capture/settings/menu dismissal precedes native Escape exit. The player toolbar
+remains visible in fullscreen; no hide timer, animation, wrapper or dependency was
+added.
+
+### Regression and build evidence
+
+| Check | Result |
+| --- | --- |
+| `cargo test --locked -p gba-core -p gba-session -p gba-app` | PASS: 81 tests, zero failures; doc tests pass |
+| `cargo clippy --locked --workspace --all-targets -- -D warnings` | PASS |
+| Native and `wasm32-unknown-unknown` app checks | PASS |
+| Native release app build and Trunk release browser build | PASS |
+| `node --test web/input.test.cjs web/pcm-worklet.test.cjs web/audio.test.cjs web/presentation.test.cjs` | PASS: all four files, seven cases |
+| JavaScript syntax, formatting and diff whitespace checks | PASS |
+| Release `verify-pulse`, `verify-wave`, `verify-noise` | PASS: frozen guest contracts at both advance sizes; zero staging drops/underruns |
+| Core/session source, dependencies/features and recorded baseline values | Unchanged |
+
+Meaningful RED preceded the fixes for healthy unlock clearing the queue, context
+suspension retaining queued history, drag release accidentally requesting fullscreen,
+and one Escape dismissing a menu and exiting fullscreen together. The readiness/
+error tests initially failed because the bridge exposed no asynchronous state API.
+Existing input, persistence, pause and Worklet regressions remain green.
+
+No work was added inside core execution, native audio callbacks or the Worklet.
+Guest pacing, framebuffer generation/texture ownership and persistence algorithms
+are unchanged. Presentation publishes two bounded browser gesture targets; asynchronous
+state changes repaint on events rather than an idle polling loop. Host resampler
+reinitialization occurs only at an observed device availability/rate boundary.
+
+### Interaction and performance acceptance
+
+- [x] Scoped audio/fullscreen implementation and automated/build gates.
+- [x] Existing baselines preserved and deterministic guest checks passed.
+- [ ] User-confirmed Linux, Chrome and Brave interaction acceptance.
+- [ ] Post-change sustained host performance/audio/memory parity verified.
+
+Run from `gba-rs`:
+
+```sh
+./target/release/gba-app
+env -u NO_COLOR trunk --config web/Trunk.toml serve --release
+```
+
+On Linux, verify automatic audio, saved mute/volume after restart, volume edits
+while muted/paused, silent play with no device, and Retry after device failure.
+On Chrome and Brave independently, verify unlock from file-load, Resume, audio and
+game-surface gestures; delayed/failed Worklet setup must show Starting/Unavailable,
+retry must retain mute, and ordinary clicks must not reset healthy audio. Check
+suspension/resume for historical sound. Enter/exit canvas fullscreen by pointer and
+focused keyboard, test rejection/external Escape exit, and keep Pause, Settings and
+save recovery reachable. On Linux check F11 and successive Escape dismissal of
+capture, Settings/menu, then fullscreen. Use the existing recorded workload for
+post-change sustained speed/audio/memory and timing comparison.
+
+No native/browser UI was controlled automatically. The recorded baselines were
+not recaptured; automated regression/isolation evidence does not establish measured
+end-to-end performance parity. Pass 5 interaction acceptance remains pending.

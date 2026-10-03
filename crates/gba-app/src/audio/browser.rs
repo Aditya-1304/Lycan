@@ -5,8 +5,6 @@ use wasm_bindgen::prelude::*;
 
 #[wasm_bindgen]
 extern "C" {
-    #[wasm_bindgen(js_namespace = gbaAudio, js_name = start)]
-    fn start_audio();
     #[wasm_bindgen(js_namespace = gbaAudio, js_name = rate)]
     fn audio_rate() -> u32;
     #[wasm_bindgen(js_namespace = gbaAudio, js_name = submit)]
@@ -19,14 +17,25 @@ extern "C" {
     fn gain_audio(gain: f32);
     #[wasm_bindgen(js_namespace = gbaAudio, js_name = status)]
     fn status_audio() -> String;
+    #[wasm_bindgen(js_namespace = gbaAudio, js_name = state)]
+    fn state_audio() -> String;
+    #[wasm_bindgen(js_namespace = gbaAudio, js_name = failure)]
+    fn failure_audio() -> String;
 }
 
 /// Handles the page-owned AudioContext while leaving platform objects in JavaScript.
 pub struct Output;
 impl Output {
-    pub fn start() -> Result<Self, String> {
-        start_audio();
+    pub fn start(gain: f32) -> Result<Self, String> {
+        gain_audio(gain);
         Ok(Self)
+    }
+    pub fn state(&self) -> String {
+        state_audio()
+    }
+    pub fn failure(&self) -> Option<String> {
+        let error = failure_audio();
+        (!error.is_empty()).then_some(error)
     }
     pub fn rate(&self) -> u32 {
         audio_rate()

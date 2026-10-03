@@ -35,7 +35,7 @@ pub struct Output {
 }
 
 impl Output {
-    pub fn start() -> Result<Self, String> {
+    pub fn start(gain: f32) -> Result<Self, String> {
         let device = cpal::default_host()
             .default_output_device()
             .ok_or("No audio output device")?;
@@ -45,7 +45,7 @@ impl Output {
         let capacity = (rate as usize * 80 / 1000).max(1);
         let (producer, consumer) = RingBuffer::new(capacity);
         let shared = Arc::new(Shared::default());
-        shared.gain.store(0.5_f32.to_bits(), Ordering::Relaxed);
+        shared.gain.store(gain.to_bits(), Ordering::Relaxed);
         let stream = match supported.sample_format() {
             cpal::SampleFormat::F32 => {
                 stream::<f32>(&device, &config, consumer, Arc::clone(&shared))
@@ -117,6 +117,12 @@ impl Output {
 
     pub fn set_gain(&mut self, gain: f32) {
         self.shared.gain.store(gain.to_bits(), Ordering::Relaxed);
+    }
+
+    /// Callback errors are surfaced without rebuilding a healthy stream.
+    pub fn failure(&self) -> Option<String> {
+        (self.shared.errors.load(Ordering::Relaxed) != 0)
+            .then(|| "Audio output device reported a stream error".to_owned())
     }
 
     pub fn status(&self) -> String {

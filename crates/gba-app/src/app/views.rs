@@ -12,6 +12,17 @@ impl GbaApp {
     /// Keeps diagnostic startup intact while selecting the normal launch/player
     /// layout from installed-session state, including paused and restoring games.
     pub(super) fn draw_ui(&mut self, ui: &mut egui::Ui) {
+        #[cfg(not(target_arch = "wasm32"))]
+        let popup_owned_escape = egui::Popup::is_any_open(ui.ctx());
+        #[cfg(target_arch = "wasm32")]
+        crate::presentation::begin_frame();
+        #[cfg(not(target_arch = "wasm32"))]
+        if ui
+            .ctx()
+            .input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::F11))
+        {
+            self.toggle_fullscreen(ui.ctx());
+        }
         let mut owns_keys = false;
         if self.debug_ui {
             self.draw_notices(ui);
@@ -25,6 +36,22 @@ impl GbaApp {
             }
         }
         self.draw_settings(ui.ctx());
+        // Capture and modal dismissal consume Escape first. Native fullscreen
+        // gets only an otherwise unowned Escape; browser exit remains DOM-owned.
+        #[cfg(not(target_arch = "wasm32"))]
+        if !popup_owned_escape
+            && !self.settings_open
+            && self.capture.is_none()
+            && !egui::Popup::is_any_open(ui.ctx())
+            && self.is_fullscreen(ui.ctx())
+            && ui
+                .ctx()
+                .input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Escape))
+        {
+            ui.ctx()
+                .send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
+            self.own_ui_keys(ui.ctx());
+        }
         owns_keys |= self.settings_open
             || egui::Popup::is_any_open(ui.ctx())
             || ui.ctx().egui_wants_keyboard_input();
@@ -207,6 +234,7 @@ impl GbaApp {
                 if self.action(ui, true, "Settings") {
                     self.open_settings(ui.ctx());
                 }
+                self.draw_fullscreen_control(ui);
                 let mut audio_open = false;
                 if narrow {
                     audio_open = ui
@@ -495,35 +523,108 @@ impl GbaApp {
             }
             self.audio.volume = self.settings.preferences.volume;
             self.audio.muted = self.settings.preferences.muted;
+            self.audio.apply_gain();
         }
     }
 
-    /// Uses current explicit audio startup and gain controls. Automatic startup,
-    /// browser readiness and fullscreen gesture integration remain separate work.
-    fn draw_audio_controls(&mut self, ui: &mut egui::Ui, width: f32) {
+    /// Actual platform state drives the label, including browser Escape and
+    /// request rejection. The compact toolbar remains in the normal layout.
+    fn is_fullscreen(&self, ctx: &egui::Context) -> bool {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            ctx.input(|input| input.viewport().fullscreen.unwrap_or(false))
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = ctx;
+            crate::presentation::fullscreen()
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn toggle_fullscreen(&mut self, ctx: &egui::Context) {
+        ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(!self.is_fullscreen(ctx)));
+        self.own_ui_keys(ctx);
+    }
+
+    fn draw_fullscreen_control(&mut self, ui: &mut egui::Ui) {
+        let label = if self.is_fullscreen(ui.ctx()) {
+            "Exit fullscreen"
+        } else {
+            "Fullscreen"
+        };
+        let response = ui.add(egui::Button::new(label).min_size(egui::vec2(0.0, 30.0)));
+        #[cfg(target_arch = "wasm32")]
+        if !self.settings_open {
+            crate::presentation::register("fullscreen", &response);
+        }
+        if response.clicked() {
+            self.own_ui_keys(ui.ctx());
+            response.surrender_focus();
+            #[cfg(not(target_arch = "wasm32"))]
+            self.toggle_fullscreen(ui.ctx());
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            let error = crate::presentation::error();
+            if !error.is_empty() {
+                ui.label(format!("Fullscreen unavailable: {error}"));
+            }
+        }
+    }
+
+    /// All controls edit the same remembered volume and independent mute. Device
+    /// readiness is asynchronous on web; diagnostics stay in the debug view.
+    pub(super) fn draw_audio_controls(&mut self, ui: &mut egui::Ui, width: f32) {
+        use crate::audio::AudioState;
+        let state = self.audio.state();
         ui.horizontal_wrapped(|ui| {
-            if !self.audio.enabled() || self.audio.error().is_some() {
-                let label = if self.audio.error().is_some() {
+            if matches!(
+                state,
+                AudioState::NeedsInteraction | AudioState::Unavailable
+            ) {
+                let label = if state == AudioState::Unavailable {
                     "Retry audio"
                 } else {
                     "Enable audio"
                 };
-                if self.action(ui, true, label) {
+                let response = ui.add(egui::Button::new(label).min_size(egui::vec2(0.0, 30.0)));
+                #[cfg(target_arch = "wasm32")]
+                crate::presentation::register("audio", &response);
+                if response.clicked() {
+                    self.own_ui_keys(ui.ctx());
+                    response.surrender_focus();
+                    #[cfg(not(target_arch = "wasm32"))]
                     self.audio.start();
                 }
             }
-            let mute = ui.checkbox(&mut self.audio.muted, "Mute");
+            let mute = ui
+                .checkbox(&mut self.audio.muted, "Mute")
+                .on_hover_text("Mute the speaker without changing remembered volume");
             let mut percent = self.audio.volume * 100.0;
             let slider = ui
                 .scope(|ui| {
                     ui.spacing_mut().slider_width = width.min(ui.available_width().max(40.0));
-                    ui.add(egui::Slider::new(&mut percent, 0.0..=100.0).suffix("%"))
+                    ui.add(
+                        egui::Slider::new(&mut percent, 0.0..=100.0)
+                            .suffix("%")
+                            .text("Volume"),
+                    )
                 })
                 .inner;
             if slider.changed() || mute.changed() {
                 self.audio.volume = percent / 100.0;
+                self.audio.apply_gain();
                 self.own_ui_keys(ui.ctx());
             }
+            ui.label(match state {
+                #[cfg(target_arch = "wasm32")]
+                AudioState::Starting => "Starting",
+                AudioState::Ready if self.audio.muted => "Muted",
+                AudioState::Ready => "Ready",
+                AudioState::NeedsInteraction => "Needs interaction",
+                AudioState::Unavailable => "Unavailable",
+            });
         });
         if let Some(error) = self.audio.error() {
             ui.label(error);
@@ -633,6 +734,81 @@ impl GbaApp {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Catches one Escape dismissing the Game menu and exiting fullscreen at once.
+    // Existing capture/settings tests do not exercise egui popup dismissal.
+    #[test]
+    fn escape_dismisses_game_menu_before_native_fullscreen() {
+        let mut app = GbaApp::create(false);
+        app.loaded = true;
+        let ctx = egui::Context::default();
+        let raw = |events| {
+            let mut input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1000.0, 700.0),
+                )),
+                events,
+                ..Default::default()
+            };
+            input
+                .viewports
+                .get_mut(&egui::ViewportId::ROOT)
+                .unwrap()
+                .fullscreen = Some(true);
+            input
+        };
+        let mut output = ctx.run_ui(raw(vec![]), |ui| app.draw_ui(ui));
+        output.textures_delta.clear();
+        let game = output
+            .shapes
+            .iter()
+            .find_map(|shape| {
+                if let egui::Shape::Text(text) = &shape.shape
+                    && text.galley.text() == "Game"
+                {
+                    Some(text.pos + text.galley.size() * 0.5)
+                } else {
+                    None
+                }
+            })
+            .expect("Game menu is visible");
+        for pressed in [true, false] {
+            let mut output = ctx.run_ui(
+                raw(vec![
+                    egui::Event::PointerMoved(game),
+                    egui::Event::PointerButton {
+                        pos: game,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ]),
+                |ui| app.draw_ui(ui),
+            );
+            output.textures_delta.clear();
+        }
+        assert!(egui::Popup::is_any_open(&ctx));
+        let mut output = ctx.run_ui(
+            raw(vec![egui::Event::Key {
+                key: egui::Key::Escape,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }]),
+            |ui| app.draw_ui(ui),
+        );
+        output.textures_delta.clear();
+        assert!(!egui::Popup::is_any_open(&ctx));
+        assert!(
+            !output
+                .viewport_output
+                .values()
+                .flat_map(|viewport| &viewport.commands)
+                .any(|command| matches!(command, egui::ViewportCommand::Fullscreen(false)))
+        );
+    }
 
     // Read-only binding labels leave users unable to change controls at all.
     // This checks the missing user action rather than widget construction order.

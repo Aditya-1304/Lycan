@@ -5,17 +5,35 @@
     let error = '', stats = { depth: 0, maxDepth: 0, underruns: 0, underrunEvents: 0, overflows: 0, overflowEvents: 0, callbacks: 0, maxCallbackFrames: 0, played: 0 };
     let pending = 0, bridgeDrops = 0, bridgeDropEvents = 0;
     const pool = [];
-    let timer;
+    let timer, terminalFailure = false;
+    const changed = () => globalThis.gbaPresentation?.changed();
     const message = data => node?.port.postMessage(data);
     globalThis.gbaAudio = {
-        start() {
-            if (starting) return;
+        start(retry = false) {
+            // Healthy gestures are no-ops; errors require an explicit retry.
+            // Processor/closed-context failures need reload, never recreation loops.
+            if (starting || terminalFailure || (error && !retry)) return;
+            if (node && context.state === 'running' && !error) return;
+            if (context?.state === 'closed') {
+                terminalFailure = true;
+                error = 'Audio context closed; reload to retry';
+                return;
+            }
             error = '';
             try {
                 // resume() is called synchronously in the gesture, before module loading.
-                context ??= new AudioContext({ latencyHint: 'interactive' });
+                if (!context) {
+                    context = new AudioContext({ latencyHint: 'interactive' });
+                    context.addEventListener?.('statechange', () => {
+                        // Device suspension may occur without page focus loss.
+                        // Drop queued history before the next gesture resumes it.
+                        if (context.state !== 'running') globalThis.gbaAudio.setPlaying(false);
+                        changed();
+                    });
+                }
                 const resumed = context.resume();
                 starting = true;
+                changed();
                 (async () => {
                     await resumed;
                     if (!node) {
@@ -27,7 +45,11 @@
                                 // queue headroom for ordinary catch-up bursts.
                                 target: Math.ceil(context.sampleRate * 0.04) }
                         });
-                        node.onprocessorerror = () => { error = 'AudioWorklet processor failed; reload to retry'; };
+                        node.onprocessorerror = () => {
+                            terminalFailure = true;
+                            error = 'AudioWorklet processor failed; reload to retry';
+                            changed();
+                        };
                         node.port.onmessage = ({ data }) => {
                             if (data.kind === 'recycle') {
                                 pending = Math.max(0, pending - data.frames);
@@ -38,13 +60,22 @@
                         };
                         node.connect(context.destination);
                         timer = setInterval(() => message({ kind: 'stats' }), 500);
+                        // Only a newly initialized node needs lifecycle synchronization.
+                        message({ kind: 'clear', epoch });
+                        message({ kind: 'gain', value: gain });
+                        message({ kind: 'playing', value: playing });
                     }
-                    message({ kind: 'clear', epoch });
-                    message({ kind: 'playing', value: playing });
-                    message({ kind: 'gain', value: gain });
-                })().catch(e => { error = String(e); }).finally(() => { starting = false; });
-            } catch (e) { error = String(e); starting = false; }
+                })().catch(e => { error = String(e); }).finally(() => { starting = false; changed(); });
+            } catch (e) { error = String(e); starting = false; changed(); }
         },
+        // Readiness requires both asynchronous Worklet setup and a running context.
+        state() {
+            if (context?.state === 'closed') return 'unavailable';
+            if (error) return 'unavailable';
+            if (starting) return 'starting';
+            return node && context.state === 'running' ? 'ready' : 'interaction';
+        },
+        failure() { return context?.state === 'closed' ? 'Audio context closed; reload to retry' : error; },
         rate() { return node && context.state === 'running' && !error ? context.sampleRate : 0; },
         submit(samples) {
             if (!node || !playing || context.state !== 'running' || error) return;
