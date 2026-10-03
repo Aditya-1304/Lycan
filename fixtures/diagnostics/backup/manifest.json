@@ -1,0 +1,46 @@
+[
+  {
+    "name": "sram",
+    "sha256": "83deb841916e57e62cecec2739e39add190af6910f3a5f54dd788688cf2740be"
+  },
+  {
+    "name": "sram-fast",
+    "sha256": "ba59f6c92d55c399a94fe3888d2a7d69547393fdc7611b8e32c13e85d6c9597a"
+  },
+  {
+    "name": "eeprom",
+    "sha256": "e43bf45230ca6b57d8b4b41dfdb8e08af37db53f7b3a7d47a2cc31f88f28c644"
+  },
+  {
+    "name": "flash64",
+    "sha256": "3405526b0fe1a2a326db9e415755be2d98331ef36571255231ae9c45f1e417fa"
+  },
+  {
+    "name": "flash64-old",
+    "sha256": "8d8e74cd29c38b89fc1f85dc68b2cf8f95a9b9d962dfad0a412a138905a7d52a"
+  },
+  {
+    "name": "flash128",
+    "sha256": "df71bb7fe459c15c455d108fa446b134fda02ad034772c2298c9047d76e2645a"
+  },
+  {
+    "name": "unknown",
+    "sha256": "a30bab2e98e3feb1aae8b5bcb76e63bfd46c1e0a12770e5ef2990394fc1ff8ff"
+  },
+  {
+    "name": "conflicting",
+    "sha256": "24dca05e928d5ee73ed439cd2daab2cd43cbf87c4dc92345b783963a10489f7d"
+  },
+  {
+    "name": "override",
+    "sha256": "e43bf45230ca6b57d8b4b41dfdb8e08af37db53f7b3a7d47a2cc31f88f28c644"
+  },
+  {
+    "name": "same-family",
+    "sha256": "411806a1db9cb09c50045b295bb6848efd17fd41823e15050181784cd4249dbb"
+  },
+  {
+    "name": "malformed",
+    "sha256": "bf997f08f47088bc9e20bcb09f0d383458d695b0807a6462a22b3e1c0e2d9289"
+  }
+]

@@ -1,0 +1,52 @@
+{
+  "eeprom512-score": {
+    "sha256": "0d755a8bc3fd69600304d5115a234c6356c51d1b36faecf68e9f4bf95cd65c60",
+    "rom_bytes": 1044,
+    "capacity": 512,
+    "startup": "cartridge-direct-arm",
+    "backup_signature": "EEPROM_V124",
+    "completion_id": 118,
+    "mailbox_address": 50331648,
+    "score_address": 50331650,
+    "first_block_score_address": 50331652,
+    "frames": 3,
+    "max_instructions_per_frame": 200000,
+    "max_cycles": 843000,
+    "checkpoint_pc_ranges": [
+      [
+        "0x08000134",
+        "0x0800018c"
+      ],
+      [
+        "0x0800019c",
+        "0x0800022c"
+      ]
+    ],
+    "expected_image": "38400 pixels; last-block green cells in rows 0..7; first-block blue cells in rows 8..15; remaining pixels black"
+  },
+  "eeprom8k-score": {
+    "sha256": "28629d0241c6861acdb38227f47a7af5926bc1ae12a64880c01a4c08263bce58",
+    "rom_bytes": 1048,
+    "capacity": 8192,
+    "startup": "cartridge-direct-arm",
+    "backup_signature": "EEPROM_V124",
+    "completion_id": 118,
+    "mailbox_address": 50331648,
+    "score_address": 50331650,
+    "first_block_score_address": 50331652,
+    "frames": 3,
+    "max_instructions_per_frame": 200000,
+    "max_cycles": 843000,
+    "checkpoint_pc_ranges": [
+      [
+        "0x08000134",
+        "0x0800018c"
+      ],
+      [
+        "0x0800019c",
+        "0x0800022c"
+      ]
+    ],
+    "expected_image": "38400 pixels; last-block green cells in rows 0..7; first-block blue cells in rows 8..15; remaining pixels black"
+  }
+}

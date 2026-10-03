@@ -1,0 +1,20 @@
+# Original interactive ARM Slice-24 guest.
+# Freeze bytes/hash from the FIRST intentional build and do not let build.py
+# rewrite these expectations automatically.
+
+bytes = 612
+sha256 = "525bdb984a951fc7a757585a363599d87c7eb022fc802577fb81727023eff2d8"
+
+mailbox_id = 165
+mailbox_address = 50331648
+
+instruction_limit = 2000000
+cycle_overshoot_limit = 32
+
+capture_frames = [12, 16, 20, 24, 28, 32, 36, 40]
+
+startup = "controlled ARM, no BIOS, no backup"
+
+mgba_suite_revision = "e6942030d25ffe3ba76c72b73a86da073ec857cc"
+mgba_renderer_revision = "c3c8e5e813f245028de118a56734e1dc0f35ce2a"
+nanoboyadvance_revision = "55b5cf0ae3d929582ac5bfd486558173502b8354"

@@ -1,5 +1,5 @@
 // The same cartridge contract is executed by the WASM harness.
-#[path = "../../../roms/backup/contract.rs"]
+#[path = "../../../fixtures/diagnostics/backup/contract.rs"]
 mod contract;
 
 #[test]

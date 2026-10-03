@@ -1,0 +1,12 @@
+sha256 = "6a66651b77d105b4d1bc646c4dc5bd2df8c881dc8aa51bc3e9a3741a5daa0de0"
+startup = "skip-bios with explicit test firmware"
+mailbox = "0x03000000 = 0x79; VBlank counter at +2; latched input/phase at +4; event count at +6; FIFO selection at +8"
+halt_pc_range = ["0x08000198", "0x080001a8"]
+frames = 1800
+max_instructions = 200000
+cycles = 505612800
+samples = 987525
+wav_sha256 = "eae8cd550ab304a0e533d9bde88299a9da717ed71ccee62634b4336dc1712792"
+script = "A 8/12, B 16/28, Select 20/24 and 64/96; automatic paired events every 32 VBlanks"
+noise_edge_cycles = 4096
+short_period_samples = 1016

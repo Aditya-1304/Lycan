@@ -1,0 +1,11 @@
+sha256 = "e3d7e45940c70aef8897984d9690a9ff90dc5d58da00f271f201b073c05020e4"
+startup = "skip-bios with explicit test firmware"
+mailbox = "0x03000000 = 0x77; VBlank counter at 0x03000002"
+halt_pc_range = ["0x08000100", "0x08000110"]
+frames = 48
+max_instructions = 200000
+cycles = 13483008
+samples = 26334
+wav_sha256 = "9add02cf4f7939f791550be69656a345a4a01368872dbf1a4225f03711c96b55"
+wave_frequency = 1920
+script = "A 8/44, B 12/40, Select 16/36, Up 20/32, Down 24/28; press/release frames"

@@ -90,7 +90,8 @@ pub const SCREEN_HEIGHT: usize = 160;
 pub const FRAMEBUFFER_PIXELS: usize = SCREEN_WIDTH * SCREEN_HEIGHT;
 
 /// Original division firmware, never a replacement for the retail BIOS.
-pub const TEST_FIRMWARE: &[u8] = include_bytes!("../../../roms/test-firmware/division.bin");
+pub const TEST_FIRMWARE: &[u8] =
+    include_bytes!("../../../fixtures/diagnostics/test-firmware/division.bin");
 
 /// Exact length of the supplied ARM7TDMI BIOS image.
 pub const BIOS_SIZE: usize = 0x4000;
@@ -4358,7 +4359,9 @@ mod tests {
         for (address_bits, block, capacity) in [(6, 63, 512), (14, 1023, 8192)] {
             let mut machine = Machine::new();
             machine
-                .load_rom(include_bytes!("../../../roms/backup/eeprom.gba"))
+                .load_rom(include_bytes!(
+                    "../../../fixtures/diagnostics/backup/eeprom.gba"
+                ))
                 .unwrap();
             let data = 0xa501_2345_6789_abcd_u64;
             let transfer = |machine: &mut Machine, bits: &[u16]| {
@@ -4429,7 +4432,9 @@ mod tests {
     fn flash_banks_preserve_and_restore_independent_bytes() {
         let mut machine = Machine::new();
         machine
-            .load_rom(include_bytes!("../../../roms/backup/flash128.gba"))
+            .load_rom(include_bytes!(
+                "../../../fixtures/diagnostics/backup/flash128.gba"
+            ))
             .unwrap();
         let access = Access {
             kind: AccessKind::Data,
@@ -4490,7 +4495,9 @@ mod tests {
     fn flash_read_cancels_partial_unlock() {
         let mut machine = Machine::new();
         machine
-            .load_rom(include_bytes!("../../../roms/backup/flash64.gba"))
+            .load_rom(include_bytes!(
+                "../../../fixtures/diagnostics/backup/flash64.gba"
+            ))
             .unwrap();
         let access = Access {
             kind: AccessKind::Data,
@@ -4529,7 +4536,9 @@ mod tests {
     fn sram_byte_bus_survives_reset() {
         let mut machine = Machine::new();
         machine
-            .load_rom(include_bytes!("../../../roms/backup/sram.gba"))
+            .load_rom(include_bytes!(
+                "../../../fixtures/diagnostics/backup/sram.gba"
+            ))
             .unwrap();
         let access = Access {
             kind: AccessKind::Data,
@@ -4619,7 +4628,7 @@ mod tests {
     /// Exercises sleep, firmware dispatch, W1C and masked wake through guest code.
     #[test]
     fn vblank_guest_sleeps_dispatches_and_acknowledges() {
-        let rom = include_bytes!("../../../roms/vblank.gba");
+        let rom = include_bytes!("../../../fixtures/diagnostics/vblank.gba");
         let mut machine = Machine::new();
         machine.load_rom(rom).unwrap();
         machine.enable_test_firmware();
@@ -4765,7 +4774,7 @@ mod tests {
     fn counter_returns_from_thumb_with_architectural_pc_values() {
         let mut machine = Machine::new();
         machine
-            .load_rom(include_bytes!("../../../roms/counter.gba"))
+            .load_rom(include_bytes!("../../../fixtures/diagnostics/counter.gba"))
             .unwrap();
         machine.set_button(Button::A, true);
         let report = machine

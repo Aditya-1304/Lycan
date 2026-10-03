@@ -2,11 +2,11 @@ version = 2
 
 [[fixture]]
 name = "counter"
-rom = "../roms/counter.gba"
-source = "../roms/counter/counter.s"
-linker = "../roms/pixels/linker.ld"
+rom = "../fixtures/diagnostics/counter.gba"
+source = "../fixtures/diagnostics/counter/counter.s"
+linker = "../fixtures/diagnostics/pixels/linker.ld"
 sha256 = "4d02748bdfb9a8f8a61b6c8c300c415117db7f4985c578c272b6dd70eb7b2d79"
-origin = "Original MIT guest assembly in roms/counter/counter.s"
+origin = "Original MIT guest assembly in fixtures/diagnostics/counter/counter.s"
 startup = "cartridge-direct-arm"
 bios_required = false
 mailbox_address = 0x03000000
@@ -37,11 +37,11 @@ checkpoints = [
 
 [[fixture]]
 name = "pixels"
-rom = "../roms/pixels.gba"
-source = "../roms/pixels/pixels.s"
-linker = "../roms/pixels/linker.ld"
+rom = "../fixtures/diagnostics/pixels.gba"
+source = "../fixtures/diagnostics/pixels/pixels.s"
+linker = "../fixtures/diagnostics/pixels/linker.ld"
 sha256 = "4fb24cb1f126ac04638a3c5819ecee7f3c4fd0bc2b948e186daa79bbdc9c1a12"
-origin = "Original MIT guest assembly in roms/pixels/pixels.s"
+origin = "Original MIT guest assembly in fixtures/diagnostics/pixels/pixels.s"
 startup = "cartridge-direct-arm"
 bios_required = false
 mailbox_address = 0x03000000
@@ -59,11 +59,11 @@ time_events = []
 
 [[fixture]]
 name = "buttons"
-rom = "../roms/buttons.gba"
-source = "../roms/buttons/buttons.s"
-linker = "../roms/pixels/linker.ld"
+rom = "../fixtures/diagnostics/buttons.gba"
+source = "../fixtures/diagnostics/buttons/buttons.s"
+linker = "../fixtures/diagnostics/pixels/linker.ld"
 sha256 = "eae58be9de7214f5bfe808970778d3f8ccca5437f97d37ce11986f2f2fe56b6d"
-origin = "Original MIT guest assembly in roms/buttons/buttons.s"
+origin = "Original MIT guest assembly in fixtures/diagnostics/buttons/buttons.s"
 startup = "cartridge-direct-arm"
 bios_required = false
 mailbox_address = 0x03000000
@@ -97,11 +97,11 @@ checkpoints = [
 
 [[fixture]]
 name = "palette"
-rom = "../roms/palette.gba"
-source = "../roms/palette/palette.s"
-linker = "../roms/pixels/linker.ld"
+rom = "../fixtures/diagnostics/palette.gba"
+source = "../fixtures/diagnostics/palette/palette.s"
+linker = "../fixtures/diagnostics/pixels/linker.ld"
 sha256 = "88806d5738b0d298918b3b59ce67bb08504584f948312614ba8a2977927efc3b"
-origin = "Original MIT guest assembly in roms/palette/palette.s"
+origin = "Original MIT guest assembly in fixtures/diagnostics/palette/palette.s"
 startup = "cartridge-direct-arm"
 bios_required = false
 mailbox_address = 0x03000000
@@ -124,11 +124,11 @@ checkpoints = [
 
 [[fixture]]
 name = "hello"
-rom = "../roms/gba-tests/hello.gba"
-source = "../roms/gba-tests/hello.asm"
-linker = "../roms/pixels/linker.ld"
+rom = "../fixtures/diagnostics/gba-tests/hello.gba"
+source = "../fixtures/diagnostics/gba-tests/hello.asm"
+linker = "../fixtures/diagnostics/pixels/linker.ld"
 sha256 = "38aed48b67bc0f701e8aa222b0c3334bd306bd29888707bb7224d81f5576c264"
-origin = "jsmolka/gba-tests ppu/hello.gba at a7113b67e63f83a9b321696ddd7042ccfad6c881; MIT notice in roms/gba-tests/LICENSE"
+origin = "jsmolka/gba-tests ppu/hello.gba at a7113b67e63f83a9b321696ddd7042ccfad6c881; MIT notice in fixtures/diagnostics/gba-tests/LICENSE"
 startup = "cartridge-direct-arm"
 bios_required = false
 # Upstream has no mailbox; completion uses the source-defined idle instruction
@@ -144,11 +144,11 @@ framebuffer_sha256 = "56cd131fb3915fe7e410be228a8c09e99132064799f148583636ca7574
 
 [[fixture]]
 name = "calculations"
-rom = "../roms/calculations.gba"
-source = "../roms/calculations/calculations.s"
-linker = "../roms/pixels/linker.ld"
+rom = "../fixtures/diagnostics/calculations.gba"
+source = "../fixtures/diagnostics/calculations/calculations.s"
+linker = "../fixtures/diagnostics/pixels/linker.ld"
 sha256 = "8ef128a96363775c3a6b0b3aad2997edfa48e43ba95a920121e9b7a04b4604f5"
-origin = "Original MIT guest assembly in roms/calculations/calculations.s"
+origin = "Original MIT guest assembly in fixtures/diagnostics/calculations/calculations.s"
 startup = "cartridge-direct-arm"
 bios_required = false
 mailbox_address = 0x03000000
@@ -166,11 +166,11 @@ time_events = []
 
 [[fixture]]
 name = "copy"
-rom = "../roms/copy.gba"
-source = "../roms/copy/copy.s"
-linker = "../roms/pixels/linker.ld"
+rom = "../fixtures/diagnostics/copy.gba"
+source = "../fixtures/diagnostics/copy/copy.s"
+linker = "../fixtures/diagnostics/pixels/linker.ld"
 sha256 = "70ae32d6d49cfbbe8d05f66da4fa22a1076838b0753cab0a9827f304cb695306"
-origin = "Original MIT guest assembly in roms/copy/copy.s"
+origin = "Original MIT guest assembly in fixtures/diagnostics/copy/copy.s"
 startup = "cartridge-direct-arm"
 bios_required = false
 mailbox_address = 0x03000000
@@ -199,11 +199,11 @@ memory_checks = [
 
 [[fixture]]
 name = "cartridge"
-rom = "../roms/cartridge.gba"
-source = "../roms/cartridge/cartridge.s"
-linker = "../roms/pixels/linker.ld"
+rom = "../fixtures/diagnostics/cartridge.gba"
+source = "../fixtures/diagnostics/cartridge/cartridge.s"
+linker = "../fixtures/diagnostics/pixels/linker.ld"
 sha256 = "5b4fc59af58129cad68743df97fde3fa37fd48e206c415455b16486728f9cf2c"
-origin = "Original MIT guest assembly in roms/cartridge/cartridge.s"
+origin = "Original MIT guest assembly in fixtures/diagnostics/cartridge/cartridge.s"
 startup = "cartridge-direct-arm"
 bios_required = false
 mailbox_address = 0x03000000
@@ -242,11 +242,11 @@ checkpoints = [
 
 [[fixture]]
 name = "arm"
-rom = "../roms/gba-tests/arm/arm.gba"
-source = "../roms/gba-tests/arm/arm.asm"
-linker = "../roms/pixels/linker.ld"
+rom = "../fixtures/diagnostics/gba-tests/arm/arm.gba"
+source = "../fixtures/diagnostics/gba-tests/arm/arm.asm"
+linker = "../fixtures/diagnostics/pixels/linker.ld"
 sha256 = "77ee88662552bdc885c1080c0172ff119d54db791bd73b21808cf1ff1fe5b40e"
-origin = "jsmolka/gba-tests at a7113b67e63f83a9b321696ddd7042ccfad6c881; MIT notice in roms/gba-tests/LICENSE"
+origin = "jsmolka/gba-tests at a7113b67e63f83a9b321696ddd7042ccfad6c881; MIT notice in fixtures/diagnostics/gba-tests/LICENSE"
 startup = "cartridge-direct-arm"
 bios_required = true
 mailbox_address = 0
@@ -266,11 +266,11 @@ framebuffer_sha256 = "59ce42abae9825c2d2579c5cd838e47d88be917e37ea36ff162d46fc5d
 
 [[fixture]]
 name = "thumb"
-rom = "../roms/gba-tests/thumb/thumb.gba"
-source = "../roms/gba-tests/thumb/thumb.asm"
-linker = "../roms/pixels/linker.ld"
+rom = "../fixtures/diagnostics/gba-tests/thumb/thumb.gba"
+source = "../fixtures/diagnostics/gba-tests/thumb/thumb.asm"
+linker = "../fixtures/diagnostics/pixels/linker.ld"
 sha256 = "b5cb2291df4ab314b31c598acd9bff2ccfa0b38efff29daadfe97422ce369b67"
-origin = "jsmolka/gba-tests at a7113b67e63f83a9b321696ddd7042ccfad6c881; MIT notice in roms/gba-tests/LICENSE"
+origin = "jsmolka/gba-tests at a7113b67e63f83a9b321696ddd7042ccfad6c881; MIT notice in fixtures/diagnostics/gba-tests/LICENSE"
 startup = "cartridge-direct-arm"
 bios_required = true
 mailbox_address = 0
@@ -290,9 +290,9 @@ framebuffer_sha256 = "59ce42abae9825c2d2579c5cd838e47d88be917e37ea36ff162d46fc5d
 
 [[fixture]]
 name = "services"
-rom = "../roms/test-firmware/services.gba"
-source = "../roms/test-firmware/services.s"
-linker = "../roms/pixels/linker.ld"
+rom = "../fixtures/diagnostics/test-firmware/services.gba"
+source = "../fixtures/diagnostics/test-firmware/services.s"
+linker = "../fixtures/diagnostics/pixels/linker.ld"
 sha256 = "b12c06f84e1ac37c32d69e4df4205bc7306185b680a1335b20661e364d831453"
 origin = "Original MIT guest assembly; checks signed division and ARM/Thumb exception return"
 startup = "cartridge-direct-arm"
@@ -313,11 +313,11 @@ result = 0
 
 [[fixture]]
 name = "tiled"
-rom = "../roms/tiled.gba"
-source = "../roms/tiled/tiled.s"
-linker = "../roms/pixels/linker.ld"
+rom = "../fixtures/diagnostics/tiled.gba"
+source = "../fixtures/diagnostics/tiled/tiled.s"
+linker = "../fixtures/diagnostics/pixels/linker.ld"
 sha256 = "2b0627b372f31e389be512d9a5c43e15e0fc643223ed36f94b2146602841601d"
-origin = "Original MIT guest assembly in roms/tiled/tiled.s"
+origin = "Original MIT guest assembly in fixtures/diagnostics/tiled/tiled.s"
 startup = "cartridge-direct-arm"
 bios_required = false
 mailbox_address = 0x03000000
@@ -349,11 +349,11 @@ checkpoints = [
 
 [[fixture]]
 name = "stripes"
-rom = "../roms/gba-tests/stripes.gba"
-source = "../roms/gba-tests/stripes.asm"
-linker = "../roms/pixels/linker.ld"
+rom = "../fixtures/diagnostics/gba-tests/stripes.gba"
+source = "../fixtures/diagnostics/gba-tests/stripes.asm"
+linker = "../fixtures/diagnostics/pixels/linker.ld"
 sha256 = "80d6cc05b5f289b9a2392621fc245270f08e9f0d77fd33982120cef240f5a504"
-origin = "jsmolka/gba-tests ppu/stripes.gba at a7113b67e63f83a9b321696ddd7042ccfad6c881; MIT notice in roms/gba-tests/LICENSE"
+origin = "jsmolka/gba-tests ppu/stripes.gba at a7113b67e63f83a9b321696ddd7042ccfad6c881; MIT notice in fixtures/diagnostics/gba-tests/LICENSE"
 startup = "cartridge-direct-arm"
 bios_required = false
 mailbox_address = 0
@@ -366,11 +366,11 @@ terminal_pc = 0x08000140
 
 [[fixture]]
 name = "memory"
-rom = "../roms/gba-tests/memory/memory.gba"
-source = "../roms/gba-tests/memory/memory.asm"
-linker = "../roms/pixels/linker.ld"
+rom = "../fixtures/diagnostics/gba-tests/memory/memory.gba"
+source = "../fixtures/diagnostics/gba-tests/memory/memory.asm"
+linker = "../fixtures/diagnostics/pixels/linker.ld"
 sha256 = "21024fb6aae6343f5f0466dd54e3149de1fbeb23f78e7d85a015c983684d2f87"
-origin = "jsmolka/gba-tests memory at a7113b67e63f83a9b321696ddd7042ccfad6c881; MIT notice in roms/gba-tests/LICENSE"
+origin = "jsmolka/gba-tests memory at a7113b67e63f83a9b321696ddd7042ccfad6c881; MIT notice in fixtures/diagnostics/gba-tests/LICENSE"
 startup = "cartridge-direct-arm"
 bios_required = true
 mailbox_address = 0
@@ -390,11 +390,11 @@ framebuffer_sha256 = "59ce42abae9825c2d2579c5cd838e47d88be917e37ea36ff162d46fc5d
 
 [[fixture]]
 name = "sprites"
-rom = "../roms/sprites.gba"
-source = "../roms/sprites/sprites.s"
-linker = "../roms/pixels/linker.ld"
+rom = "../fixtures/diagnostics/sprites.gba"
+source = "../fixtures/diagnostics/sprites/sprites.s"
+linker = "../fixtures/diagnostics/pixels/linker.ld"
 sha256 = "ac62694d6961736a22497b0b478548a7853ba5142e73696e854058b2f1eba1f2"
-origin = "Original MIT guest assembly in roms/sprites/sprites.s"
+origin = "Original MIT guest assembly in fixtures/diagnostics/sprites/sprites.s"
 startup = "cartridge-direct-arm"
 bios_required = false
 mailbox_address = 0x03000000
@@ -428,9 +428,9 @@ checkpoints = [
 
 [[fixture]]
 name = "vblank"
-rom = "../roms/vblank.gba"
-source = "../roms/interrupt/vblank.s"
-linker = "../roms/pixels/linker.ld"
+rom = "../fixtures/diagnostics/vblank.gba"
+source = "../fixtures/diagnostics/interrupt/vblank.s"
+linker = "../fixtures/diagnostics/pixels/linker.ld"
 sha256 = "9455932dfc166c92edbd7bdc488ee3b170f0c14cc46587dbe5442ca0766fb3c3"
 origin = "Original MIT guest: firmware IRQ callback updates backdrop and returns to HALT"
 startup = "cartridge-direct-arm"
@@ -447,11 +447,11 @@ firmware_sha256 = "044a1305b3e47fcd568e77fcd792f251cd2cb85b359949931654ebb399a37
 
 [[fixture]]
 name = "irq-sprites"
-rom = "../roms/irq-sprites.gba"
-source = "../roms/interrupt/sprites.s"
-linker = "../roms/pixels/linker.ld"
+rom = "../fixtures/diagnostics/irq-sprites.gba"
+source = "../fixtures/diagnostics/interrupt/sprites.s"
+linker = "../fixtures/diagnostics/pixels/linker.ld"
 sha256 = "d6ff49b269e618aaf232145f629f87a6c01ff66aacf57ec4916ac26324c6fe3e"
-origin = "Original MIT guest assembly in roms/sprites/sprites.s"
+origin = "Original MIT guest assembly in fixtures/diagnostics/sprites/sprites.s"
 startup = "cartridge-direct-arm"
 bios_required = true
 mailbox_address = 0x03000000
@@ -486,9 +486,9 @@ checkpoints = [
 
 [[fixture]]
 name = "keypad-or"
-rom = "../roms/keypad-or.gba"
-source = "../roms/keypad/keypad-or.s"
-linker = "../roms/pixels/linker.ld"
+rom = "../fixtures/diagnostics/keypad-or.gba"
+source = "../fixtures/diagnostics/keypad/keypad-or.s"
+linker = "../fixtures/diagnostics/pixels/linker.ld"
 sha256 = "78530967862d77dd3cfd234cd2f3bcf8726fb38f7d045f67013a2b07c1d81102"
 origin = "Original MIT keypad HALT guest with normal firmware IRQ dispatch"
 startup = "cartridge-direct-arm"
@@ -504,9 +504,9 @@ firmware_sha256 = "044a1305b3e47fcd568e77fcd792f251cd2cb85b359949931654ebb399a37
 
 [[fixture]]
 name = "keypad-and"
-rom = "../roms/keypad-and.gba"
-source = "../roms/keypad/keypad-and.s"
-linker = "../roms/pixels/linker.ld"
+rom = "../fixtures/diagnostics/keypad-and.gba"
+source = "../fixtures/diagnostics/keypad/keypad-and.s"
+linker = "../fixtures/diagnostics/pixels/linker.ld"
 sha256 = "aec5d725291224e1ec0889d108b3c824586ab6518a88768b2f20cae7001a8d05"
 origin = "Original MIT keypad HALT guest with normal firmware IRQ dispatch"
 startup = "cartridge-direct-arm"
@@ -522,11 +522,11 @@ firmware_sha256 = "044a1305b3e47fcd568e77fcd792f251cd2cb85b359949931654ebb399a37
 
 [[fixture]]
 name = "dma"
-rom = "../roms/dma.gba"
-source = "../roms/dma/upload.s"
-linker = "../roms/pixels/linker.ld"
+rom = "../fixtures/diagnostics/dma.gba"
+source = "../fixtures/diagnostics/dma/upload.s"
+linker = "../fixtures/diagnostics/pixels/linker.ld"
 sha256 = "f515710122c58b37e3487ae0ab51c93b89b94f56178270edb49a6969ac9ae6e7"
-origin = "Original MIT DMA3 tile scene in roms/dma/upload.s"
+origin = "Original MIT DMA3 tile scene in fixtures/diagnostics/dma/upload.s"
 startup = "cartridge-direct-arm"
 bios_required = true
 mailbox_address = 0x03000000
@@ -553,9 +553,9 @@ checkpoints = [
 
 [[fixture]]
 name = "pcm"
-rom = "../roms/pcm.gba"
-source = "../roms/pcm/sound.s"
-linker = "../roms/pixels/linker.ld"
+rom = "../fixtures/diagnostics/pcm.gba"
+source = "../fixtures/diagnostics/pcm/sound.s"
+linker = "../fixtures/diagnostics/pixels/linker.ld"
 sha256 = "89b13fc1aa5f4d397324f7ded22f5830fc8cb3bf305b01bab8e276bcde78e5cb"
 origin = "Original MIT timer/FIFO/DMA1 synchronized square scene"
 startup = "cartridge-direct-arm"
@@ -619,11 +619,11 @@ mixer_fifo_underruns = 2
 
 [[fixture]]
 name = "flash64"
-rom = "../roms/gba-tests/save/flash64.gba"
-source = "../roms/gba-tests/save/flash64.asm"
-linker = "../roms/pixels/linker.ld"
+rom = "../fixtures/diagnostics/gba-tests/save/flash64.gba"
+source = "../fixtures/diagnostics/gba-tests/save/flash64.asm"
+linker = "../fixtures/diagnostics/pixels/linker.ld"
 sha256 = "7e2aa32e943aedde88bd750eadcdbf55152d3a1ec61385011b7f15cd85b07c02"
-origin = "jsmolka/gba-tests save/flash64.gba at a7113b67e63f83a9b321696ddd7042ccfad6c881; MIT notice in roms/gba-tests/LICENSE"
+origin = "jsmolka/gba-tests save/flash64.gba at a7113b67e63f83a9b321696ddd7042ccfad6c881; MIT notice in fixtures/diagnostics/gba-tests/LICENSE"
 startup = "cartridge-direct-arm"
 bios_required = true
 mailbox_address = 0
@@ -646,11 +646,11 @@ framebuffer_sha256 = "59ce42abae9825c2d2579c5cd838e47d88be917e37ea36ff162d46fc5d
 
 [[fixture]]
 name = "flash128"
-rom = "../roms/gba-tests/save/flash128.gba"
-source = "../roms/gba-tests/save/flash128.asm"
-linker = "../roms/pixels/linker.ld"
+rom = "../fixtures/diagnostics/gba-tests/save/flash128.gba"
+source = "../fixtures/diagnostics/gba-tests/save/flash128.asm"
+linker = "../fixtures/diagnostics/pixels/linker.ld"
 sha256 = "9ac50e51d3ce4209dbdf85e472e70c067d5827e9af1bb3e707f6bd9059d5f0c6"
-origin = "jsmolka/gba-tests save/flash128.gba at a7113b67e63f83a9b321696ddd7042ccfad6c881; MIT notice in roms/gba-tests/LICENSE"
+origin = "jsmolka/gba-tests save/flash128.gba at a7113b67e63f83a9b321696ddd7042ccfad6c881; MIT notice in fixtures/diagnostics/gba-tests/LICENSE"
 startup = "cartridge-direct-arm"
 bios_required = true
 mailbox_address = 0
