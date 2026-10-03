@@ -205,6 +205,7 @@ pub struct GbaApp {
     settings: crate::settings::Settings,
     /// A settings window temporarily owns input without changing explicit pause.
     settings_open: bool,
+    settings_section: views::SettingsSection,
     /// Transient capture state never reaches persisted preferences.
     capture: Option<Capture>,
     /// One deferred result transfers capture across egui's begin-pass boundary.
@@ -321,6 +322,7 @@ impl GbaApp {
             binding_labels: binding_labels(&settings.preferences.bindings),
             settings,
             settings_open: false,
+            settings_section: views::SettingsSection::default(),
             capture: None,
             pending_capture: None,
             capture_keys_down: [false; egui::Key::ALL.len()],
