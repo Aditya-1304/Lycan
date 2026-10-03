@@ -2,7 +2,11 @@
 
 mod app;
 mod audio;
+mod input;
+#[cfg(target_arch = "wasm32")]
+mod presentation;
 mod saves;
+mod settings;
 
 use app::GbaApp;
 

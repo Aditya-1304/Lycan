@@ -141,8 +141,17 @@ impl Pulse {
         if self.active {
             let period = 16 * (2048 - u64::from(self.frequency));
             let total = self.phase + elapsed;
-            self.step = (self.step + (total / period) as usize) & 7;
-            self.phase = total % period;
+            // Scheduled calls reach at most one divider edge. Keep the
+            // general quotient path for callers advancing a longer interval.
+            let (steps, phase) = if total < period {
+                (0, total)
+            } else if total - period < period {
+                (1, total - period)
+            } else {
+                (total / period, total % period)
+            };
+            self.step = (self.step + steps as usize) & 7;
+            self.phase = phase;
         }
     }
 

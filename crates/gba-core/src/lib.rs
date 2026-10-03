@@ -446,19 +446,23 @@ impl Cpu {
     /// Fills the two-stage instruction pipeline after reset or a taken branch.
     fn refill<B: CpuBus>(&mut self, bus: &mut B) -> Result<(), CoreError> {
         let pc = self.registers[15];
+        let thumb = self.cpsr & CPSR_T != 0;
+        let width = if thumb { 2 } else { 4 };
         bus.set_execution_address(pc);
         bus.restart_fetch();
-        self.pipeline[0] = self.fetch(
+        self.pipeline[0] = Self::fetch(
             bus,
             pc,
+            thumb,
             Access {
                 kind: AccessKind::Fetch,
                 sequential: false,
             },
         )?;
-        self.pipeline[1] = self.fetch(
+        self.pipeline[1] = Self::fetch(
             bus,
-            pc.wrapping_add(self.instruction_width()),
+            pc.wrapping_add(width),
+            thumb,
             Access {
                 kind: AccessKind::Fetch,
                 sequential: true,
@@ -476,12 +480,12 @@ impl Cpu {
     }
 
     fn fetch<B: CpuBus>(
-        &self,
         bus: &mut B,
         address: u32,
+        thumb: bool,
         access: Access,
     ) -> Result<u32, CoreError> {
-        if self.cpsr & CPSR_T != 0 {
+        if thumb {
             bus.read16(address, access).map(u32::from)
         } else {
             bus.read32(address, access)
@@ -511,20 +515,24 @@ impl Cpu {
         let address = self.registers[15];
         bus.set_execution_address(address);
         let instruction = self.pipeline[0];
-        let width = self.instruction_width();
-        let next = self.fetch(
+        // Execution state is stable until this instruction executes. Share it
+        // across opcode width, fetch and open-bus projection before dispatch.
+        let thumb = self.cpsr & CPSR_T != 0;
+        let width = if thumb { 2 } else { 4 };
+        let next = Self::fetch(
             bus,
             address.wrapping_add(width * 2),
+            thumb,
             Access {
                 kind: AccessKind::Fetch,
                 sequential: self.next_fetch_is_sequential,
             },
         )?;
         self.pipeline = [self.pipeline[1], next];
-        bus.set_cpu_open_bus(self.pipeline, address, self.cpsr & CPSR_T != 0);
+        bus.set_cpu_open_bus(self.pipeline, address, thumb);
         self.registers[15] = address.wrapping_add(width);
         self.next_fetch_is_sequential = true;
-        if self.cpsr & CPSR_T != 0 {
+        if thumb {
             self.execute_thumb(address, instruction as u16, bus)?;
             return Ok(StepOutcome { address });
         }
@@ -1397,6 +1405,42 @@ struct StepOutcome {
     address: u32,
 }
 
+/// Decoded WAITCNT timing shared by opcode, data and idle bus cycles.
+/// Register writes replace this value after completing their own timed access;
+/// sequential eligibility and 128 KiB boundaries remain access-local decisions.
+struct Waitstates {
+    first: [u64; 3],
+    sequential: [u64; 3],
+    sram: u64,
+    prefetch: bool,
+}
+
+impl Waitstates {
+    fn from_control(control: u16) -> Self {
+        Self {
+            first: [2, 5, 8].map(|shift| [5, 4, 3, 9][((control >> shift) & 3) as usize]),
+            sequential: std::array::from_fn(|bank| {
+                if control & (1 << [4, 7, 10][bank]) != 0 {
+                    2
+                } else {
+                    [3, 5, 9][bank]
+                }
+            }),
+            sram: [5, 4, 3, 9][(control & 3) as usize],
+            prefetch: control & 0x4000 != 0,
+        }
+    }
+
+    fn beat_cycles(&self, address: u32, sequential: bool) -> u64 {
+        let bank = ((address >> 25) - 4) as usize;
+        if sequential && address & 0x1ffff != 0 {
+            self.sequential[bank]
+        } else {
+            self.first[bank]
+        }
+    }
+}
+
 /// Cartridge bus ownership and the eight-halfword opcode FIFO. Addresses stay
 /// in their waitstate window; changing windows cannot reuse another bank's fill.
 #[derive(Default)]
@@ -1414,25 +1458,9 @@ struct GamePak {
 }
 
 impl GamePak {
-    /// WAITCNT fields contain wait cycles; each beat also needs a transfer cycle.
-    fn beat_cycles(waitcnt: u16, address: u32, sequential: bool) -> u64 {
-        let bank = ((address >> 25) - 4) as usize;
-        let first_shift = [2, 5, 8][bank];
-        let second_shift = [4, 7, 10][bank];
-        if sequential && address & 0x1ffff != 0 {
-            if waitcnt & (1 << second_shift) != 0 {
-                2
-            } else {
-                [3, 5, 9][bank]
-            }
-        } else {
-            [5, 4, 3, 9][((waitcnt >> first_shift) & 3) as usize]
-        }
-    }
-
     /// Fills only while the cartridge bus is free, retaining an unfinished beat.
-    fn fill(&mut self, waitcnt: u16, cycles: u64) {
-        if waitcnt & 0x4000 == 0 {
+    fn fill(&mut self, timing: &Waitstates, cycles: u64) {
+        if !timing.prefetch {
             return;
         }
         let Some(head) = self.head else {
@@ -1445,7 +1473,7 @@ impl GamePak {
                 self.progress = 0;
                 break;
             }
-            let cost = Self::beat_cycles(waitcnt, address, true);
+            let cost = timing.beat_cycles(address, true);
             if self.progress < cost {
                 break;
             }
@@ -1460,9 +1488,9 @@ impl GamePak {
     /// Consumes instruction beats without letting data reads enter the FIFO.
     /// A matching FIFO address survives CPU accesses to internal RAM; cartridge
     /// data, redirects, and WAITCNT writes discard the old stream instead.
-    fn access(&mut self, waitcnt: u16, address: u32, width: usize, access: Access) -> u64 {
+    fn access(&mut self, timing: &Waitstates, address: u32, width: usize, access: Access) -> u64 {
         let fetch = matches!(access.kind, AccessKind::Fetch);
-        let enabled = waitcnt & 0x4000 != 0;
+        let enabled = timing.prefetch;
         let hit = fetch && enabled && self.head == Some(address);
         let sequential =
             access.sequential && self.next_access == Some(address) && self.fetch_stream == fetch;
@@ -1477,7 +1505,7 @@ impl GamePak {
             if hit && self.buffered != 0 {
                 self.buffered -= 1;
             } else {
-                let cost = Self::beat_cycles(waitcnt, current, beat != 0 || sequential || hit);
+                let cost = timing.beat_cycles(current, beat != 0 || sequential || hit);
                 cycles += cost.saturating_sub(self.progress);
                 self.progress = 0;
             }
@@ -1488,7 +1516,7 @@ impl GamePak {
         self.head = (fetch && enabled).then_some(next);
         if cycles == 0 {
             // A FIFO hit occupies one CPU cycle while the cartridge keeps filling.
-            self.fill(waitcnt, 1);
+            self.fill(timing, 1);
             1
         } else {
             cycles
@@ -1558,6 +1586,7 @@ struct System {
     /// Earliest observable device/input edge, invalidated by MMIO mutations.
     next_device_event: u64,
     gamepak: GamePak,
+    waitstates: Waitstates,
     /// Last driven word supplies otherwise unmapped data reads.
     open_bus: u32,
     /// Instruction prefetch remains independent of the DMA/data bus latch.
@@ -1593,6 +1622,7 @@ impl System {
             devices_at: 0,
             next_device_event: 0,
             gamepak: GamePak::default(),
+            waitstates: Waitstates::from_control(0),
             open_bus: 0,
             cpu_open_bus: 0,
         };
@@ -1916,11 +1946,15 @@ impl System {
             return Err(CoreError::InvalidAccessAlignment { address, width: 2 });
         }
         self.charge(address, 2, access);
-        if let Some(value) = self.gpio_read(address) {
+        let region = address >> 24;
+        if matches!(region, 0x08..=0x0d)
+            && let Some(value) = self.gpio_read(address)
+        {
             self.open_bus = u32::from(value) * 0x0001_0001;
             return Ok(value);
         }
-        if self.eeprom_address(address)
+        if region == 0x0d
+            && self.eeprom_address(address)
             && matches!(access.kind, AccessKind::Data)
             && let Some(eeprom) = self.eeprom.as_mut()
         {
@@ -1930,12 +1964,16 @@ impl System {
             self.open_bus = u32::from(value) * 0x0001_0001;
             return Ok(value);
         }
-        if let Some(value) = self.backup_read(address) {
+        if matches!(region, 0x0e..=0x0f)
+            && let Some(value) = self.backup_read(address)
+        {
             let value = u16::from(value) * 0x0101;
             self.open_bus = u32::from(value) * 0x0001_0001;
             return Ok(value);
         }
-        if let Some(word) = self.bios_read(address, access) {
+        if region == 0
+            && let Some(word) = self.bios_read(address, access)
+        {
             return Ok((word >> ((address & 2) * 8)) as u16);
         }
         let value = match self.read_bytes(address, 2) {
@@ -1954,22 +1992,32 @@ impl System {
             return Err(CoreError::InvalidAccessAlignment { address, width: 4 });
         }
         self.charge(address, 4, access);
-        if self.gpio_read(address).is_some() || self.gpio_read(address + 2).is_some() {
-            let half = |a| {
-                self.gpio_read(a).unwrap_or_else(|| {
-                    self.read_bytes(a, 2)
-                        .map_or(0, |b| u16::from_le_bytes([b[0], b[1]]))
-                })
-            };
-            let value = u32::from(half(address)) | (u32::from(half(address + 2)) << 16);
-            self.open_bus = value;
-            return Ok(value);
+        let region = address >> 24;
+        if matches!(region, 0x08..=0x0d) && self.rtc.is_some() {
+            let low = self.gpio_read(address);
+            let high = self.gpio_read(address + 2);
+            if low.is_some() || high.is_some() {
+                let half = |a, gpio: Option<u16>| {
+                    gpio.unwrap_or_else(|| {
+                        self.read_bytes(a, 2)
+                            .map_or(0, |b| u16::from_le_bytes([b[0], b[1]]))
+                    })
+                };
+                let value =
+                    u32::from(half(address, low)) | (u32::from(half(address + 2, high)) << 16);
+                self.open_bus = value;
+                return Ok(value);
+            }
         }
-        if let Some(value) = self.backup_read(address) {
+        if matches!(region, 0x0e..=0x0f)
+            && let Some(value) = self.backup_read(address)
+        {
             self.open_bus = u32::from(value) * 0x0101_0101;
             return Ok(self.open_bus);
         }
-        if let Some(word) = self.bios_read(address, access) {
+        if region == 0
+            && let Some(word) = self.bios_read(address, access)
+        {
             return Ok(word);
         }
         let value = match self.read_bytes(address, 4) {
@@ -2119,6 +2167,7 @@ impl System {
                 self.gamepak.buffered = 0;
                 self.gamepak.progress = 0;
                 self.io[range].copy_from_slice(&(value & 0x5fff).to_le_bytes());
+                self.waitstates = Waitstates::from_control(value & 0x5fff);
                 return Ok(());
             }
             self.io[range].copy_from_slice(&bytes);
@@ -2276,14 +2325,15 @@ impl System {
     /// Charges timing at the bus boundary, once per CPU access. Internal memory
     /// leaves the cartridge free to prefetch; SRAM and ROM accesses own that bus.
     fn charge(&mut self, address: u32, width: usize, access: Access) {
-        let waitcnt = u16::from_le_bytes([self.io[0x204], self.io[0x205]]);
         let beats = (width / 2).max(1) as u64;
         let cartridge = (0x08000000..0x10000000).contains(&address);
         let cycles = match address >> 24 {
-            0x08..=0x0d => self.gamepak.access(waitcnt, address, width, access),
+            0x08..=0x0d => self
+                .gamepak
+                .access(&self.waitstates, address, width, access),
             0x0e..=0x0f => {
                 self.gamepak = GamePak::default();
-                [5, 4, 3, 9][(waitcnt & 3) as usize]
+                self.waitstates.sram
             }
             0x02 => 3 * beats,
             0x03 | 0x07 => 1,
@@ -2291,7 +2341,7 @@ impl System {
             _ => beats,
         };
         if !cartridge {
-            self.gamepak.fill(waitcnt, cycles);
+            self.gamepak.fill(&self.waitstates, cycles);
         }
         self.advance_time(cycles);
         if address >> 24 == 0x04 {
@@ -2320,21 +2370,13 @@ impl System {
     fn synchronize_devices(&mut self) {
         let target = self.cycles;
         self.cycles = self.devices_at;
-        self.advance_devices(target);
+        let next_video_event = self.advance_devices(target);
         self.devices_at = target;
         self.next_device_event = self
             .audio
             .next_event(target)
             .min(self.display.next_event)
-            .min(self.next_vblank());
-        if self.dma.iter().any(|dma| dma.enabled_for(2)) {
-            self.next_device_event = self.next_device_event.min(self.next_visible_hblank());
-        }
-        if self.io[4] & 0x20 != 0
-            && let Some(edge) = self.next_vcount_match()
-        {
-            self.next_device_event = self.next_device_event.min(edge);
-        }
+            .min(next_video_event);
         if let Some(event) = self.inputs.front() {
             self.next_device_event = self.next_device_event.min(event.cycle.0);
         }
@@ -2358,16 +2400,27 @@ impl System {
         }
     }
 
-    fn advance_devices(&mut self, target: u64) {
+    /// Materializes device edges and returns the next required video edge.
+    /// Future edges remain valid throughout this call: only DMA request levels
+    /// and input state change, not DISPSTAT or DMA timing configuration.
+    fn advance_devices(&mut self, target: u64) -> u64 {
         // Raise timed requests before CPU execution can continue. Each channel
         // still transfers one bus beat at a time through Machine::step(), where
         // the existing channel order provides hardware priority.
         let vblank = self.next_vblank();
-        let hblank = self.next_visible_hblank();
-        let vcount = self.next_vcount_match();
+        let hblank = self
+            .dma
+            .iter()
+            .any(|dma| dma.enabled_for(2))
+            .then(|| self.next_visible_hblank());
+        let vcount = if self.io[4] & 0x20 != 0 {
+            self.next_vcount_match()
+        } else {
+            None
+        };
 
         let vblank_due = vblank <= target;
-        let hblank_due = hblank <= target;
+        let hblank_due = hblank.is_some_and(|edge| edge <= target);
         let vcount_due = vcount.is_some_and(|edge| edge <= target);
 
         for dma in &mut self.dma {
@@ -2420,6 +2473,28 @@ impl System {
             }
         }
         self.cycles = target;
+        // Reuse every edge that has not crossed. Recalculate only a consumed
+        // edge against the new device clock, retaining exact IRQ/DMA boundaries.
+        let mut next = if vblank_due {
+            self.next_vblank()
+        } else {
+            vblank
+        };
+        if let Some(edge) = hblank {
+            next = next.min(if hblank_due {
+                self.next_visible_hblank()
+            } else {
+                edge
+            });
+        }
+        if let Some(edge) = if vcount_due {
+            self.next_vcount_match()
+        } else {
+            vcount
+        } {
+            next = next.min(edge);
+        }
+        next
     }
 }
 
@@ -2560,8 +2635,7 @@ impl CpuBus for System {
     }
 
     fn idle(&mut self, cycles: u64) {
-        let waitcnt = u16::from_le_bytes([self.io[0x204], self.io[0x205]]);
-        self.gamepak.fill(waitcnt, cycles);
+        self.gamepak.fill(&self.waitstates, cycles);
         self.advance_time(cycles);
     }
 }
@@ -2575,63 +2649,89 @@ impl Default for System {
 /// Register snapshot for one text-background scanline. This is rebuilt at each
 /// drawing boundary so guest writes need no tile or register cache invalidation.
 struct TextBackground {
-    control: u16,
     scroll_x: usize,
-    scroll_y: usize,
-    width: usize,
-    height: usize,
+    width_mask: usize,
+    map_row: usize,
+    tile_y: usize,
+    character_base: usize,
+    color_256: bool,
+    /// One source tile row, valid only during this immutable drawing boundary.
+    tile_column: usize,
+    colors: [u16; 8],
+    opaque: u8,
 }
 
 impl TextBackground {
-    fn from_registers(io: &[u8], background: usize) -> Self {
+    fn from_registers(io: &[u8], background: usize, line: usize) -> Self {
         let halfword = |offset| u16::from_le_bytes([io[offset], io[offset + 1]]);
         let control = halfword(8 + background * 2);
+        let width = if control & (1 << 14) != 0 { 512 } else { 256 };
+        let height = if control & (1 << 15) != 0 { 512 } else { 256 };
+        let y = (line + usize::from(halfword(0x12 + background * 4) & 0x1ff)) & (height - 1);
         Self {
-            control,
             scroll_x: usize::from(halfword(0x10 + background * 4) & 0x1ff),
-            scroll_y: usize::from(halfword(0x12 + background * 4) & 0x1ff),
-            width: if control & (1 << 14) != 0 { 512 } else { 256 },
-            height: if control & (1 << 15) != 0 { 512 } else { 256 },
+            width_mask: width - 1,
+            map_row: usize::from((control >> 8) & 31) * 0x800
+                + (y / 256) * (width / 256) * 0x800
+                + (y / 8 % 32) * 64,
+            tile_y: y & 7,
+            character_base: usize::from((control >> 2) & 3) * 0x4000,
+            color_256: control & (1 << 7) != 0,
+            tile_column: usize::MAX,
+            colors: [0; 8],
+            opaque: 0,
         }
     }
 
     /// Resolves a texel through screen blocks, tile flips, and its palette.
     /// Color index zero is transparent regardless of the selected palette bank.
-    fn pixel(&self, x: usize, y: usize, vram: &[u8], palette: &[u8]) -> Option<u16> {
-        let x = (x + self.scroll_x) % self.width;
-        let y = (y + self.scroll_y) % self.height;
-        let block = x / 256 + (y / 256) * (self.width / 256);
-        let map_base = usize::from((self.control >> 8) & 31) * 0x800;
-        let map_offset = (map_base + block * 0x800 + ((y / 8 % 32) * 32 + x / 8 % 32) * 2) & 0xffff;
-        let entry = u16::from_le_bytes([vram[map_offset], vram[map_offset + 1]]);
-        let tile_x = if entry & (1 << 10) != 0 {
-            7 - x % 8
-        } else {
-            x % 8
-        };
-        let tile_y = if entry & (1 << 11) != 0 {
-            7 - y % 8
-        } else {
-            y % 8
-        };
-        let character_base = usize::from((self.control >> 2) & 3) * 0x4000;
-        let tile = usize::from(entry & 0x3ff);
-        let (color, bank) = if self.control & (1 << 7) != 0 {
-            let offset = character_base + tile * 64 + tile_y * 8 + tile_x;
-            // Text tiles cannot source the OBJ character region above 64 KiB.
-            let color = *vram.get(..0x10000)?.get(offset)?;
-            (usize::from(color), 0)
-        } else {
-            let offset = character_base + tile * 32 + tile_y * 4 + tile_x / 2;
-            let packed = *vram.get(..0x10000)?.get(offset)?;
-            let color = (packed >> ((tile_x % 2) * 4)) & 15;
-            (usize::from(color), usize::from(entry >> 12) * 16)
-        };
-        if color == 0 {
-            return None;
+    fn pixel(&mut self, x: usize, vram: &[u8], palette: &[u8]) -> Option<u16> {
+        let x = (x + self.scroll_x) & self.width_mask;
+        let column = x / 8;
+        if column != self.tile_column {
+            self.tile_column = column;
+            self.opaque = 0;
+            let map_offset = (self.map_row + (x / 256) * 0x800 + (column & 31) * 2) & 0xffff;
+            let entry = u16::from_le_bytes([vram[map_offset], vram[map_offset + 1]]);
+            let tile_y = if entry & (1 << 11) != 0 {
+                7 - self.tile_y
+            } else {
+                self.tile_y
+            };
+            let row_bytes = if self.color_256 { 8 } else { 4 };
+            let row_offset = self.character_base
+                + usize::from(entry & 0x3ff) * row_bytes * 8
+                + tile_y * row_bytes;
+            // Invalid text character rows remain transparent; OBJ character
+            // memory above 64 KiB cannot be sampled as text background data.
+            if let Some(row) = vram[..0x10000].get(row_offset..row_offset + row_bytes) {
+                let bank = if self.color_256 {
+                    0
+                } else {
+                    usize::from(entry >> 12) * 16
+                };
+                for local_x in 0..8 {
+                    let source_x = if entry & (1 << 10) != 0 {
+                        7 - local_x
+                    } else {
+                        local_x
+                    };
+                    let color = if self.color_256 {
+                        row[source_x]
+                    } else {
+                        (row[source_x / 2] >> ((source_x & 1) * 4)) & 15
+                    };
+                    if color != 0 {
+                        let offset = (bank + usize::from(color)) * 2;
+                        self.colors[local_x] =
+                            u16::from_le_bytes([palette[offset], palette[offset + 1]]);
+                        self.opaque |= 1 << local_x;
+                    }
+                }
+            }
         }
-        let offset = (bank + color) * 2;
-        Some(u16::from_le_bytes([palette[offset], palette[offset + 1]]))
+        let local_x = x & 7;
+        (self.opaque & (1 << local_x) != 0).then_some(self.colors[local_x])
     }
 }
 
@@ -2679,30 +2779,6 @@ impl Object {
         })
     }
 
-    /// OBJ mosaic repeats samples on the screen grid, clamping groups that begin
-    /// before the object to its first source texel,
-    /// before flips or affine transforms; window selection uses the destination pixel.
-    fn mosaic(
-        &self,
-        local_x: usize,
-        local_y: usize,
-        screen_x: usize,
-        screen_y: usize,
-        io: &[u8],
-    ) -> (usize, usize) {
-        if self.attr0 & 0x1000 == 0 {
-            return (local_x, local_y);
-        }
-
-        let width = usize::from(io[0x4d] & 0x0f) + 1;
-        let height = usize::from(io[0x4d] >> 4) + 1;
-
-        (
-            local_x.saturating_sub(screen_x % width),
-            local_y.saturating_sub(screen_y % height),
-        )
-    }
-
     /// Finishes the final screen-aligned horizontal mosaic block. Both visible
     /// objects and object windows use this coverage; nominal bounds still define
     /// source geometry and vertical clipping. Signed X preserves left-edge wrapping.
@@ -2728,84 +2804,122 @@ impl Object {
         (self.width * factor, self.height * factor)
     }
 
-    /// Resolves one local texel through OBJ character memory and OBJ palette RAM.
-    /// Tile numbers count 32-byte units in both color depths and wrap in 32 KiB.
-    fn pixel(
-        &self,
-        mut x: usize,
-        mut y: usize,
-        control: u16,
-        vram: &[u8],
-        palette: &[u8],
-    ) -> Option<u16> {
-        if let Some([pa, pb, pc, pd]) = self.matrix {
-            let (bound_width, bound_height) = self.bounds();
-            let dx = x as i32 - bound_width as i32 / 2;
+    /// Prepares addressing and vertical transform terms shared by one object row.
+    /// The snapshot is also used by object-window coverage and expires at scanout.
+    fn row(&self, y: usize, line: usize, control: u16, io: &[u8]) -> ObjectRow<'_> {
+        let mosaic = self.attr0 & 0x1000 != 0;
+        let mosaic_width = if mosaic {
+            usize::from(io[0x4d] & 15) + 1
+        } else {
+            1
+        };
+        let y = if mosaic {
+            y.saturating_sub(line % (usize::from(io[0x4d] >> 4) + 1))
+        } else {
+            y
+        };
+        let (bound_width, bound_height) = self.bounds();
+        let color_256 = self.attr0 & 0x2000 != 0;
+        let units = if color_256 { 2 } else { 1 };
+        let one_dimensional = control & 0x40 != 0;
+        let mut base = usize::from(self.attr2 & 0x3ff);
+        if color_256 && !one_dimensional {
+            base &= !1;
+        }
+        let transform = self.matrix.map(|[pa, pb, pc, pd]| {
             let dy = y as i32 - bound_height as i32 / 2;
-            // Arithmetic shifts retain hardware flooring for negative fractions.
-            // OAM supplies a screen-to-source matrix, including singular matrices.
-            let source_x = ((pa * dx + pb * dy) >> 8) + self.width as i32 / 2;
-            let source_y = ((pc * dx + pd * dy) >> 8) + self.height as i32 / 2;
+            [
+                pa,
+                pb * dy - pa * (bound_width as i32 / 2),
+                pc,
+                pd * dy - pc * (bound_width as i32 / 2),
+            ]
+        });
+        let source_y = if transform.is_none() && self.attr1 & 0x2000 != 0 {
+            self.height - 1 - y
+        } else {
+            y
+        };
+        ObjectRow {
+            object: self,
+            mosaic_width,
+            transform,
+            source_y,
+            color_256,
+            units,
+            one_dimensional,
+            base,
+            row_stride: if one_dimensional {
+                self.width / 8 * units
+            } else {
+                32
+            },
+            palette_bank: if color_256 {
+                0
+            } else {
+                usize::from(self.attr2 >> 12) * 16
+            },
+        }
+    }
+}
+
+/// Immutable per-row OBJ state; no cached data survives guest VRAM/OAM writes.
+struct ObjectRow<'a> {
+    object: &'a Object,
+    mosaic_width: usize,
+    transform: Option<[i32; 4]>,
+    source_y: usize,
+    color_256: bool,
+    units: usize,
+    one_dimensional: bool,
+    base: usize,
+    row_stride: usize,
+    palette_bank: usize,
+}
+
+impl ObjectRow<'_> {
+    /// Applies screen-aligned mosaic before flips/transforms, then samples OBJ RAM.
+    /// Character names retain 1D low bits and 2D horizontal wrapping semantics.
+    fn pixel(&self, local_x: usize, screen_x: usize, vram: &[u8], palette: &[u8]) -> Option<u16> {
+        let mut x = if self.mosaic_width > 1 {
+            local_x.saturating_sub(screen_x % self.mosaic_width)
+        } else {
+            local_x
+        };
+        let mut y = self.source_y;
+        if let Some([pa, bias_x, pc, bias_y]) = self.transform {
+            let source_x = ((pa * x as i32 + bias_x) >> 8) + self.object.width as i32 / 2;
+            let source_y = ((pc * x as i32 + bias_y) >> 8) + self.object.height as i32 / 2;
             if source_x < 0
                 || source_y < 0
-                || source_x >= self.width as i32
-                || source_y >= self.height as i32
+                || source_x >= self.object.width as i32
+                || source_y >= self.object.height as i32
             {
                 return None;
             }
             x = source_x as usize;
             y = source_y as usize;
-        } else {
-            if self.attr1 & (1 << 12) != 0 {
-                x = self.width - 1 - x;
-            }
-            if self.attr1 & (1 << 13) != 0 {
-                y = self.height - 1 - y;
-            }
+        } else if self.object.attr1 & 0x1000 != 0 {
+            x = self.object.width - 1 - x;
         }
-        let color_256 = self.attr0 & (1 << 13) != 0;
-        let units = if color_256 { 2 } else { 1 };
-        let one_dimensional = control & (1 << 6) != 0;
-
-        let mut base = usize::from(self.attr2 & 0x03ff);
-
         let tile_x = x / 8;
-        let tile_y = y / 8;
-
-        let tile = if one_dimensional {
-            // 1D OBJ data is contiguous. Character names are 32-byte units,
-            // including the guest-supplied low bit in 8bpp mode.
-            let row_stride = (self.width / 8) * units;
-
-            (base + tile_y * row_stride + tile_x * units) & 0x03ff
+        let row = (y / 8) * self.row_stride;
+        let tile = if self.one_dimensional {
+            (self.base + row + tile_x * self.units) & 0x3ff
         } else {
-            // In 8bpp 2D mapping, character-name bit 0 is ignored.
-            if color_256 {
-                base &= !1;
-            }
-
-            // 2D mapping is a 32-unit-wide character matrix. Horizontal addressing
-            // wraps inside the current row rather than carrying into the next row.
-            let row = (base & !31) + tile_y * 32;
-            let column = ((base & 31) + tile_x * units) & 31;
-
-            (row + column) & 0x03ff
+            ((self.base & !31) + row + (((self.base & 31) + tile_x * self.units) & 31)) & 0x3ff
         };
-
         let offset = 0x10000 + tile * 32;
-        let (color, bank) = if color_256 {
-            (usize::from(vram[offset + (y % 8) * 8 + x % 8]), 0)
+        let color = if self.color_256 {
+            usize::from(vram[offset + (y & 7) * 8 + (x & 7)])
         } else {
-            let packed = vram[offset + (y % 8) * 4 + x % 8 / 2];
-            (
-                usize::from((packed >> ((x % 2) * 4)) & 15),
-                usize::from(self.attr2 >> 12) * 16,
-            )
+            let packed = vram[offset + (y & 7) * 4 + (x & 7) / 2];
+            usize::from((packed >> ((x & 1) * 4)) & 15)
         };
         if color == 0 {
             return None;
         }
-        let offset = 0x200 + (bank + color) * 2;
+        let offset = 0x200 + (self.palette_bank + color) * 2;
         Some(u16::from_le_bytes([palette[offset], palette[offset + 1]]))
     }
 }
@@ -2813,62 +2927,68 @@ impl Object {
 /// Affine source sampling uses signed 8.8 coefficients and signed 28-bit origins.
 /// The display owns accumulated origins; this snapshot resolves one scanline.
 struct AffineBackground {
-    control: u16,
     origin: [i32; 2],
     step: [i32; 2],
+    width: i32,
+    height: i32,
+    wrap: bool,
+    mode: u16,
+    page: usize,
+    map: usize,
+    character_base: usize,
 }
 
 impl AffineBackground {
     /// Captures horizontal coefficients while retaining the display's current line origin.
-    fn new(io: &[u8], background: usize, origin: [i32; 2]) -> Self {
+    fn new(io: &[u8], background: usize, origin: [i32; 2], mode: u16, page: usize) -> Self {
         let base = 0x20 + (background - 2) * 16;
-        Self {
-            control: u16::from_le_bytes([io[8 + background * 2], io[9 + background * 2]]),
-            origin,
-            step: [0, 4].map(|offset| {
-                i16::from_le_bytes([io[base + offset], io[base + offset + 1]]) as i32
-            }),
-        }
-    }
-
-    /// Bitmap bounds always clip; tiled backgrounds may wrap through BGxCNT.
-    fn pixel(
-        &self,
-        screen_x: usize,
-        mode: u16,
-        page: usize,
-        vram: &[u8],
-        palette: &[u8],
-    ) -> Option<u16> {
-        let [mut x, mut y] = std::array::from_fn(|axis| {
-            self.origin[axis].wrapping_add(self.step[axis] * screen_x as i32) >> 8
-        });
+        let control = u16::from_le_bytes([io[8 + background * 2], io[9 + background * 2]]);
         let (width, height) = if mode == 5 {
             (160, 128)
         } else if mode >= 3 {
             (240, 160)
         } else {
-            let size = 128 << (self.control >> 14);
+            let size = 128 << (control >> 14);
             (size, size)
         };
-        if mode < 3 && self.control & 0x2000 != 0 {
-            x = x.rem_euclid(width);
-            y = y.rem_euclid(height);
-        } else if x < 0 || y < 0 || x >= width || y >= height {
+        Self {
+            origin,
+            step: [0, 4].map(|offset| {
+                i16::from_le_bytes([io[base + offset], io[base + offset + 1]]) as i32
+            }),
+            width,
+            height,
+            wrap: mode < 3 && control & 0x2000 != 0,
+            mode,
+            page,
+            map: usize::from((control >> 8) & 31) * 0x800,
+            character_base: usize::from((control >> 2) & 3) * 0x4000,
+        }
+    }
+
+    /// Bitmap bounds always clip; tiled backgrounds may wrap through BGxCNT.
+    fn pixel(&self, position: [i32; 2], vram: &[u8], palette: &[u8]) -> Option<u16> {
+        let [mut x, mut y] = position.map(|coordinate| coordinate >> 8);
+        if self.wrap {
+            // Tiled affine dimensions are powers of two. Masking signed source
+            // coordinates preserves Euclidean wrapping, including negatives.
+            x &= self.width - 1;
+            y &= self.height - 1;
+        } else if x < 0 || y < 0 || x >= self.width || y >= self.height {
             return None;
         }
         let (x, y) = (x as usize, y as usize);
-        if mode == 3 || mode == 5 {
-            let offset = (if mode == 5 { page } else { 0 }) + (y * width as usize + x) * 2;
+        if self.mode == 3 || self.mode == 5 {
+            let offset =
+                (if self.mode == 5 { self.page } else { 0 }) + (y * self.width as usize + x) * 2;
             return Some(u16::from_le_bytes([vram[offset], vram[offset + 1]]));
         }
-        let color = if mode == 4 {
-            vram[page + y * 240 + x]
+        let color = if self.mode == 4 {
+            vram[self.page + y * 240 + x]
         } else {
-            let map = usize::from((self.control >> 8) & 31) * 0x800;
-            let tile = usize::from(vram[(map + y / 8 * (width as usize / 8) + x / 8) & 0xffff]);
-            let base = usize::from((self.control >> 2) & 3) * 0x4000;
-            vram[(base + tile * 64 + y % 8 * 8 + x % 8) & 0xffff]
+            let tile =
+                usize::from(vram[(self.map + y / 8 * (self.width as usize / 8) + x / 8) & 0xffff]);
+            vram[(self.character_base + tile * 64 + y % 8 * 8 + x % 8) & 0xffff]
         };
         if color == 0 {
             return None;
@@ -2924,18 +3044,14 @@ impl WindowMasks {
                 if y >= height {
                     continue;
                 }
+                let row = object.row(y, line, control, io);
                 for local_x in 0..object.horizontal_coverage(io) {
                     let x = (usize::from(object.attr1 & 511) + local_x) & 511;
                     if x >= SCREEN_WIDTH {
                         continue;
                     }
 
-                    let (sample_x, sample_y) = object.mosaic(local_x, y, x, line, io);
-
-                    if object
-                        .pixel(sample_x, sample_y, control, vram, palette)
-                        .is_some()
-                    {
+                    if row.pixel(local_x, x, vram, palette).is_some() {
                         layers[x] = io[0x4b] & 0x3f;
                     }
                 }
@@ -3025,6 +3141,26 @@ struct PixelStack {
 }
 
 impl PixelStack {
+    /// BGs arrive front-to-back. Two opaque BGs make deeper BG sampling
+    /// irrelevant, but the backdrop alone never closes this sampling gate.
+    #[inline]
+    fn backgrounds_complete(&self) -> bool {
+        self.second
+            .is_some_and(|pixel| pixel.layer != BLEND_LAYER_BACKDROP)
+    }
+
+    /// Appends an ordered opaque BG without recomputing per-pixel priority.
+    /// The later OBJ pass still uses general insertion against both BGs.
+    #[inline]
+    fn append_background(&mut self, pixel: LayerPixel) {
+        if self.top.layer == BLEND_LAYER_BACKDROP {
+            self.second = Some(self.top);
+            self.top = pixel;
+        } else {
+            self.second = Some(pixel);
+        }
+    }
+
     #[inline]
     fn new(backdrop: u16) -> Self {
         Self {
@@ -3049,6 +3185,57 @@ impl PixelStack {
         }
     }
 }
+
+/// Exact brightness results for the 17 hardware coefficients and channel values.
+/// Generated at compile time; six-bit green includes the palette's precision bit.
+struct BrightnessTable {
+    five: [[u8; 32]; 17],
+    six: [[u8; 64]; 17],
+}
+
+impl BrightnessTable {
+    const fn new(brighten: bool) -> Self {
+        let mut table = Self {
+            five: [[0; 32]; 17],
+            six: [[0; 64]; 17],
+        };
+        let mut coefficient = 0;
+        while coefficient <= 16 {
+            let mut value = 0;
+            while value < 64 {
+                table.six[coefficient][value] = if brighten {
+                    (value + (((63 - value) * coefficient + 8) >> 4)) as u8
+                } else {
+                    (value - ((value * coefficient + 7) >> 4)) as u8
+                };
+                if value < 32 {
+                    table.five[coefficient][value] = if brighten {
+                        (value + (((31 - value) * coefficient + 8) >> 4)) as u8
+                    } else {
+                        (value - ((value * coefficient + 7) >> 4)) as u8
+                    };
+                }
+                value += 1;
+            }
+            coefficient += 1;
+        }
+        table
+    }
+
+    #[inline]
+    fn apply(&self, color: u16, coefficient: u8) -> u16 {
+        let coefficient = usize::from(coefficient.min(16));
+        let five = &self.five[coefficient];
+        let six = &self.six[coefficient];
+        let r = u16::from(five[usize::from(color & 31)]);
+        let g = u16::from(six[usize::from(((color >> 4) & 62) | (color >> 15))]) >> 1;
+        let b = u16::from(five[usize::from((color >> 10) & 31)]);
+        r | (g << 5) | (b << 10)
+    }
+}
+
+static BRIGHTEN: BrightnessTable = BrightnessTable::new(true);
+static DARKEN: BrightnessTable = BrightnessTable::new(false);
 
 /// Snapshot of BLDCNT/BLDALPHA/BLDY at one drawing boundary.
 #[derive(Clone, Copy, Debug)]
@@ -3112,32 +3299,12 @@ impl ColorEffects {
 
     #[inline]
     fn brighten(color: u16, evy: u8) -> u16 {
-        let evy = u32::from(evy.min(16));
-
-        let mut r = u32::from(color & 31);
-        let mut g = u32::from(((color >> 4) & 62) | (color >> 15));
-        let mut b = u32::from((color >> 10) & 31);
-
-        r += ((31 - r) * evy + 8) >> 4;
-        g += ((63 - g) * evy + 8) >> 4;
-        b += ((31 - b) * evy + 8) >> 4;
-
-        (r | ((g >> 1) << 5) | (b << 10)) as u16 & 0x7fff
+        BRIGHTEN.apply(color, evy)
     }
 
     #[inline]
     fn darken(color: u16, evy: u8) -> u16 {
-        let evy = u32::from(evy.min(16));
-
-        let mut r = u32::from(color & 31);
-        let mut g = u32::from(((color >> 4) & 62) | (color >> 15));
-        let mut b = u32::from((color >> 10) & 31);
-
-        r -= (r * evy + 7) >> 4;
-        g -= (g * evy + 7) >> 4;
-        b -= (b * evy + 7) >> 4;
-
-        (r | ((g >> 1) << 5) | (b << 10)) as u16 & 0x7fff
+        DARKEN.apply(color, evy)
     }
 
     #[inline]
@@ -3264,6 +3431,7 @@ impl Display {
                 continue;
             }
 
+            let row = object.row(y, self.line, self.control, io);
             for local_x in 0..object.horizontal_coverage(io) {
                 let x = (usize::from(object.attr1 & 511) + local_x) & 511;
 
@@ -3271,9 +3439,7 @@ impl Display {
                     continue;
                 }
 
-                let (sample_x, sample_y) = object.mosaic(local_x, y, x, self.line, io);
-
-                if let Some(color) = object.pixel(sample_x, sample_y, self.control, vram, palette) {
+                if let Some(color) = row.pixel(local_x, x, vram, palette) {
                     objects[x] = Some(LayerPixel {
                         color,
                         layer: BLEND_LAYER_OBJ,
@@ -3331,13 +3497,15 @@ impl Display {
                     let mosaic_width = usize::from(io[0x4c] & 0x0f) + 1;
                     let mosaic_height = usize::from(io[0x4c] >> 4) + 1;
 
-                    for priority in (0..4).rev() {
-                        for background in (0..4).rev() {
-                            let control_offset = 8 + background * 2;
-
-                            let bg_control =
-                                u16::from_le_bytes([io[control_offset], io[control_offset + 1]]);
-
+                    // Immutable drawing-boundary snapshots are decoded once.
+                    // Front-to-back BG order permits discarding obscured samples
+                    // without changing the two surfaces retained for OBJ/blending.
+                    let bg_controls: [u16; 4] = std::array::from_fn(|background| {
+                        let offset = 8 + background * 2;
+                        u16::from_le_bytes([io[offset], io[offset + 1]])
+                    });
+                    for priority in 0..4 {
+                        for (background, &bg_control) in bg_controls.iter().enumerate() {
                             if self.control & (1 << (8 + background)) == 0
                                 || bg_control & 3 != u16::from(priority)
                             {
@@ -3367,23 +3535,25 @@ impl Display {
                                  * TextBackground contains only scanline-invariant register
                                  * state, so construct it once for the complete BG scanline.
                                  */
-                                let text_layer = TextBackground::from_registers(io, background);
+                                let mut text_layer =
+                                    TextBackground::from_registers(io, background, sample_y);
+                                let group_width = if mosaic { mosaic_width } else { 1 };
+                                let mut sample_x = 0;
+                                let mut next_group = group_width;
 
                                 for (x, stack) in stacks.iter_mut().enumerate() {
-                                    if masks.layers[x] & (1u8 << background) == 0 {
+                                    if x == next_group {
+                                        sample_x = x;
+                                        next_group += group_width;
+                                    }
+                                    if stack.backgrounds_complete()
+                                        || masks.layers[x] & (1u8 << background) == 0
+                                    {
                                         continue;
                                     }
 
-                                    let sample_x = if mosaic {
-                                        x / mosaic_width * mosaic_width
-                                    } else {
-                                        x
-                                    };
-
-                                    if let Some(color) =
-                                        text_layer.pixel(sample_x, sample_y, vram, palette)
-                                    {
-                                        stack.insert(LayerPixel {
+                                    if let Some(color) = text_layer.pixel(sample_x, vram, palette) {
+                                        stack.append_background(LayerPixel {
                                             color,
                                             layer: background as u8,
                                             priority,
@@ -3394,8 +3564,7 @@ impl Display {
                             } else {
                                 /*
                                  * Vertical affine deltas and the scanline's affine origin
-                                 * are invariant across X. The old code rebuilt this
-                                 * AffineBackground for every destination pixel.
+                                 * are invariant across X and shared by this row.
                                  */
                                 let origin = std::array::from_fn(|axis| {
                                     let offset = 0x22 + (background - 2) * 16 + axis * 4;
@@ -3416,23 +3585,30 @@ impl Display {
                                  * PA/PC horizontal steps, BGCNT and the adjusted line origin
                                  * remain constant across all 240 pixels.
                                  */
-                                let affine_layer = AffineBackground::new(io, background, origin);
+                                let affine_layer =
+                                    AffineBackground::new(io, background, origin, mode, page);
+                                let group_width = if mosaic { mosaic_width } else { 1 };
+                                let mut position = affine_layer.origin;
+                                let step =
+                                    affine_layer.step.map(|value| value * group_width as i32);
+                                let mut next_group = group_width;
 
                                 for (x, stack) in stacks.iter_mut().enumerate() {
-                                    if masks.layers[x] & (1u8 << background) == 0 {
+                                    if x == next_group {
+                                        for (coordinate, delta) in position.iter_mut().zip(step) {
+                                            *coordinate = coordinate.wrapping_add(delta);
+                                        }
+                                        next_group += group_width;
+                                    }
+                                    if stack.backgrounds_complete()
+                                        || masks.layers[x] & (1u8 << background) == 0
+                                    {
                                         continue;
                                     }
 
-                                    let sample_x = if mosaic {
-                                        x / mosaic_width * mosaic_width
-                                    } else {
-                                        x
-                                    };
-
-                                    if let Some(color) =
-                                        affine_layer.pixel(sample_x, mode, page, vram, palette)
+                                    if let Some(color) = affine_layer.pixel(position, vram, palette)
                                     {
-                                        stack.insert(LayerPixel {
+                                        stack.append_background(LayerPixel {
                                             color,
                                             layer: background as u8,
                                             priority,
