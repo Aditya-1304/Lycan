@@ -40,8 +40,10 @@ pub const BUTTONS: [Button; 10] = [
     Button::L,
 ];
 
-// Recover ordinary callback jitter while bounding work to 1.5 guest frames.
-const LIVE_CYCLE_BUDGET: u64 = CYCLES_PER_FRAME + CYCLES_PER_FRAME / 2;
+// Cover a 30 Hz callback interval plus ordinary jitter without accumulating
+// pacing debt on a core that can sustain realtime execution. Instruction work
+// remains bounded separately, and suspension still discards excess backlog.
+const LIVE_CYCLE_BUDGET: u64 = CYCLES_PER_FRAME * 3;
 // Scheduler suspension cannot create an unbounded recovery workload.
 const LIVE_MAX_BACKLOG: u64 = CYCLES_PER_FRAME * 3;
 const LIVE_INSTRUCTION_BUDGET: usize = 400_000;
@@ -630,7 +632,11 @@ mod tests {
             assert!(session.cycles().0 >= GBA_CLOCK_HZ && session.cycles().0 < GBA_CLOCK_HZ + 40);
             (session.cycles(), session.framebuffer().to_vec())
         };
-        assert_eq!(run(60), run(144));
+        // A slow presentation callback must still cover its full host interval.
+        // The former 1.5-frame cap loses guest time at a steady 30 Hz cadence.
+        let reference = run(60);
+        assert_eq!(run(30), reference);
+        assert_eq!(run(144), reference);
     }
 
     // Catches paused/hidden host time becoming catch-up work, or queued key presses
@@ -664,17 +670,18 @@ mod tests {
         session.advance_host_time(Duration::from_secs(200)).unwrap();
         assert_eq!(session.cycles(), before);
         session
-            .advance_host_time(Duration::from_millis(200_050))
+            .advance_host_time(Duration::from_millis(200_100))
             .unwrap();
         assert!(!session.button_pressed(Button::Right));
         assert!(session.slowed());
-        assert!(session.cycles().0 <= before.0 + 2 * CYCLES_PER_FRAME + 40);
+        assert!(session.cycles().0 <= before.0 + LIVE_MAX_BACKLOG + 40);
         let reached = session.cycles();
         session
-            .advance_host_time(Duration::from_millis(200_050))
+            .advance_host_time(Duration::from_millis(200_100))
             .unwrap();
-        assert!(session.cycles() > reached);
-        assert!(session.cycles().0 <= before.0 + 3 * CYCLES_PER_FRAME + 80);
+        // The bounded backlog fits in one callback; a repeated host timestamp
+        // must not introduce fresh guest time after that work is complete.
+        assert_eq!(session.cycles(), reached);
     }
 
     // Catches logical input stopping at the session while the actual guest sees
