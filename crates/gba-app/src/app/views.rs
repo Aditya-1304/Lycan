@@ -26,6 +26,25 @@ fn centered_launch_buttons<R>(
     .inner
 }
 
+/// Transient navigation only; section selection is not a persisted preference.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub(super) enum SettingsSection {
+    #[default]
+    Controls,
+    Audio,
+    Display,
+}
+
+impl SettingsSection {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Controls => "Controls",
+            Self::Audio => "Audio",
+            Self::Display => "Display",
+        }
+    }
+}
+
 impl GbaApp {
     /// Keeps diagnostic startup intact while selecting the normal launch/player
     /// layout from installed-session state, including paused and restoring games.
@@ -830,6 +849,93 @@ impl GbaApp {
         });
     }
 
+    /// Section changes stay within the same input-owning settings dialog. Cancel
+    /// capture before hiding Controls so later keys cannot mutate an unseen binding.
+    fn select_settings_section(&mut self, ctx: &egui::Context, section: SettingsSection) {
+        if self.settings_section != section {
+            let active_capture = self.capture.take().is_some();
+            let pending_capture = self.pending_capture.take().is_some();
+            if active_capture || pending_capture {
+                self.capture_notice = Some("Binding cancelled.".into());
+            }
+            self.settings_section = section;
+            self.own_ui_keys(ctx);
+            ctx.request_repaint();
+        }
+    }
+
+    fn draw_controls_settings(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        ui.heading("Controls");
+        ui.label("Keyboard keys are logical keys; positions may differ across layouts.");
+        egui::Grid::new("settings-bindings")
+            .num_columns(3)
+            .spacing([24.0, 5.0])
+            .show(ui, |ui| {
+                for (slot, button) in BINDING_BUTTONS.into_iter().enumerate() {
+                    ui.label(button_name(button));
+                    ui.label(self.binding_labels[slot].full);
+                    if self.action(ui, self.capture.is_none(), "Change") {
+                        self.begin_binding_capture(ctx, slot);
+                    }
+                    ui.end_row();
+                }
+            });
+        if let Some(capture) = &self.capture {
+            ui.label(format!(
+                "Binding {} — press a supported key. Escape cancels.",
+                button_name(BINDING_BUTTONS[capture.slot])
+            ));
+            if self.action(ui, true, "Cancel binding") {
+                self.capture = None;
+                self.capture_notice = Some("Binding cancelled.".into());
+            }
+        }
+        if let Some(notice) = &self.capture_notice {
+            ui.label(notice);
+        }
+        if self.action(ui, self.capture.is_none(), "Reset bindings") {
+            if self.settings.preferences.bindings != crate::settings::DEFAULT_BINDINGS {
+                let previous = self.settings.preferences.bindings;
+                self.settings.preferences.bindings = crate::settings::DEFAULT_BINDINGS;
+                self.bindings_changed(ctx, previous);
+            }
+            self.capture_notice = Some("Keyboard bindings reset to defaults.".into());
+        }
+        ui.checkbox(
+            &mut self.settings.preferences.legend_visible,
+            "Show controller legend",
+        );
+        ui.label("Keyboard controls; change bindings in Settings.");
+    }
+
+    fn draw_audio_settings(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Audio");
+        self.draw_audio_controls(ui, 250.0, true);
+    }
+
+    fn draw_display_settings(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Display");
+        ui.horizontal_wrapped(|ui| {
+            ui.selectable_value(
+                &mut self.settings.preferences.scaling,
+                crate::settings::Scaling::Fit,
+                "Fit window",
+            );
+            ui.selectable_value(
+                &mut self.settings.preferences.scaling,
+                crate::settings::Scaling::Integer,
+                "Integer pixels",
+            );
+        });
+        ui.label("Integer uses whole physical pixels per GBA pixel; Fit fills the available 3:2 area. Both use nearest-neighbor filtering.");
+        if self.settings.preferences.scaling == crate::settings::Scaling::Integer
+            && self.integer_fallback
+        {
+            ui.label("Fit used because the window is too small for 1×.");
+        }
+        self.draw_fullscreen_control(ui, true);
+    }
+
     /// Settings suspend execution while capture owns logical-key events.
     fn draw_settings(&mut self, ctx: &egui::Context) {
         if !self.settings_open {
@@ -852,76 +958,70 @@ impl GbaApp {
         let mut open = self.settings_open;
         let mut close_clicked = false;
         egui::Window::new("Settings")
+            // Keep old stacked-layout geometry from overriding the larger default.
+            .id(egui::Id::new("settings-sections"))
             .open(&mut open)
             .collapsible(false)
             .resizable(true)
-            .default_width(420.0)
+            .default_size(egui::vec2(660.0, 500.0))
+            .min_size(egui::vec2(320.0, 240.0))
             .show(ctx, |ui| {
-                egui::ScrollArea::vertical().show(ui, |ui| {
-                    ui.heading("Controls");
-                    ui.label(
-                        "Keyboard keys are logical keys; positions may differ across layouts.",
-                    );
-                    egui::Grid::new("settings-bindings")
-                        .num_columns(3)
-                        .spacing([24.0, 5.0])
-                        .show(ui, |ui| {
-                            for (slot, button) in BINDING_BUTTONS.into_iter().enumerate() {
-                                ui.label(button_name(button));
-                                ui.label(self.binding_labels[slot].full);
-                                if self.action(ui, self.capture.is_none(), "Change") {
-                                    self.begin_binding_capture(ctx, slot);
+                let footer_height = 30.0 + 2.0 * ui.spacing().item_spacing.y + 6.0;
+                let body_height = (ui.available_height() - footer_height).max(0.0);
+                let sidebar_width = (ui.available_width() * 0.22).clamp(80.0, 140.0);
+                ui.allocate_ui_with_layout(
+                    egui::vec2(ui.available_width(), body_height),
+                    egui::Layout::left_to_right(egui::Align::Min),
+                    |ui| {
+                        ui.allocate_ui_with_layout(
+                            egui::vec2(sidebar_width, body_height),
+                            egui::Layout::top_down(egui::Align::Min),
+                            |ui| {
+                                for section in [
+                                    SettingsSection::Controls,
+                                    SettingsSection::Audio,
+                                    SettingsSection::Display,
+                                ] {
+                                    let response = ui.add_sized(
+                                        [sidebar_width, 32.0],
+                                        egui::Button::new(section.label())
+                                            .selected(self.settings_section == section),
+                                    );
+                                    if response.clicked() {
+                                        self.select_settings_section(ctx, section);
+                                    }
                                 }
-                                ui.end_row();
-                            }
-                        });
-                    if let Some(capture) = &self.capture {
-                        ui.label(format!(
-                            "Binding {} — press a supported key. Escape cancels.",
-                            button_name(BINDING_BUTTONS[capture.slot])
-                        ));
-                        if self.action(ui, true, "Cancel binding") {
-                            self.capture = None;
-                            self.capture_notice = Some("Binding cancelled.".into());
-                        }
-                    }
-                    if let Some(notice) = &self.capture_notice {
-                        ui.label(notice);
-                    }
-                    if self.action(ui, self.capture.is_none(), "Reset bindings") {
-                        if self.settings.preferences.bindings != crate::settings::DEFAULT_BINDINGS {
-                            let previous = self.settings.preferences.bindings;
-                            self.settings.preferences.bindings = crate::settings::DEFAULT_BINDINGS;
-                            self.bindings_changed(ctx, previous);
-                        }
-                        self.capture_notice = Some("Keyboard bindings reset to defaults.".into());
-                    }
-                    ui.checkbox(
-                        &mut self.settings.preferences.legend_visible,
-                        "Show controller legend",
-                    );
-                    ui.label("Keyboard controls; change bindings in Settings.");
-                    ui.add_space(12.0);
-                    ui.separator();
-                    ui.heading("Audio");
-                    self.draw_audio_controls(ui, 250.0, true);
-                    ui.add_space(12.0);
-                    ui.separator();
-                    ui.heading("Display");
-                    ui.horizontal_wrapped(|ui| {
-                        ui.selectable_value(&mut self.settings.preferences.scaling, crate::settings::Scaling::Fit, "Fit window");
-                        ui.selectable_value(&mut self.settings.preferences.scaling, crate::settings::Scaling::Integer, "Integer pixels");
-                    });
-                    ui.label("Integer uses whole physical pixels per GBA pixel; Fit fills the available 3:2 area. Both use nearest-neighbor filtering.");
-                    if self.settings.preferences.scaling == crate::settings::Scaling::Integer && self.integer_fallback {
-                        ui.label("Fit used because the window is too small for 1×.");
-                    }
-                    self.draw_fullscreen_control(ui, true);
-                    ui.add_space(12.0);
-                    if self.action(ui, true, "Close settings") {
-                        close_clicked = true;
-                    }
-                });
+                            },
+                        );
+                        ui.separator();
+                        ui.allocate_ui_with_layout(
+                            egui::vec2(ui.available_width(), body_height),
+                            egui::Layout::top_down(egui::Align::Min),
+                            |ui| {
+                                egui::ScrollArea::vertical()
+                                    .id_salt(("settings-section", self.settings_section))
+                                    .max_height(body_height)
+                                    .auto_shrink([false, false])
+                                    .show(ui, |ui| match self.settings_section {
+                                        SettingsSection::Controls => {
+                                            self.draw_controls_settings(ui, ctx)
+                                        }
+                                        SettingsSection::Audio => self.draw_audio_settings(ui),
+                                        SettingsSection::Display => self.draw_display_settings(ui),
+                                    });
+                            },
+                        );
+                    },
+                );
+                ui.separator();
+                // The footer sits outside section scrolling, keeping Close visible.
+                ui.allocate_ui_with_layout(
+                    egui::vec2(ui.available_width(), 30.0),
+                    egui::Layout::right_to_left(egui::Align::Center),
+                    |ui| {
+                        close_clicked = self.action(ui, true, "Close");
+                    },
+                );
             });
         if !open || close_clicked {
             self.capture = None;
@@ -941,6 +1041,24 @@ impl GbaApp {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Changing sections must not leave an invisible binding capture active.
+    // Existing close/settings tests do not cover navigation inside the dialog.
+    #[test]
+    fn changing_settings_section_cancels_capture_without_resuming_gameplay() {
+        let mut app = GbaApp::create(false);
+        app.load_rom_bytes("buttons.gba", BUTTONS_ROM);
+        let ctx = egui::Context::default();
+        app.open_settings(&ctx);
+        app.begin_binding_capture(&ctx, 0);
+        assert!(app.capture.is_some());
+        app.select_settings_section(&ctx, SettingsSection::Audio);
+        assert!(app.capture.is_none());
+        assert!(app.pending_capture.is_none());
+        assert!(app.settings_open);
+        assert!(!app.execution_allowed());
+        assert_eq!(app.settings.preferences.bindings[0], egui::Key::Z);
+    }
 
     // Catches one Escape dismissing the Game menu and exiting fullscreen at once.
     // Existing capture/settings tests do not exercise egui popup dismissal.
