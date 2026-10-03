@@ -3542,3 +3542,86 @@ are not presented as Minish Cap-specific verification.
 
 This entry closes Slice 29 by user-confirmed manual acceptance. Slice 30
 remains outside this update.
+
+## Slice 30 — cartridge clock
+
+Implementation and automated acceptance were checked against
+`plan_final.md` §30 on 2026-10-03. Slice 30 acceptance is complete: automated
+checks passed, and the user explicitly confirmed all manual Chrome and Brave
+checks. The browser measurements below are user-supplied diagnostics, preserved
+exactly; no earlier millisecond measurements were changed.
+
+| Plan requirement | Implementation and evidence |
+|---|---|
+| Original guest displays RTC values and changes settings | `roms/rtc/clock.s` displays eight BCD rows; A/Z writes date and 24-hour mode; B/X selects 12-hour mode. Controlled startup, no BIOS. |
+| Cartridge GPIO/RTC protocol state | Optional cartridge-owned `rtc.rs`; GPIO data/direction/read enable, CS framing, clock edges, date/time/control/reset commands, BCD and 12/24-hour conversion. CPU reset clears transfer state and retains clock configuration. |
+| Session time injection, paused/offline elapsed time | `Session::set_rtc_time` injects Unix seconds independently of CPU pacing. App uses native SystemTime / browser Date; core never reads host time. Fixed-time guest checks include paused five-second leap-day rollover and 65-second reopen elapsed time. |
+| Persist time base and metadata alongside backup storage | `GBARTC01` stores host anchor, configured base, control and weekday bias inside the identity-bearing atomic `GBACART1` record. Backup and RTC snapshot revisions have separate acknowledgements; replacement/close barriers cover both. Native and IndexedDB share the record encoding. |
+| Fixed time tests and recorded replay time | Fixed Unix input `1700000000`; `time_events.rs` retains samples `(0, 1700000000)` and `(1404485, 1700000005)`; `RtcTimeEvent` records guest cycle and time. Replay checks the original boundary and reproduces exact mailbox and all framebuffer pixels. |
+| Reads/settings survive pause, reset and reopen | Guest contract passes date rollover, reset and reopened date; a guest-selected 12-hour setting survives reset/reopen. Native storage write/read passes in separate processes using the app's real disk path. |
+| Raw `.sav` exports; separate RTC representation | Export writes raw backup bytes only. The RTC schema remains in internal persistence; backup import leaves RTC state intact. Native probe verifies 32,768-byte raw export. Existing `.gbasav` backup envelopes remain readable/importable. |
+
+The focused regression catches the missing cartridge serial clock returning ROM
+bytes in place of a guest-configured date. RED: first expected date halfword
+`0x0224` was `0`; GREEN: the same test now passes the complete guest lifecycle,
+settings and scanout contract. One new regression test was added, reusing the
+same diagnostic contract as the CLI verifier.
+
+| Evidence | Result |
+|---|---|
+| ROM SHA-256 | `30b322b02ccf03fc59b43b1ea28d70da845695636c4585b878f9b77211e67367` |
+| Final framebuffer SHA-256 (little-endian pixels) | `8ac685f71b78cfd6fab020ea77620f51e5ed59ff283045b1b01d999a96ee9ccb` |
+| Fixture definition | `roms/rtc/manifest.toml`; reproducible build: `python3 roms/rtc/build.py` |
+| Guest completion | Mailbox `0x02000010 = 0x30`; active polling/drawing PC window `0x0800012c..=0x08000340`; a self-branch is not used as success |
+| Bounds | Five frames per checkpoint; 200,000 instructions per frame; at most 1,404,512 cycles per checkpoint; exact full-frame oracle |
+| Final post-reset checkpoint | 1,404,487 guest cycles; 190,161 instructions; PC `0x08000304`; generation 5; configured leap-day date and 12-hour control; detailed checkpoint instruction counts/PCs in `target/rtc-evidence.txt` |
+| Capture | `target/rtc.ppm`; headless rendered preview inspected; visual platform acceptance remains separate |
+| Native storage reopen | PASS: separate `--save-probe rtc-write` / `rtc-read` processes; fixed 65-second offline interval; identity/truncation and failed-target rejection; raw export preserved |
+| Native storage evidence | `/tmp/gba-rtc-acceptance-20261003/30b322b02ccf03fc59b43b1ea28d70da845695636c4585b878f9b77211e67367.gbasav` and `.sav` |
+| Core/session tests | PASS: 44 core tests (43 unit + 1 integration), 16 session tests; 60 total |
+| Clippy | PASS: locked workspace/all-targets with `-D warnings` |
+| Native and WASM app checks | PASS: locked `cargo check -p gba-app`, native and `wasm32-unknown-unknown` |
+| Existing fixture regression runner | PASS: `cargo run --locked -p gba-tools --release -- fixtures run` |
+| Trunk release build | PASS; `env -u NO_COLOR trunk --config web/Trunk.toml build --release` |
+| Environment | Linux 7.2.7-arch1-1 x86_64; rustc 1.98.1; Trunk 0.21.14 |
+| Linux visual/native timings | Not verified / not measured; native headless storage acceptance passed |
+| Chrome / Brave visual, settings, leap-day rollover, pause/hidden-tab resume, reset, reopen and raw export/import | PASS — user explicitly confirmed all manual checks for `rtc.gba` on both browsers |
+| Browser millisecond timings | Recorded below from user-supplied 120-sample Chrome and Brave diagnostics |
+| Sustained cycles per wall-clock second / complete frame time | Not measured; no wall-time interval or complete frame/GPU timing was supplied |
+
+Clock initialization uses UTC; guest writes choose the configured calendar base.
+RTC IRQ signaling is outside this read/settings diagnostic. This evidence does
+not claim Pokémon Emerald acceptance. The user confirmed completion of the
+browser commands and six manual checks in `roms/rtc/README.md`, including clock settings and elapsed time across
+pause, reset and reopening. Automated and user-confirmed browser acceptance
+satisfy Slice 30; no required acceptance items remain pending.
+
+### User-confirmed Chrome and Brave measurements
+
+The user reported “i have checked everything manually” and supplied these
+snapshots for `rtc.gba`. Manual acceptance is attributed to that confirmation;
+the diagnostics themselves record execution, persistence status and stage timings.
+Both browsers reported Running, BIOS not loaded, `Backup: Saved revision 1`,
+`Some(Sram)` with `Identified(Sram)`, and no backup override. Audio was off;
+audible playback is not inferred from PCM production counters.
+
+| Diagnostic | Chrome | Brave |
+|---|---:|---:|
+| Core execution mean | 7.052 ms | 6.837 ms |
+| Core execution p95 | 10.500 ms | 11.000 ms |
+| Pixel conversion mean | 0.172 ms | 0.138 ms |
+| Pixel conversion p95 | 0.300 ms | 0.200 ms |
+| Texture submission mean | 0.003 ms | 0.005 ms |
+| Texture submission p95 | 0.000 ms | 0.000 ms |
+| Samples per timing stage | 120 | 120 |
+| Executed instructions | 139566903 | 151573852 |
+| GBA cycles | 1030650961 | 1119278760 |
+| Core PCM rate | 32768 Hz | 32768 Hz |
+| Produced PCM samples | 2012990 | 2186091 |
+| PCM staging drops | 0 | 0 |
+| Empty FIFO | 0 | 0 |
+
+Browser versions, browser-host CPU/GPU, display refresh rate, governor/thermals,
+and measurement wall-time interval were not recorded. The supplied timings
+measure the named app stages; texture submission is not a GPU completion timing.
+The reported `0.000 ms` p95 values are preserved as supplied.

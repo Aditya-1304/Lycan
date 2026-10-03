@@ -1,5 +1,8 @@
 #![forbid(unsafe_code)]
 
+#[cfg(test)]
+extern crate self as gba_session;
+
 mod resampler;
 pub use resampler::{Resampler, StereoResampler};
 
@@ -13,6 +16,16 @@ pub use gba_core::{
     EEPROM8K_BYTES, EEPROM512_BYTES, FLASH64_BYTES, FLASH128_BYTES, SRAM_BYTES, SaveImage,
     SaveStatus,
 };
+
+pub use gba_core::RtcImage;
+
+/// Host time sampled at an exact guest boundary. Record these values alongside
+/// input events; replay applies them instead of sampling the operating system.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RtcTimeEvent {
+    pub cycle: Cycle,
+    pub unix_seconds: u64,
+}
 
 pub const BUTTONS: [Button; 10] = [
     Button::A,
@@ -64,6 +77,43 @@ impl Default for Session {
 }
 
 impl Session {
+    /// Inject time even while paused/inactive. CPU pacing remains monotonic and
+    /// separate from the calendar clock, which includes ordinary offline time.
+    pub fn set_rtc_time(&mut self, unix_seconds: u64) -> RtcTimeEvent {
+        self.machine.set_rtc_time(unix_seconds);
+        RtcTimeEvent {
+            cycle: self.cycles(),
+            unix_seconds,
+        }
+    }
+
+    /// Apply a recorded sample only at its original guest boundary.
+    pub fn replay_rtc_time(&mut self, event: RtcTimeEvent) -> Result<(), &'static str> {
+        if event.cycle != self.cycles() {
+            return Err("RTC replay event is at a different guest cycle");
+        }
+        self.set_rtc_time(event.unix_seconds);
+        Ok(())
+    }
+
+    /// Copy the clock snapshot without polling GPIO or advancing execution.
+    pub fn rtc_image(&self) -> Option<RtcImage> {
+        self.machine.rtc_image()
+    }
+    /// Restore validated metadata independently of raw backup import.
+    pub fn load_rtc(&mut self, bytes: &[u8]) -> Result<(), &'static str> {
+        self.machine.load_rtc(bytes)
+    }
+    /// Complete storage for one clock revision; stale writes leave it dirty.
+    pub fn acknowledge_rtc(&mut self, revision: u64) {
+        self.machine.acknowledge_rtc(revision);
+    }
+
+    /// One persistence barrier covers both independently revisioned devices.
+    pub fn persistence_dirty(&self) -> bool {
+        self.save_status().is_some_and(|s| s.dirty) || self.rtc_image().is_some_and(|s| s.dirty)
+    }
+
     /// Captures cartridge bytes without advancing guest execution.
     pub fn save_image(&self) -> Option<SaveImage> {
         self.machine.save_image()
@@ -688,3 +738,18 @@ mod tests {
         assert!(BUTTONS.iter().all(|button| !state.pressed(*button)));
     }
 }
+
+#[cfg(test)]
+mod cartridge_clock_guest {
+    use super::rtc_contract;
+    /// Existing backup tests never exercise GPIO. This guest must read its own
+    /// configured leap-day date rather than ROM bytes at the GPIO addresses.
+    #[test]
+    fn guest_reads_configured_cartridge_clock() {
+        rtc_contract::verify();
+    }
+}
+
+#[cfg(test)]
+#[path = "../../../roms/rtc/contract.rs"]
+mod rtc_contract;

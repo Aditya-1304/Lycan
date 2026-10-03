@@ -68,8 +68,58 @@ pub fn decode(identity: &Identity, bytes: &[u8]) -> Result<Vec<u8>, String> {
     Ok(bytes[40..].to_vec())
 }
 
+/// Internal cartridge record. RTC metadata has its own versioned encoding;
+/// portable `.sav` exports contain only the backup bytes.
+pub struct StoredCartridge {
+    pub backup: Option<Vec<u8>>,
+    pub rtc: Option<Vec<u8>>,
+}
+
+fn encode_cartridge(
+    identity: &Identity,
+    backup: Option<&[u8]>,
+    rtc: Option<gba_session::RtcImage>,
+) -> Vec<u8> {
+    let Some(rtc) = rtc else {
+        return encode(identity, backup.unwrap_or_default());
+    };
+    let backup = backup.unwrap_or_default();
+    let mut bytes = b"GBACART1".to_vec();
+    bytes.extend_from_slice(&identity.0);
+    bytes.extend_from_slice(&(backup.len() as u32).to_le_bytes());
+    bytes.extend_from_slice(backup);
+    bytes.extend_from_slice(&rtc.encode());
+    bytes
+}
+
+fn decode_cartridge(identity: &Identity, bytes: &[u8]) -> Result<StoredCartridge, String> {
+    if !bytes.starts_with(b"GBACART1") {
+        return decode(identity, bytes).map(|backup| StoredCartridge {
+            backup: Some(backup),
+            rtc: None,
+        });
+    }
+    if bytes.len() < 44 || bytes[8..40] != identity.0 {
+        return Err("Invalid cartridge record identity or length".into());
+    }
+    let size = u32::from_le_bytes(bytes[40..44].try_into().unwrap()) as usize;
+    if !matches!(
+        size,
+        0 | EEPROM512_BYTES | EEPROM8K_BYTES | SRAM_BYTES | FLASH64_BYTES | FLASH128_BYTES
+    ) || bytes.len() != 44 + size + 26
+    {
+        return Err("Invalid cartridge backup capacity or RTC length".into());
+    }
+    let rtc = bytes[44 + size..].to_vec();
+    gba_session::RtcImage::decode(&rtc)?;
+    Ok(StoredCartridge {
+        backup: (size != 0).then(|| bytes[44..44 + size].to_vec()),
+        rtc: Some(rtc),
+    })
+}
+
 pub enum Outcome {
-    Loaded(Result<Option<Vec<u8>>, String>),
+    Loaded(Result<Option<StoredCartridge>, String>),
     Written(Result<(), String>),
     Imported(Result<Option<Vec<u8>>, String>),
     Exported(Result<bool, String>),
@@ -79,6 +129,7 @@ pub struct Completion {
     pub identity: Identity,
     pub generation: u64,
     pub revision: u64,
+    pub rtc_revision: Option<u64>,
     pub outcome: Outcome,
 }
 
@@ -119,6 +170,7 @@ impl Storage {
         identity: Identity,
         generation: u64,
         revision: u64,
+        rtc_revision: Option<u64>,
         task: F,
     ) where
         F: std::future::Future<Output = Outcome> + 'static,
@@ -141,6 +193,7 @@ impl Storage {
                 identity,
                 generation,
                 revision,
+                rtc_revision,
                 outcome,
             });
             ctx.request_repaint();
@@ -161,7 +214,7 @@ impl Storage {
     pub fn load(&mut self, ctx: &eframe::egui::Context, identity: Identity, generation: u64) {
         self.status = "Loading initial backup; guest paused".into();
         let key = identity;
-        self.dispatch(ctx, identity, generation, 0, async move {
+        self.dispatch(ctx, identity, generation, 0, None, async move {
             Outcome::Loaded(read(&key).await)
         });
     }
@@ -171,17 +224,26 @@ impl Storage {
         ctx: &eframe::egui::Context,
         identity: Identity,
         generation: u64,
-        image: gba_session::SaveImage,
+        image: Option<gba_session::SaveImage>,
+        rtc: Option<gba_session::RtcImage>,
     ) {
-        self.status = format!(
-            "Saving revision {}; awaiting storage completion",
-            image.revision
+        let revision = image.as_ref().map_or(0, |image| image.revision);
+        let rtc_revision = rtc.map(|image| image.revision);
+        self.status = "Saving cartridge backup and clock settings".into();
+        let data = encode_cartridge(
+            &identity,
+            image.as_ref().map(|image| image.bytes.as_slice()),
+            rtc,
         );
-        let data = encode(&identity, &image.bytes);
         let key = identity;
-        self.dispatch(ctx, identity, generation, image.revision, async move {
-            Outcome::Written(write(&key, &data).await)
-        });
+        self.dispatch(
+            ctx,
+            identity,
+            generation,
+            revision,
+            rtc_revision,
+            async move { Outcome::Written(write(&key, &data).await) },
+        );
     }
 
     pub fn import(&mut self, ctx: &eframe::egui::Context, identity: Identity, generation: u64) {
@@ -189,9 +251,9 @@ impl Storage {
         let key = identity;
         // Construct the picker during the click to retain browser user activation.
         let picker = rfd::AsyncFileDialog::new()
-            .add_filter("Cartridge backup", &["gbasav"])
+            .add_filter("Cartridge backup", &["sav", "gbasav"])
             .pick_file();
-        self.dispatch(ctx, identity, generation, 0, async move {
+        self.dispatch(ctx, identity, generation, 0, None, async move {
             let result = if let Some(file) = picker.await {
                 #[cfg(not(target_arch = "wasm32"))]
                 let result = std::fs::read(file.path()).map_err(|error| error.to_string());
@@ -200,7 +262,22 @@ impl Storage {
                     .await
                     .map(|buffer| js_sys::Uint8Array::new(&buffer).to_vec())
                     .map_err(|error| format!("{error:?}"));
-                result.and_then(|bytes| decode(&key, &bytes)).map(Some)
+                result
+                    .and_then(|bytes| {
+                        if matches!(
+                            bytes.len(),
+                            EEPROM512_BYTES
+                                | EEPROM8K_BYTES
+                                | SRAM_BYTES
+                                | FLASH64_BYTES
+                                | FLASH128_BYTES
+                        ) {
+                            Ok(bytes)
+                        } else {
+                            decode(&key, &bytes)
+                        }
+                    })
+                    .map(Some)
             } else {
                 Ok(None)
             };
@@ -215,26 +292,38 @@ impl Storage {
         generation: u64,
         image: gba_session::SaveImage,
     ) {
-        let bytes = encode(&identity, &image.bytes);
+        let bytes = image.bytes;
         #[cfg(not(target_arch = "wasm32"))]
         {
             let picker = rfd::AsyncFileDialog::new()
-                .set_file_name(format!("{}.gbasav", identity.key()))
+                .set_file_name(format!("{}.sav", identity.key()))
                 .save_file();
-            self.dispatch(ctx, identity, generation, image.revision, async move {
-                Outcome::Exported(if let Some(file) = picker.await {
-                    replace(file.path(), &bytes).map(|()| true)
-                } else {
-                    Ok(false)
-                })
-            });
+            self.dispatch(
+                ctx,
+                identity,
+                generation,
+                image.revision,
+                None,
+                async move {
+                    Outcome::Exported(if let Some(file) = picker.await {
+                        replace(file.path(), &bytes).map(|()| true)
+                    } else {
+                        Ok(false)
+                    })
+                },
+            );
         }
         #[cfg(target_arch = "wasm32")]
         {
-            let result = download(&format!("{}.gbasav", identity.key()), &bytes).map(|()| true);
-            self.dispatch(ctx, identity, generation, image.revision, async move {
-                Outcome::Exported(result)
-            });
+            let result = download(&format!("{}.sav", identity.key()), &bytes).map(|()| true);
+            self.dispatch(
+                ctx,
+                identity,
+                generation,
+                image.revision,
+                None,
+                async move { Outcome::Exported(result) },
+            );
         }
     }
 }
@@ -349,9 +438,9 @@ pub fn replace(path: &std::path::Path, bytes: &[u8]) -> Result<(), String> {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-async fn read(identity: &Identity) -> Result<Option<Vec<u8>>, String> {
+async fn read(identity: &Identity) -> Result<Option<StoredCartridge>, String> {
     match std::fs::read(path(identity)?) {
-        Ok(bytes) => decode(identity, &bytes).map(Some),
+        Ok(bytes) => decode_cartridge(identity, &bytes).map(Some),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(error.to_string()),
     }
@@ -411,14 +500,14 @@ extern "C" {
 }
 
 #[cfg(target_arch = "wasm32")]
-async fn read(identity: &Identity) -> Result<Option<Vec<u8>>, String> {
+async fn read(identity: &Identity) -> Result<Option<StoredCartridge>, String> {
     let value = browser_storage(&identity.key(), wasm_bindgen::JsValue::UNDEFINED)
         .await
         .map_err(|e| format!("{e:?}"))?;
     if value.is_undefined() {
         return Ok(None);
     }
-    decode(identity, &js_sys::Uint8Array::new(&value).to_vec()).map(Some)
+    decode_cartridge(identity, &js_sys::Uint8Array::new(&value).to_vec()).map(Some)
 }
 #[cfg(target_arch = "wasm32")]
 async fn write(identity: &Identity, bytes: &[u8]) -> Result<(), String> {
@@ -436,6 +525,9 @@ fn download(name: &str, bytes: &[u8]) -> Result<(), String> {
 /// Run write and read in separate processes to prove full process reopening.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn probe(mode: &str) -> Result<(), String> {
+    if mode.starts_with("rtc-") {
+        return probe_rtc(mode);
+    }
     #[path = "../../../roms/sram/contract.rs"]
     mod contract;
     #[path = "../../../roms/flash/contract.rs"]
@@ -468,7 +560,7 @@ pub fn probe(mode: &str) -> Result<(), String> {
         .or_else(|| mode.strip_prefix("flash-"))
         .unwrap_or(mode);
     let identity = Identity::of(rom);
-    let saved = pollster::block_on(read(&identity))?;
+    let saved = pollster::block_on(read(&identity))?.and_then(|record| record.backup);
     let image = match mode {
         "write" => {
             if saved.is_some() {
@@ -512,6 +604,68 @@ pub fn probe(mode: &str) -> Result<(), String> {
     }
     println!(
         "Native backup {mode} PASS: ROM={}, save={}, export/import validated, failed replacement rejected",
+        identity.key(),
+        path(&identity)?.display()
+    );
+    Ok(())
+}
+
+/// Uses the app's atomic native record and raw export routes in separate
+/// processes. Fixed time proves offline elapsed seconds without sleeping.
+#[cfg(not(target_arch = "wasm32"))]
+fn probe_rtc(mode: &str) -> Result<(), String> {
+    #[path = "../../../roms/rtc/contract.rs"]
+    mod contract;
+    contract::verify();
+    let identity = Identity::of(contract::ROM);
+    let mut session = gba_session::Session::new();
+    session.load_rom(contract::ROM).map_err(|e| e.to_string())?;
+    match mode {
+        "rtc-write" => {
+            if pollster::block_on(read(&identity))?.is_some() {
+                return Err("RTC probe requires fresh storage".into());
+            }
+            session.set_rtc_time(contract::FIXED_TIME);
+            for _ in 0..5 {
+                session.advance_frame().map_err(|e| e.to_string())?;
+            }
+            let backup = session.save_image().unwrap();
+            let bytes = encode_cartridge(&identity, Some(&backup.bytes), session.rtc_image());
+            pollster::block_on(write(&identity, &bytes))?;
+            if decode_cartridge(&Identity::of(b"wrong ROM"), &bytes).is_ok()
+                || decode_cartridge(&identity, &bytes[..bytes.len() - 1]).is_ok()
+            {
+                return Err("RTC record accepted invalid identity or truncation".into());
+            }
+            let export = path(&identity)?.with_extension("sav");
+            replace(&export, &backup.bytes)?;
+            if std::fs::read(export).map_err(|e| e.to_string())? != backup.bytes {
+                return Err("Raw save export changed backup data".into());
+            }
+            if replace(std::path::Path::new("/dev/null/rtc"), &bytes).is_ok() {
+                return Err("Invalid RTC storage target succeeded".into());
+            }
+        }
+        "rtc-read" => {
+            let record = pollster::block_on(read(&identity))?.ok_or("RTC record missing")?;
+            session.set_rtc_time(contract::FIXED_TIME + 65);
+            session.load_save(&record.backup.ok_or("Backup missing")?)?;
+            session.load_rtc(&record.rtc.ok_or("RTC metadata missing")?)?;
+            for _ in 0..5 {
+                session.advance_frame().map_err(|e| e.to_string())?;
+            }
+            if session.inspect16(0x02000000).unwrap() != 0x0324
+                || session.inspect16(0x02000002).unwrap() != 0x0501
+                || session.inspect16(0x02000004).unwrap() != 0x0100
+                || session.inspect16(0x02000006).unwrap() != 0x4003
+            {
+                return Err("Reopened guest lost clock settings or offline elapsed time".into());
+            }
+        }
+        _ => return Err("Use --save-probe rtc-write or rtc-read".into()),
+    }
+    println!(
+        "Native RTC {mode} PASS: identity={}, file={}",
         identity.key(),
         path(&identity)?.display()
     );

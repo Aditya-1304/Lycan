@@ -6,6 +6,8 @@ mod blend_contract;
 mod object_contract;
 #[path = "../../../roms/raster/contract.rs"]
 mod raster_contract;
+#[path = "../../../roms/rtc/contract.rs"]
+mod rtc_contract;
 #[path = "../../../roms/window/contract.rs"]
 mod window_contract;
 
@@ -2486,6 +2488,28 @@ fn probe_bios(args: &[String], diagnostic: bool) -> Result<()> {
 
 fn run() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().map(String::as_str) == Some("verify-rtc") {
+        let manifest: toml::Value =
+            toml::from_str(&fs::read_to_string(root().join("roms/rtc/manifest.toml"))?)?;
+        if manifest["sha256"].as_str() != Some(&hash(rtc_contract::ROM)) {
+            return Err(fail("RTC ROM differs from frozen identity"));
+        }
+        let frame = rtc_contract::verify();
+        let frame_hash = hash(
+            &frame
+                .iter()
+                .flat_map(|pixel| pixel.to_le_bytes())
+                .collect::<Vec<_>>(),
+        );
+        if manifest["framebuffer_sha256"].as_str() != Some(&frame_hash) {
+            return Err(fail("RTC scanout differs from frozen framebuffer identity"));
+        }
+        println!("RTC framebuffer SHA-256={frame_hash}");
+        if let Some(path) = option(&args, "--capture")? {
+            capture(Path::new(&path), &frame)?;
+        }
+        return Ok(());
+    }
     if args.first().map(String::as_str) == Some("verify-raster") {
         let identity: toml::Value = toml::from_str(&fs::read_to_string(
             root().join("roms/raster/manifest.toml"),
