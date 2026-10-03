@@ -192,7 +192,7 @@ impl Preferences {
 
 /// Single logical keys supported by the pinned egui integration. Application
 /// shortcuts and modifiers stay outside the gameplay binding domain.
-fn supported_key(key: Key) -> bool {
+pub(crate) fn supported_key(key: Key) -> bool {
     use Key::*;
     matches!(
         key,
