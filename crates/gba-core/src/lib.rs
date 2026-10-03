@@ -308,6 +308,10 @@ trait CpuBus {
     fn read16(&mut self, address: u32, access: Access) -> Result<u16, CoreError>;
     fn read32(&mut self, address: u32, access: Access) -> Result<u32, CoreError>;
 
+    /// Opcode transfers retain fetch timing while bypassing data-only devices.
+    fn fetch16(&mut self, address: u32, access: Access) -> Result<u16, CoreError>;
+    fn fetch32(&mut self, address: u32, access: Access) -> Result<u32, CoreError>;
+
     fn write16(&mut self, address: u32, value: u16, access: Access) -> Result<(), CoreError>;
     fn write32(&mut self, address: u32, value: u32, access: Access) -> Result<(), CoreError>;
 
@@ -487,9 +491,9 @@ impl Cpu {
         access: Access,
     ) -> Result<u32, CoreError> {
         if thumb {
-            bus.read16(address, access).map(u32::from)
+            bus.fetch16(address, access).map(u32::from)
         } else {
-            bus.read32(address, access)
+            bus.fetch32(address, access)
         }
     }
 
@@ -540,48 +544,74 @@ impl Cpu {
         if !self.condition_passes(instruction >> 28) {
             return Ok(StepOutcome { address });
         }
-        if instruction & 0x0f00_0000 == 0x0f00_0000 {
-            self.software_interrupt(bus, address.wrapping_add(4))?;
-        } else if instruction & 0x0fff_fff0 == 0x012f_ff10 {
-            let source = (instruction & 15) as usize;
-            let target = if source == 15 {
-                address.wrapping_add(8)
-            } else {
-                self.registers[source]
-            };
-            self.branch(bus, target, true)?;
-        } else if instruction & 0x0E00_0000 == 0x0A00_0000 {
-            if instruction & (1 << 24) != 0 {
-                self.registers[14] = address.wrapping_add(4);
+        // Bits 27..25 select disjoint ARM instruction families. Resolve that
+        // family once; only the overlapping ALU/status/multiply encodings need
+        // their detailed masks. Helpers retain validation of reserved forms.
+        let executed = match (instruction >> 25) & 7 {
+            5 => {
+                if instruction & (1 << 24) != 0 {
+                    self.registers[14] = address.wrapping_add(4);
+                }
+                let offset = ((instruction & 0x00ff_ffff) << 8) as i32 >> 6;
+                self.registers[15] = address.wrapping_add(8).wrapping_add(offset as u32);
+                self.refill(bus)?;
+                true
             }
-            let offset = ((instruction & 0x00FF_FFFF) << 8) as i32 >> 6;
-            let target = address.wrapping_add(8).wrapping_add(offset as u32);
-            self.registers[15] = target;
-            self.refill(bus)?;
-        } else if self.execute_status_transfer(instruction) {
-            // Status transfers update the selected register bank atomically.
-        } else if self.execute_multiply(instruction, bus) {
-            // Multiply timing adds internal cycles to the already charged fetch.
-        } else if self.execute_data_processing(address, instruction) {
-            if instruction & (1 << 25) == 0 && instruction & (1 << 4) != 0 {
-                bus.idle(1);
+            7 if instruction & (1 << 24) != 0 => {
+                self.software_interrupt(bus, address.wrapping_add(4))?;
+                true
             }
-            if (instruction >> 12) & 15 == 15 && !matches!((instruction >> 21) & 15, 8..=11) {
-                self.branch(bus, self.registers[15], false)?;
+            0 | 1 => {
+                if instruction & 0x0fff_fff0 == 0x012f_ff10 {
+                    let source = (instruction & 15) as usize;
+                    let target = if source == 15 {
+                        address.wrapping_add(8)
+                    } else {
+                        self.registers[source]
+                    };
+                    self.branch(bus, target, true)?;
+                    true
+                } else if self.execute_status_transfer(instruction)
+                    || self.execute_multiply(instruction, bus)
+                {
+                    true
+                } else if self.execute_data_processing(address, instruction) {
+                    if instruction & (1 << 25) == 0 && instruction & (1 << 4) != 0 {
+                        bus.idle(1);
+                    }
+                    if (instruction >> 12) & 15 == 15 && !matches!((instruction >> 21) & 15, 8..=11)
+                    {
+                        self.branch(bus, self.registers[15], false)?;
+                    }
+                    true
+                } else if self.execute_swap(instruction, bus)?
+                    || self.execute_halfword(address, instruction, bus)?
+                {
+                    self.next_fetch_is_sequential = false;
+                    true
+                } else {
+                    false
+                }
             }
-        } else if self.execute_swap(instruction, bus)?
-            || self.execute_word_transfer(address, instruction, bus)?
-            || self.execute_block_transfer(address, instruction, bus)?
-            || self.execute_halfword(address, instruction, bus)?
-        {
-            // A data access breaks fetch sequentiality, except when an LDM
-            // return already refilled the pipeline at its new instruction PC.
-            let loaded_pc = instruction & (1 << 20) != 0
-                && ((instruction & 0x0e00_0000 == 0x0800_0000 && instruction & 0x8000 != 0)
-                    || (instruction & 0x0c00_0000 == 0x0400_0000
-                        && (instruction >> 12) & 15 == 15));
-            self.next_fetch_is_sequential = loaded_pc;
-        } else {
+            2 | 3 => {
+                let executed = self.execute_word_transfer(address, instruction, bus)?;
+                if executed {
+                    self.next_fetch_is_sequential =
+                        instruction & (1 << 20) != 0 && (instruction >> 12) & 15 == 15;
+                }
+                executed
+            }
+            4 => {
+                let executed = self.execute_block_transfer(address, instruction, bus)?;
+                if executed {
+                    self.next_fetch_is_sequential =
+                        instruction & (1 << 20) != 0 && instruction & 0x8000 != 0;
+                }
+                executed
+            }
+            _ => false,
+        };
+        if !executed {
             return Err(CoreError::UnsupportedInstruction {
                 address,
                 instruction,
@@ -1547,6 +1577,17 @@ impl DmaTransfer {
     }
 }
 
+/// Cached executable backing classification, never decoded bytes or a pointer.
+/// RAM writes (including DMA) are therefore visible on the next bus fetch;
+/// instructions already in the CPU pipeline retain architectural behavior.
+#[derive(Clone, Copy)]
+enum FetchRegion {
+    Ewram,
+    Iwram,
+    Rom,
+    Other,
+}
+
 struct System {
     dma: [DmaTransfer; 4],
     audio: audio::Audio,
@@ -1584,8 +1625,15 @@ struct System {
     /// Device state is materialized at this clock; ordinary RAM/ROM accesses
     /// may advance the bus clock without revisiting devices before an event.
     devices_at: u64,
+    /// Audio can be materialized by a register/FIFO write independently of
+    /// display, input and timed DMA bookkeeping.
+    audio_at: u64,
     /// Earliest observable device/input edge, invalidated by MMIO mutations.
     next_device_event: u64,
+    /// MMIO mutations force the event-bounded CPU loop to recheck IRQ/DMA/HALT.
+    cpu_boundary: bool,
+    fetch_tag: u32,
+    fetch_region: FetchRegion,
     gamepak: GamePak,
     waitstates: Waitstates,
     /// Last driven word supplies otherwise unmapped data reads.
@@ -1621,7 +1669,11 @@ impl System {
             display: Display::new(),
             cycles: 0,
             devices_at: 0,
+            audio_at: 0,
             next_device_event: 0,
+            cpu_boundary: false,
+            fetch_tag: u32::MAX,
+            fetch_region: FetchRegion::Other,
             gamepak: GamePak::default(),
             waitstates: Waitstates::from_control(0),
             open_bus: 0,
@@ -1666,6 +1718,9 @@ impl System {
         if self.dma.iter().any(|dma| dma.enabled_for(2)) {
             display = display.min(self.next_visible_hblank());
         }
+        if self.io[4] & 0x10 != 0 {
+            display = display.min(self.next_hblank());
+        }
 
         if self.io[4] & 0x20 != 0
             && let Some(vcount) = self.next_vcount_match()
@@ -1673,7 +1728,7 @@ impl System {
             display = display.min(vcount);
         }
 
-        let display = display.min(self.audio.next_event(self.devices_at));
+        let display = display.min(self.audio.next_event(self.audio_at));
 
         self.inputs
             .front()
@@ -1894,7 +1949,7 @@ impl System {
         let status = self.display_status();
         self.io[4..8].copy_from_slice(&status);
         self.audio
-            .refresh_timers_at(&mut self.io, self.cycles - self.devices_at);
+            .refresh_timers_at(&mut self.io, self.cycles - self.audio_at);
         self.audio.refresh_controls(&mut self.io);
         self.io[0x130..0x132].copy_from_slice(&(!self.buttons.0 & 0x03ff).to_le_bytes());
     }
@@ -1925,7 +1980,7 @@ impl System {
         }
         if start < 0x110 && end > 0x100 {
             self.audio
-                .refresh_timers_at(&mut self.io, self.cycles - self.devices_at);
+                .refresh_timers_at(&mut self.io, self.cycles - self.audio_at);
         }
         if start < 0x132 && end > 0x130 {
             self.io[0x130..0x132].copy_from_slice(&(!self.buttons.0 & 0x03ff).to_le_bytes());
@@ -1937,9 +1992,58 @@ impl System {
     fn refresh_readback(&self, io: &mut [u8]) {
         io[4..8].copy_from_slice(&self.display_status());
         self.audio
-            .refresh_timers_at(io, self.cycles - self.devices_at);
+            .refresh_timers_at(io, self.cycles - self.audio_at);
         self.audio.refresh_controls(io);
         io[0x130..0x132].copy_from_slice(&(!self.buttons.0 & 0x03ff).to_le_bytes());
+    }
+
+    /// Fetch from the current executable region with the ordinary timing path.
+    /// BIOS protection, GPIO overlays and unusual executable regions keep the
+    /// general handler. ROM bounds are checked independently of region caching.
+    fn fetch_impl(&mut self, address: u32, width: usize, access: Access) -> Result<u32, CoreError> {
+        let tag = address >> 24;
+        if self.fetch_tag != tag {
+            self.fetch_tag = tag;
+            self.fetch_region = match tag {
+                0x02 => FetchRegion::Ewram,
+                0x03 => FetchRegion::Iwram,
+                0x08..=0x0d => FetchRegion::Rom,
+                _ => FetchRegion::Other,
+            };
+        }
+        if matches!(self.fetch_region, FetchRegion::Other)
+            || (self.rtc.is_some() && (0x080000c4..0x080000cc).contains(&address))
+        {
+            return if width == 2 {
+                self.read16_impl(address, access).map(u32::from)
+            } else {
+                self.read32_impl(address, access)
+            };
+        }
+        if address as usize & (width - 1) != 0 {
+            return Err(CoreError::InvalidAccessAlignment { address, width });
+        }
+        self.charge(address, width, access);
+        let (backing, offset) = match self.fetch_region {
+            FetchRegion::Ewram => (&self.ewram, address as usize & (self.ewram.len() - 1)),
+            FetchRegion::Iwram => (&self.iwram, address as usize & (self.iwram.len() - 1)),
+            FetchRegion::Rom => (&self.rom, address as usize & 0x01ff_ffff),
+            FetchRegion::Other => unreachable!("fallback fetch handled before timing"),
+        };
+        let bytes = backing
+            .get(offset..offset + width)
+            .ok_or(CoreError::UnmappedAddress { address, width })?;
+        let value = if width == 2 {
+            u32::from(u16::from_le_bytes([bytes[0], bytes[1]]))
+        } else {
+            u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])
+        };
+        self.open_bus = if width == 2 {
+            value * 0x0001_0001
+        } else {
+            value
+        };
+        Ok(value)
     }
 
     fn read16_impl(&mut self, address: u32, access: Access) -> Result<u16, CoreError> {
@@ -2063,7 +2167,6 @@ impl System {
         {
             return Ok(());
         }
-        self.synchronize_video_write(address);
         self.synchronize_io_write(address);
         // BIOS and the remainder of regions 00h/01h are not writable memory.
         // The enclosing bus operation has already charged its timing.
@@ -2224,6 +2327,49 @@ impl System {
         }
         self.charge(address, 4, access);
 
+        // An aligned word cannot straddle a physical RAM mirror boundary.
+        // Dispatch once, retaining the same bus timing as two halfword beats.
+        // Scanout edges crossed by charge() have already observed the old bytes.
+        let bytes = value.to_le_bytes();
+        match address >> 24 {
+            0x02 => {
+                let offset = address as usize & (self.ewram.len() - 1);
+                self.ewram[offset..offset + 4].copy_from_slice(&bytes);
+                return Ok(());
+            }
+            0x03 => {
+                let offset = address as usize & (self.iwram.len() - 1);
+                self.iwram[offset..offset + 4].copy_from_slice(&bytes);
+                return Ok(());
+            }
+            0x05 => {
+                let offset = address as usize & (PALETTE_BYTES - 1);
+                self.palette[offset..offset + 4].copy_from_slice(&bytes);
+                return Ok(());
+            }
+            0x06 => {
+                let mut offset = address as usize & 0x1ffff;
+                if offset >= 0x18000 {
+                    offset -= 0x8000;
+                }
+                self.vram[offset..offset + 4].copy_from_slice(&bytes);
+                return Ok(());
+            }
+            0x07 => {
+                let offset = address as usize & (OAM_BYTES - 1);
+                self.oam[offset..offset + 4].copy_from_slice(&bytes);
+                return Ok(());
+            }
+            0x04 if matches!(address, 0x040000a0 | 0x040000a4) => {
+                self.synchronize_io_write(address);
+                self.audio
+                    .push_channel(usize::from(address == IO_START + 0xa4), &bytes);
+                return Ok(());
+            }
+            _ => {}
+        }
+        // Register masks, DMA enable edges, GPIO and serial cartridge devices
+        // retain their existing low-halfword-first semantics at one timestamp.
         self.write_halfword(address, value as u16)?;
         self.write_halfword(address.wrapping_add(2), (value >> 16) as u16)
     }
@@ -2370,12 +2516,24 @@ impl System {
     /// cannot be skipped when multiple bus accesses share one cached deadline.
     fn synchronize_devices(&mut self) {
         let target = self.cycles;
-        self.cycles = self.devices_at;
-        let next_video_event = self.advance_devices(target);
-        self.devices_at = target;
+        let next_video_event = if target != self.devices_at
+            || self
+                .inputs
+                .front()
+                .is_some_and(|event| event.cycle.0 <= target)
+        {
+            self.cycles = self.devices_at;
+            let next = self.advance_devices(target);
+            self.devices_at = target;
+            next
+        } else {
+            self.next_wake_event()
+        };
+        // A zero-time invalidation only refreshes deadlines. Device phases,
+        // scanout and DMA request levels need no second materialization.
         self.next_device_event = self
             .audio
-            .next_event(target)
+            .next_event(self.audio_at)
             .min(self.display.next_event)
             .min(next_video_event);
         if let Some(event) = self.inputs.front() {
@@ -2383,21 +2541,48 @@ impl System {
         }
     }
 
-    /// Complete elapsed device work before changing MMIO configuration.
+    /// Materialize only state required by the register being changed. Ordinary
+    /// display registers observe already-processed scanout edges; audio owns a
+    /// separate clock. Only controls that alter scheduled edges invalidate them.
     fn synchronize_io_write(&mut self, address: u32) {
-        if address >> 24 == 0x04 {
+        if address >> 24 != 0x04 {
+            return;
+        }
+        self.cpu_boundary = true;
+        let offset = (address - IO_START) & !1;
+        let audio = matches!(offset, 0x60..=0x88 | 0x90..=0xa6 | 0x100..=0x10e);
+        let timed_video = matches!(offset, 4 | 0xba | 0xc6 | 0xd2 | 0xde);
+        if audio {
+            self.advance_audio_to(self.cycles);
+        } else if timed_video {
+            // Reanchor IRQ/DMA edge calculations before applying new controls;
+            // enabling an edge must never request it retroactively.
             self.synchronize_devices();
-            // Recompute after the caller changes device controls. No further
-            // guest time may advance using the old register configuration.
+        }
+        if timed_video || (audio && !(0xa0..=0xa6).contains(&offset)) {
             self.next_device_event = self.cycles;
         }
     }
 
-    /// Video stores must render every preceding drawing boundary using the old
-    /// memory contents. RAM and cartridge stores need no device synchronization.
-    fn synchronize_video_write(&mut self, address: u32) {
-        if matches!(address >> 24, 0x05..=0x07) && self.devices_at != self.cycles {
-            self.synchronize_devices();
+    /// Advance audio under the old configuration before a register mutation.
+    /// Bus timing has already processed intervening sample/timer/oscillator
+    /// edges, so this interval contains no unprocessed hardware boundary.
+    fn advance_audio_to(&mut self, target: u64) {
+        if target == self.audio_at {
+            return;
+        }
+        let (irq, refill) = self.audio.advance(target - self.audio_at, target);
+        self.audio_at = target;
+        let flags = u16::from_le_bytes([self.io[0x202], self.io[0x203]]) | irq;
+        self.io[0x202..0x204].copy_from_slice(&flags.to_le_bytes());
+        for dma in &mut self.dma[1..=2] {
+            if refill[usize::from(dma.destination == IO_START + 0xa4)]
+                && dma.control & 0xb000 == 0xb000
+                && matches!(dma.destination, 0x040000a0 | 0x040000a4)
+                && !dma.active
+            {
+                dma.active = true;
+            }
         }
     }
 
@@ -2414,6 +2599,9 @@ impl System {
             .iter()
             .any(|dma| dma.enabled_for(2))
             .then(|| self.next_visible_hblank());
+        // HBlank status/IRQ edges continue on blank scanlines; ordinary
+        // HBlank DMA remains restricted to visible lines.
+        let hblank_irq = (self.io[4] & 0x10 != 0).then(|| self.next_hblank());
         let vcount = if self.io[4] & 0x20 != 0 {
             self.next_vcount_match()
         } else {
@@ -2422,6 +2610,7 @@ impl System {
 
         let vblank_due = vblank <= target;
         let hblank_due = hblank.is_some_and(|edge| edge <= target);
+        let hblank_irq_due = hblank_irq.is_some_and(|edge| edge <= target);
         let vcount_due = vcount.is_some_and(|edge| edge <= target);
 
         for dma in &mut self.dma {
@@ -2437,6 +2626,9 @@ impl System {
         // Repeated reads in VBlank must not regenerate an acknowledged request.
         if vblank_due && self.io[4] & 8 != 0 {
             self.io[0x202] |= 1;
+        }
+        if hblank_irq_due {
+            self.io[0x202] |= 2;
         }
 
         // VCOUNT requests IRQ exactly when VCOUNT enters the programmed comparison
@@ -2459,20 +2651,7 @@ impl System {
         }
         self.display
             .synchronize_to(target, &self.vram, &self.palette, &self.io, &self.oam);
-        let (irq, refill) = self.audio.advance(target - self.cycles, target);
-        let flags = u16::from_le_bytes([self.io[0x202], self.io[0x203]]) | irq;
-        self.io[0x202..0x204].copy_from_slice(&flags.to_le_bytes());
-        // Both sound DMA channels independently follow their latched FIFO
-        // destination. Arbitration retains the ordinary DMA1-before-DMA2 order.
-        for dma in &mut self.dma[1..=2] {
-            if refill[usize::from(dma.destination == IO_START + 0xa4)]
-                && dma.control & 0xb000 == 0xb000
-                && matches!(dma.destination, 0x040000a0 | 0x040000a4)
-                && !dma.active
-            {
-                dma.active = true;
-            }
-        }
+        self.advance_audio_to(target);
         self.cycles = target;
         // Reuse every edge that has not crossed. Recalculate only a consumed
         // edge against the new device clock, retaining exact IRQ/DMA boundaries.
@@ -2484,6 +2663,13 @@ impl System {
         if let Some(edge) = hblank {
             next = next.min(if hblank_due {
                 self.next_visible_hblank()
+            } else {
+                edge
+            });
+        }
+        if let Some(edge) = hblank_irq {
+            next = next.min(if hblank_irq_due {
+                self.next_hblank()
             } else {
                 edge
             });
@@ -2500,6 +2686,15 @@ impl System {
 }
 
 impl CpuBus for System {
+    fn fetch16(&mut self, address: u32, access: Access) -> Result<u16, CoreError> {
+        self.fetch_impl(address, 2, access)
+            .map(|value| value as u16)
+    }
+
+    fn fetch32(&mut self, address: u32, access: Access) -> Result<u32, CoreError> {
+        self.fetch_impl(address, 4, access)
+    }
+
     fn set_cpu_open_bus(&mut self, pipeline: [u32; 2], address: u32, thumb: bool) {
         self.cpu_open_bus = if !thumb {
             pipeline[1]
@@ -2551,7 +2746,6 @@ impl CpuBus for System {
     /// while OBJ VRAM and OAM ignore byte stores. RAM bytes retain ordinary semantics.
     fn write8(&mut self, address: u32, value: u8, access: Access) -> Result<(), CoreError> {
         self.charge(address, 1, access);
-        self.synchronize_video_write(address);
         self.synchronize_io_write(address);
         if self.backup_write(address, value) {
             return Ok(());
@@ -4029,6 +4223,27 @@ impl Machine {
                     cycles: self.cycles(),
                 });
             }
+            // Between scheduled edges, ordinary instructions cannot introduce
+            // DMA/IRQ/HALT work without MMIO. MMIO sets cpu_boundary; an access
+            // crossing an event finishes its instruction, then exits this loop
+            // before the next retirement. DMA keeps the public beat-at-a-time path.
+            if !self.system.halted
+                && self.system.pending_interrupts() == 0
+                && !self.system.dma.iter().any(|dma| dma.active)
+                && self.system.next_device_event > self.system.cycles
+            {
+                self.system.cpu_boundary = false;
+                let deadline = target.0.min(self.system.next_device_event);
+                let remaining = instruction_limit - (self.executed_instructions - initial);
+                for _ in 0..remaining {
+                    if self.system.cycles >= deadline || self.system.cpu_boundary {
+                        break;
+                    }
+                    last_pc = self.cpu.step(&mut self.system)?.address;
+                    self.executed_instructions = self.executed_instructions.saturating_add(1);
+                }
+                continue;
+            }
             if self.system.halted
                 && self.system.pending_interrupts() == 0
                 && !self.system.dma.iter().any(|dma| dma.active)
@@ -4236,6 +4451,52 @@ fn range_for(address: u32, start: u32, length: usize, width: usize) -> Option<Ra
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Catches missing HBlank IF requests and HALT wakeups. Existing raster
+    /// tests exercise DMA requests, which do not require DISPSTAT's IRQ enable.
+    #[test]
+    fn hblank_irq_is_edge_triggered_and_wakes_halt() {
+        let mut machine = Machine::new();
+        machine
+            .load_rom(include_bytes!("../../../fixtures/diagnostics/buttons.gba"))
+            .unwrap();
+        let data = Access {
+            kind: AccessKind::Data,
+            sequential: false,
+        };
+        machine
+            .system
+            .write16_impl(IO_START + 4, 0x10, data)
+            .unwrap();
+        machine
+            .system
+            .write16_impl(IO_START + 0x200, 2, data)
+            .unwrap();
+        machine.system.halted = true;
+        machine
+            .advance_to(Cycle(HBLANK_FLAG_CYCLE - 1), 10)
+            .unwrap();
+        assert_eq!(machine.inspect16(IO_START + 0x202).unwrap() & 2, 0);
+        machine.advance_to(Cycle(HBLANK_FLAG_CYCLE), 10).unwrap();
+        assert_eq!(machine.inspect16(IO_START + 0x202).unwrap() & 2, 2);
+        machine.step().unwrap();
+        assert!(!machine.halted());
+        machine
+            .system
+            .write16_impl(IO_START + 0x202, 2, data)
+            .unwrap();
+        machine.system.advance_time(20);
+        assert_eq!(machine.inspect16(IO_START + 0x202).unwrap() & 2, 0);
+        machine.system.advance_time(CYCLES_PER_SCANLINE);
+        assert_eq!(machine.inspect16(IO_START + 0x202).unwrap() & 2, 2);
+        machine.system.write16_impl(IO_START + 4, 0, data).unwrap();
+        machine
+            .system
+            .write16_impl(IO_START + 0x202, 2, data)
+            .unwrap();
+        machine.system.advance_time(CYCLES_PER_SCANLINE);
+        assert_eq!(machine.inspect16(IO_START + 0x202).unwrap() & 2, 0);
+    }
 
     /// Catches truncating an unaligned OBJ's final mosaic block and anchoring
     /// vertical groups to the object. Expected pixels follow mGBA's OBJ renderer.
