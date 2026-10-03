@@ -3,6 +3,7 @@
 mod app;
 mod audio;
 mod saves;
+mod settings;
 
 use app::GbaApp;
 
