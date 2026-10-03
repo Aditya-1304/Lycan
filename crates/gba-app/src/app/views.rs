@@ -8,6 +8,24 @@ const SURFACE: egui::Color32 = egui::Color32::from_rgb(24, 29, 40);
 const RESET_HELP: &str =
     "Restart the game. Unsaved in-game progress may be lost; cartridge saves are retained.";
 
+/// Centers the load-button group using its actual bounded width. Narrow cards
+/// wrap within one button width instead of anchoring the group to the left edge.
+fn centered_launch_buttons<R>(
+    ui: &mut egui::Ui,
+    width: f32,
+    contents: impl FnOnce(&mut egui::Ui) -> R,
+) -> R {
+    ui.vertical_centered(|ui| {
+        ui.allocate_ui_with_layout(
+            egui::vec2(width, 52.0),
+            egui::Layout::left_to_right(egui::Align::Center).with_main_wrap(true),
+            contents,
+        )
+        .inner
+    })
+    .inner
+}
+
 impl GbaApp {
     /// Keeps diagnostic startup intact while selecting the normal launch/player
     /// layout from installed-session state, including paused and restoring games.
@@ -124,7 +142,7 @@ impl GbaApp {
                                 } else {
                                     ui.available_width().min(300.0)
                                 };
-                                ui.horizontal_wrapped(|ui| {
+                                centered_launch_buttons(ui, if ui.available_width() >= 452.0 { 452.0 } else { button_width }, |ui| {
                                     ui.spacing_mut().item_spacing = egui::vec2(12.0, 12.0);
                                     if ui
                                         .add_enabled(
@@ -152,9 +170,25 @@ impl GbaApp {
                                 ui.add_space(16.0);
                             });
                             self.draw_startup_assets(ui);
-                            ui.collapsing("Backup override for next ROM", |ui| {
-                                self.draw_backup_override(ui);
-                                ui.small("Choose only when automatic detection is unresolved; this choice belongs to the next ROM load.");
+                            // Bound the header's child UI to its natural width:
+                            // egui positions its text before allocating the header.
+                            let title = "Backup override for next ROM";
+                            let header_width = (ui.painter().layout_no_wrap(
+                                title.into(),
+                                egui::TextStyle::Button.resolve(ui.style()),
+                                ui.visuals().text_color(),
+                            ).size().x + ui.spacing().indent + ui.spacing().button_padding.x)
+                                .max(ui.spacing().interact_size.x)
+                                .min(ui.available_width());
+                            ui.vertical_centered(|ui| {
+                                ui.allocate_ui_with_layout(
+                                    egui::vec2(header_width, ui.spacing().interact_size.y),
+                                    egui::Layout::top_down(egui::Align::Min),
+                                    |ui| ui.collapsing(title, |ui| {
+                                        self.draw_backup_override(ui);
+                                        ui.small("Choose only when automatic detection is unresolved; this choice belongs to the next ROM load.");
+                                    }),
+                                );
                             });
                             if let Some(progress) = self.operation().label() {
                                 ui.add_space(8.0);
@@ -168,7 +202,7 @@ impl GbaApp {
                             self.draw_notices(ui);
                             ui.add_space(12.0);
                             ui.separator();
-                            self.draw_audio_controls(ui, 220.0, !self.settings_open);
+                            self.draw_audio_controls_with_layout(ui, 220.0, !self.settings_open, true);
                             ui.add_space(12.0);
                             ui.vertical_centered(|ui| {
                                 if self.action(ui, true, "Settings") {
@@ -184,27 +218,62 @@ impl GbaApp {
     }
 
     fn draw_startup_assets(&self, ui: &mut egui::Ui) {
-        ui.horizontal_wrapped(|ui| {
-            ui.strong("BIOS");
-            if self.bios_picker_open {
-                ui.label("Reading…");
-            } else if let Some(name) = &self.bios_name {
-                ui.label("Ready");
-                ui.add(egui::Label::new(name).wrap());
-            } else {
-                ui.label("Missing · supply your 16 KiB BIOS file");
-            }
-        });
-        ui.horizontal_wrapped(|ui| {
-            ui.strong("ROM");
-            if self.picker_open {
-                ui.label("Reading…");
-            } else if let Some(pending) = &self.pending_rom {
-                ui.label("Ready · pending startup");
-                ui.add(egui::Label::new(&pending.name).wrap());
-            } else {
-                ui.label("Missing · select a .gba cartridge");
-            }
+        let bios = if self.bios_picker_open {
+            "Reading…"
+        } else {
+            self.bios_name
+                .as_deref()
+                .unwrap_or("Missing · supply your 16 KiB BIOS file")
+        };
+        let bios_state = if !self.bios_picker_open && self.bios_name.is_some() {
+            "Ready · "
+        } else {
+            ""
+        };
+        let bios_text = format!("BIOS · {bios_state}{bios}");
+        let rom = if self.picker_open {
+            "Reading…"
+        } else {
+            self.pending_rom
+                .as_ref()
+                .map_or("Missing · select a .gba cartridge", |pending| {
+                    pending.name.as_str()
+                })
+        };
+        let rom_state = if !self.picker_open && self.pending_rom.is_some() {
+            "Ready · pending startup · "
+        } else {
+            ""
+        };
+        let rom_text = format!("ROM · {rom_state}{rom}");
+        let font = egui::TextStyle::Body.resolve(ui.style());
+        let text_width = |text: &str| {
+            ui.painter()
+                .layout_no_wrap(text.into(), font.clone(), ui.visuals().text_color())
+                .size()
+                .x
+        };
+        let natural_width =
+            text_width(&bios_text) + ui.spacing().item_spacing.x + text_width(&rom_text);
+        let width = natural_width.min(ui.available_width());
+        // Center the visible text group, rather than two full-width columns
+        // whose unequal text lengths leave excess space on the right.
+        ui.vertical_centered(|ui| {
+            ui.allocate_ui_with_layout(
+                egui::vec2(width, ui.text_style_height(&egui::TextStyle::Body)),
+                egui::Layout::left_to_right(egui::Align::Min),
+                |ui| {
+                    if natural_width <= width {
+                        ui.add(egui::Label::new(&bios_text).wrap());
+                        ui.add(egui::Label::new(&rom_text).wrap());
+                    } else {
+                        ui.columns(2, |columns| {
+                            columns[0].add(egui::Label::new(&bios_text).wrap());
+                            columns[1].add(egui::Label::new(&rom_text).wrap());
+                        });
+                    }
+                },
+            );
         });
     }
 
@@ -661,10 +730,22 @@ impl GbaApp {
     /// All controls edit the same remembered volume and independent mute. Device
     /// readiness is asynchronous on web; diagnostics stay in the debug view.
     pub(super) fn draw_audio_controls(&mut self, ui: &mut egui::Ui, width: f32, enabled: bool) {
+        self.draw_audio_controls_with_layout(ui, width, enabled, false);
+    }
+
+    /// Startup places mute, the slider and its value on centered rows. The player
+    /// and Settings retain their existing horizontal controls and status labels.
+    fn draw_audio_controls_with_layout(
+        &mut self,
+        ui: &mut egui::Ui,
+        width: f32,
+        enabled: bool,
+        centered: bool,
+    ) {
         use crate::audio::AudioState;
         let state = self.audio.state();
         ui.add_enabled_ui(enabled, |ui| {
-            ui.horizontal_wrapped(|ui| {
+            let controls = |ui: &mut egui::Ui| {
                 if matches!(
                     state,
                     AudioState::NeedsInteraction | AudioState::Unavailable
@@ -692,28 +773,57 @@ impl GbaApp {
                 let mut percent = self.audio.volume * 100.0;
                 let slider = ui
                     .scope(|ui| {
-                        ui.spacing_mut().slider_width = width.min(ui.available_width().max(40.0));
-                        ui.add(
-                            egui::Slider::new(&mut percent, 0.0..=100.0)
-                                .suffix("%")
-                                .text("Volume"),
-                        )
+                        let slider_width = width.min(ui.available_width().max(40.0));
+                        ui.spacing_mut().slider_width = slider_width;
+                        let widget = egui::Slider::new(&mut percent, 0.0..=100.0)
+                            .suffix("%")
+                            .text(if centered { "" } else { "Volume" })
+                            .show_value(!centered);
+                        if centered {
+                            // Slider creates its own horizontal UI. Bound that UI
+                            // to the track width so the centered parent positions
+                            // the track itself, rather than a full-width wrapper.
+                            ui.allocate_ui_with_layout(
+                                egui::vec2(slider_width, ui.spacing().interact_size.y),
+                                egui::Layout::left_to_right(egui::Align::Center),
+                                |ui| ui.add(widget),
+                            )
+                            .inner
+                        } else {
+                            ui.add(widget)
+                        }
                     })
                     .inner;
-                if slider.changed() || mute.changed() {
+                let value_changed = centered
+                    && ui
+                        .add(
+                            egui::DragValue::new(&mut percent)
+                                .range(0.0..=100.0)
+                                .suffix("%")
+                                .fixed_decimals(1),
+                        )
+                        .changed();
+                if slider.changed() || mute.changed() || value_changed {
                     self.audio.volume = percent / 100.0;
                     self.audio.apply_gain();
                     self.own_ui_keys(ui.ctx());
                 }
-                ui.label(match state {
-                    #[cfg(target_arch = "wasm32")]
-                    AudioState::Starting => "Starting",
-                    AudioState::Ready if self.audio.muted => "Muted",
-                    AudioState::Ready => "Ready",
-                    AudioState::NeedsInteraction => "Needs interaction",
-                    AudioState::Unavailable => "Unavailable",
-                });
-            });
+                if !centered || state != AudioState::Ready {
+                    ui.label(match state {
+                        #[cfg(target_arch = "wasm32")]
+                        AudioState::Starting => "Starting",
+                        AudioState::Ready if self.audio.muted => "Muted",
+                        AudioState::Ready => "Ready",
+                        AudioState::NeedsInteraction => "Needs interaction",
+                        AudioState::Unavailable => "Unavailable",
+                    });
+                }
+            };
+            if centered {
+                ui.vertical_centered(controls);
+            } else {
+                ui.horizontal_wrapped(controls);
+            }
             if let Some(error) = self.audio.error() {
                 ui.label(error);
             }
