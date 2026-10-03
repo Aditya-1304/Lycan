@@ -12,7 +12,7 @@ impl GbaApp {
     /// Keeps diagnostic startup intact while selecting the normal launch/player
     /// layout from installed-session state, including paused and restoring games.
     pub(super) fn draw_ui(&mut self, ui: &mut egui::Ui) {
-        let mut owns_keys = self.settings_open;
+        let mut owns_keys = false;
         if self.debug_ui {
             self.draw_notices(ui);
             self.draw_debug_ui(ui);
@@ -25,11 +25,15 @@ impl GbaApp {
             }
         }
         self.draw_settings(ui.ctx());
-        owns_keys |= self.settings_open || ui.ctx().egui_wants_keyboard_input();
-        if owns_keys || self.ui_keys_owned {
+        owns_keys |= self.settings_open
+            || egui::Popup::is_any_open(ui.ctx())
+            || ui.ctx().egui_wants_keyboard_input();
+        if owns_keys {
             self.own_ui_keys(ui.ctx());
         }
-        self.ui_keys_owned = owns_keys;
+        self.update_browser_input(
+            self.execution_allowed() && !self.pointer_ui_owned && !self.keyboard_ui_owned(ui.ctx()),
+        );
     }
 
     /// Every exposed click releases previously submitted gameplay keys, even
@@ -53,7 +57,7 @@ impl GbaApp {
     fn open_settings(&mut self, ctx: &egui::Context) {
         self.settings_open = true;
         self.own_ui_keys(ctx);
-        self.sync_execution(true, true);
+        self.sync_execution(self.host_focused, self.host_visible);
     }
 
     /// Centered, scrollable startup card. A pending ROM is named explicitly;
@@ -212,7 +216,7 @@ impl GbaApp {
                 } else {
                     self.draw_audio_controls(ui, 150.0);
                 }
-                if menu.inner.is_none() && self.ui_keys_owned && !self.settings_open {
+                if menu.inner.is_none() && menu.response.clicked() {
                     menu.response.surrender_focus();
                 }
                 menu.inner.is_some() || audio_open
@@ -251,20 +255,20 @@ impl GbaApp {
                     .inner_margin(6)
                     .corner_radius(6)
                     .show(ui, |ui| {
-                        if let Some(texture) = &self.texture
-                            && ui
-                                .add(
-                                    egui::Image::from_texture(texture)
-                                        .fit_to_exact_size(size)
-                                        .sense(egui::Sense::click()),
-                                )
-                                .clicked()
-                        {
-                            ui.ctx().memory_mut(|memory| {
-                                if let Some(id) = memory.focused() {
-                                    memory.surrender_focus(id);
-                                }
-                            });
+                        if let Some(texture) = &self.texture {
+                            let response = ui.add(
+                                egui::Image::from_texture(texture)
+                                    .fit_to_exact_size(size)
+                                    .sense(egui::Sense::click()),
+                            );
+                            self.game_rect = Some(response.rect);
+                            if response.clicked() {
+                                ui.ctx().memory_mut(|memory| {
+                                    if let Some(id) = memory.focused() {
+                                        memory.surrender_focus(id);
+                                    }
+                                });
+                            }
                         }
                     });
                 if legend_height > 0.0 {
@@ -487,7 +491,7 @@ impl GbaApp {
             let old_bindings = self.settings.preferences.bindings;
             self.settings.reset_saved_settings();
             if old_bindings != self.settings.preferences.bindings {
-                self.bindings_changed(ui.ctx());
+                self.bindings_changed(ui.ctx(), old_bindings);
             }
             self.audio.volume = self.settings.preferences.volume;
             self.audio.muted = self.settings.preferences.muted;
@@ -541,7 +545,7 @@ impl GbaApp {
                 }
             });
             self.own_ui_keys(ctx);
-            self.sync_execution(true, true);
+            self.sync_execution(self.host_focused, self.host_visible);
             ctx.request_repaint();
             return;
         }
@@ -586,8 +590,9 @@ impl GbaApp {
                     }
                     if self.action(ui, self.capture.is_none(), "Reset bindings") {
                         if self.settings.preferences.bindings != crate::settings::DEFAULT_BINDINGS {
+                            let previous = self.settings.preferences.bindings;
                             self.settings.preferences.bindings = crate::settings::DEFAULT_BINDINGS;
-                            self.bindings_changed(ctx);
+                            self.bindings_changed(ctx, previous);
                         }
                         self.capture_notice = Some("Keyboard bindings reset to defaults.".into());
                     }
@@ -619,7 +624,7 @@ impl GbaApp {
                 }
             });
             self.own_ui_keys(ctx);
-            self.sync_execution(true, true);
+            self.sync_execution(self.host_focused, self.host_visible);
             ctx.request_repaint();
         }
     }
