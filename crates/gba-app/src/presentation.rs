@@ -19,12 +19,18 @@ extern "C" {
 
 /// Publishes a visible egui control in normalized canvas coordinates. Updating a
 /// target is bounded presentation work; activation happens only in a DOM event.
-pub fn register(name: &str, response: &egui::Response) {
+pub fn register(name: &str, response: &egui::Response, clip_rect: egui::Rect) {
     let viewport = response.ctx.input(|input| input.viewport_rect());
     if viewport.width() <= 0.0 || viewport.height() <= 0.0 {
         return;
     }
-    let rect = response.rect.intersect(response.ctx.content_rect());
+    let rect = response
+        .rect
+        .intersect(response.ctx.content_rect())
+        .intersect(clip_rect);
+    if !rect.is_positive() {
+        return;
+    }
     region(
         name,
         (rect.left() - viewport.left()) / viewport.width(),
