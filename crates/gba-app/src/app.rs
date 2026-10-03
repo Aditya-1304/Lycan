@@ -26,6 +26,7 @@ const EEPROM512_ROM: &[u8] = include_bytes!("../../../roms/eeprom512-score.gba")
 const EEPROM8K_ROM: &[u8] = include_bytes!("../../../roms/eeprom8k-score.gba");
 const BANKED_ROM: &[u8] = include_bytes!("../../../roms/flash-banked-score.gba");
 const FLASH_ROM: &[u8] = include_bytes!("../../../roms/flash-score.gba");
+const RTC_ROM: &[u8] = include_bytes!("../../../roms/rtc.gba");
 const SRAM_ROM: &[u8] = include_bytes!("../../../roms/sram.gba");
 
 /// Original display diagnostics use controlled ARM startup; retail ROMs retain BIOS boot.
@@ -284,6 +285,7 @@ impl GbaApp {
             BANKED_ROM,
             FLASH_ROM,
             SRAM_ROM,
+            RTC_ROM,
             BUTTONS_ROM,
             PALETTE_ROM,
             CALCULATIONS_ROM,
@@ -373,13 +375,7 @@ impl GbaApp {
     ) {
         // Replacement is a save barrier. Retain the old machine until its last
         // dirty revision is durable; a failed write remains retryable/exportable.
-        if self.storage.busy
-            || self.restoring_save
-            || self
-                .session
-                .save_status()
-                .is_some_and(|status| status.dirty)
-        {
+        if self.storage.busy || self.restoring_save || self.session.persistence_dirty() {
             self.pending_rom = Some(PendingRom {
                 name: name.to_owned(),
                 bytes: bytes.to_vec(),
@@ -432,10 +428,9 @@ impl GbaApp {
         match result {
             Ok(()) => {
                 self.save_generation = self.save_generation.wrapping_add(1);
-                self.save_identity = self
-                    .session
-                    .save_status()
-                    .map(|_| crate::saves::Identity::of(bytes));
+                self.save_identity = (self.session.save_status().is_some()
+                    || self.session.rtc_image().is_some())
+                .then(|| crate::saves::Identity::of(bytes));
                 self.restoring_save = self.save_identity.is_some();
                 self.storage.failed = false;
                 if self.restoring_save {
@@ -511,9 +506,17 @@ impl GbaApp {
             use crate::saves::Outcome;
             match completion.outcome {
                 Outcome::Loaded(Ok(bytes)) => {
-                    let result = bytes
-                        .as_deref()
-                        .map_or(Ok(()), |bytes| self.session.load_save(bytes));
+                    let result = (|| {
+                        if let Some(record) = &bytes {
+                            if let Some(rtc) = &record.rtc {
+                                self.session.load_rtc(rtc)?;
+                            }
+                            if let Some(backup) = &record.backup {
+                                self.session.load_save(backup)?;
+                            }
+                        }
+                        Ok::<(), &'static str>(())
+                    })();
                     match result {
                         Ok(()) => {
                             self.restoring_save = false;
@@ -543,12 +546,11 @@ impl GbaApp {
                 }
                 Outcome::Written(Ok(())) => {
                     self.session.acknowledge_save(completion.revision);
+                    if let Some(revision) = completion.rtc_revision {
+                        self.session.acknowledge_rtc(revision);
+                    }
                     self.storage.failed = false;
-                    self.storage.status = if self
-                        .session
-                        .save_status()
-                        .is_some_and(|status| status.dirty)
-                    {
+                    self.storage.status = if self.session.persistence_dirty() {
                         "Stored snapshot; newer backup changes remain pending".into()
                     } else {
                         format!("Saved revision {}", completion.revision)
@@ -599,16 +601,15 @@ impl GbaApp {
                 if let Some(identity) = self.save_identity {
                     self.storage.load(ctx, identity, self.save_generation);
                 }
-            } else if self
-                .session
-                .save_status()
-                .is_some_and(|status| status.dirty)
-            {
-                if let (Some(identity), Some(image)) =
-                    (self.save_identity, self.session.save_image())
-                {
-                    self.storage
-                        .write(ctx, identity, self.save_generation, image);
+            } else if self.session.persistence_dirty() {
+                if let Some(identity) = self.save_identity {
+                    self.storage.write(
+                        ctx,
+                        identity,
+                        self.save_generation,
+                        self.session.save_image(),
+                        self.session.rtc_image(),
+                    );
                 }
             } else if let Some(pending) = self.pending_rom.take() {
                 self.install_rom(&pending.name, &pending.bytes, pending.backup_override);
@@ -827,12 +828,7 @@ impl GbaApp {
                         " · Save failed"
                     } else if self.restoring_save {
                         " · Restoring"
-                    } else if self.storage.busy
-                        || self
-                            .session
-                            .save_status()
-                            .is_some_and(|status| status.dirty)
-                    {
+                    } else if self.storage.busy || self.session.persistence_dirty() {
                         " · Saving"
                     } else {
                         " · Saved"
@@ -1326,12 +1322,7 @@ impl eframe::App for GbaApp {
         }
         #[cfg(not(target_arch = "wasm32"))]
         if ctx.input(|input| input.viewport().close_requested())
-            && (self.storage.busy
-                || self.restoring_save
-                || self
-                    .session
-                    .save_status()
-                    .is_some_and(|status| status.dirty))
+            && (self.storage.busy || self.restoring_save || self.session.persistence_dirty())
         {
             // Ordinary native close is a save barrier. Failure keeps the window
             // open with pending bytes available for retry or export.
@@ -1456,15 +1447,20 @@ impl eframe::App for GbaApp {
                 self.restore_backup_override(backup_override);
             }
         }
+        #[cfg(not(target_arch = "wasm32"))]
+        let unix_seconds = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        #[cfg(target_arch = "wasm32")]
+        let unix_seconds = (js_sys::Date::now() / 1000.0).max(0.0) as u64;
+        self.session.set_rtc_time(unix_seconds);
         self.poll_save_storage(ctx);
         #[cfg(not(target_arch = "wasm32"))]
         if self.close_when_saved
             && !self.storage.busy
             && !self.restoring_save
-            && !self
-                .session
-                .save_status()
-                .is_some_and(|status| status.dirty)
+            && !self.session.persistence_dirty()
         {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }

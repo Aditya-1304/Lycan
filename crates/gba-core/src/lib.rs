@@ -1,6 +1,8 @@
 #![forbid(unsafe_code)]
 
 mod backup;
+mod rtc;
+pub use rtc::RtcImage;
 mod eeprom;
 pub use eeprom::{EEPROM8K_BYTES, EEPROM512_BYTES};
 #[cfg(feature = "eeprom-trace")]
@@ -1524,6 +1526,8 @@ struct System {
     buttons: ButtonState,
     inputs: VecDeque<InputEvent>,
     rom: Vec<u8>,
+    /// Cartridge clock settings outlive reset; GPIO transfer state does not.
+    rtc: Option<rtc::Rtc>,
     /// Cartridge-owned SRAM persists through CPU reset; host storage is separate.
     sram: Option<crate::sram::Sram>,
     /// Flash commands and bytes share the cartridge lifecycle, not host storage.
@@ -1569,6 +1573,7 @@ impl System {
             buttons: ButtonState::default(),
             inputs: VecDeque::new(),
             rom: Vec::new(),
+            rtc: None,
             sram: None,
             flash: None,
             eeprom: None,
@@ -1911,6 +1916,10 @@ impl System {
             return Err(CoreError::InvalidAccessAlignment { address, width: 2 });
         }
         self.charge(address, 2, access);
+        if let Some(value) = self.gpio_read(address) {
+            self.open_bus = u32::from(value) * 0x0001_0001;
+            return Ok(value);
+        }
         if self.eeprom_address(address)
             && matches!(access.kind, AccessKind::Data)
             && let Some(eeprom) = self.eeprom.as_mut()
@@ -1945,6 +1954,17 @@ impl System {
             return Err(CoreError::InvalidAccessAlignment { address, width: 4 });
         }
         self.charge(address, 4, access);
+        if self.gpio_read(address).is_some() || self.gpio_read(address + 2).is_some() {
+            let half = |a| {
+                self.gpio_read(a).unwrap_or_else(|| {
+                    self.read_bytes(a, 2)
+                        .map_or(0, |b| u16::from_le_bytes([b[0], b[1]]))
+                })
+            };
+            let value = u32::from(half(address)) | (u32::from(half(address + 2)) << 16);
+            self.open_bus = value;
+            return Ok(value);
+        }
         if let Some(value) = self.backup_read(address) {
             self.open_bus = u32::from(value) * 0x0101_0101;
             return Ok(self.open_bus);
@@ -1980,9 +2000,20 @@ impl System {
         self.write_halfword(address, value)
     }
 
-    /// Applies a bus beat after its access time has synchronized scanout. Word
-    /// transfers reuse this path without charging the hardware clock twice.
+    /// Overlay GPIO only for an enabled clock cartridge; other reads retain ROM.
+    fn gpio_read(&self, address: u32) -> Option<u16> {
+        self.rtc.as_ref().and_then(|chip| chip.read(address))
+    }
+
+    /// Apply one already-timed bus beat, including cartridge peripherals.
     fn write_halfword(&mut self, address: u32, value: u16) -> Result<(), CoreError> {
+        if self
+            .rtc
+            .as_mut()
+            .is_some_and(|chip| chip.write(address, value))
+        {
+            return Ok(());
+        }
         self.synchronize_video_write(address);
         self.synchronize_io_write(address);
         // BIOS and the remainder of regions 00h/01h are not writable memory.
@@ -2422,6 +2453,9 @@ impl CpuBus for System {
 
     fn read8(&mut self, address: u32, access: Access) -> Result<u8, CoreError> {
         self.charge(address, 1, access);
+        if let Some(value) = self.gpio_read(address & !1) {
+            return Ok((value >> ((address & 1) * 8)) as u8);
+        }
         if let Some(value) = self.backup_read(address) {
             return Ok(value);
         }
@@ -3615,8 +3649,42 @@ impl Machine {
             };
             self.system.eeprom = Some(eeprom::Eeprom::new(capacity));
         }
+        if rom.windows(9).any(|bytes| bytes == b"SIIRTC_V0") {
+            self.system.rtc = Some(rtc::Rtc::new());
+        }
         self.system.rom.extend_from_slice(rom);
         Ok(())
+    }
+
+    /// Samples externally supplied Unix seconds without advancing CPU work.
+    pub fn set_rtc_time(&mut self, seconds: u64) {
+        if let Some(chip) = &mut self.system.rtc {
+            chip.set_time(seconds);
+        }
+    }
+
+    /// Captures clock configuration independently of cartridge backup bytes.
+    pub fn rtc_image(&self) -> Option<RtcImage> {
+        self.system.rtc.as_ref().map(|chip| chip.image)
+    }
+
+    /// Validate and restore clock metadata before the first guest instruction.
+    pub fn load_rtc(&mut self, bytes: &[u8]) -> Result<(), &'static str> {
+        let image = RtcImage::decode(bytes)?;
+        let chip = self.system.rtc.as_mut().ok_or("Cartridge has no RTC")?;
+        chip.image = image;
+        chip.initialized = true;
+        chip.reset_bus();
+        Ok(())
+    }
+
+    /// Acknowledge only the exact durable snapshot, retaining newer settings.
+    pub fn acknowledge_rtc(&mut self, revision: u64) {
+        if let Some(chip) = &mut self.system.rtc
+            && chip.image.revision == revision
+        {
+            chip.image.dirty = false;
+        }
     }
 
     /// Reports cartridge evidence and the effective save-hardware selection.
@@ -3896,6 +3964,10 @@ impl Machine {
         let firmware = self.system.test_firmware;
         let bios = self.system.bios.take();
         let bios_startup = self.bios_startup;
+        let mut rtc = self.system.rtc.take();
+        if let Some(chip) = &mut rtc {
+            chip.reset_bus();
+        }
         let backup = std::mem::take(&mut self.backup);
         let sram = self.system.sram.take();
         let mut eeprom = self.system.eeprom.take();
@@ -3908,6 +3980,7 @@ impl Machine {
         }
         *self = Self::new();
         self.system.rom = rom;
+        self.system.rtc = rtc;
         self.system.bios = bios;
         self.bios_startup = bios_startup;
         if bios_startup {
