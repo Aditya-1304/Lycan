@@ -1,15 +1,15 @@
 #![forbid(unsafe_code)]
 
-#[path = "../../../roms/blend/contract.rs"]
+#[path = "../../../fixtures/diagnostics/blend/contract.rs"]
 mod blend_contract;
-#[path = "../../../roms/affine-object/contract.rs"]
+#[path = "../../../fixtures/diagnostics/affine-object/contract.rs"]
 mod object_contract;
-#[path = "../../../roms/raster/contract.rs"]
+#[path = "../../../fixtures/diagnostics/raster/contract.rs"]
 mod raster_contract;
-#[path = "../../../roms/window/contract.rs"]
+#[path = "../../../fixtures/diagnostics/window/contract.rs"]
 mod window_contract;
 
-#[path = "../../../roms/affine/contract.rs"]
+#[path = "../../../fixtures/diagnostics/affine/contract.rs"]
 mod affine_contract;
 
 use gba_core::{CYCLES_PER_FRAME, Cycle, Machine, SCREEN_HEIGHT, SCREEN_WIDTH};
@@ -24,13 +24,13 @@ use std::{
     time::Instant,
 };
 
-#[path = "../../../roms/bios/contract.rs"]
+#[path = "../../../fixtures/diagnostics/bios/contract.rs"]
 mod bios_contract;
-#[path = "../../../roms/noise/contract.rs"]
+#[path = "../../../fixtures/diagnostics/noise/contract.rs"]
 mod noise_contract;
-#[path = "../../../roms/pulse/contract.rs"]
+#[path = "../../../fixtures/diagnostics/pulse/contract.rs"]
 mod pulse_contract;
-#[path = "../../../roms/wave/contract.rs"]
+#[path = "../../../fixtures/diagnostics/wave/contract.rs"]
 mod wave_contract;
 
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
@@ -38,15 +38,17 @@ type Result<T> = std::result::Result<T, Box<dyn Error>>;
 /// App replay input is checked against the independent frozen manifest below.
 const DEMO_INPUT: &[(Cycle, Button, bool)] = &include!(concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/../../roms/buttons/input.rs"
+    "/../../fixtures/diagnostics/buttons/input.rs"
 ));
 
 /// The app replay is checked against the separately frozen fixture timeline.
-const TILED_INPUT: &[(Cycle, Button, bool)] = &include!("../../../roms/tiled/input.rs");
+const TILED_INPUT: &[(Cycle, Button, bool)] =
+    &include!("../../../fixtures/diagnostics/tiled/input.rs");
 
 /// The application timeline must match independently retained fixture events.
-const SPRITE_INPUT: &[(Cycle, Button, bool)] = &include!("../../../roms/sprites/input.rs");
-const DMA_INPUT: &[(Cycle, Button, bool)] = &include!("../../../roms/dma/input.rs");
+const SPRITE_INPUT: &[(Cycle, Button, bool)] =
+    &include!("../../../fixtures/diagnostics/sprites/input.rs");
+const DMA_INPUT: &[(Cycle, Button, bool)] = &include!("../../../fixtures/diagnostics/dma/input.rs");
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -133,9 +135,10 @@ struct MixerCheckpoint {
     pcm_sha256: String,
 }
 
-const MIXER_INPUT: &[(Cycle, Button, bool)] = &include!("../../../roms/pcm/mixer_input.rs");
+const MIXER_INPUT: &[(Cycle, Button, bool)] =
+    &include!("../../../fixtures/diagnostics/pcm/mixer_input.rs");
 
-const PCM_INPUT: &[(Cycle, Button, bool)] = &include!("../../../roms/pcm/input.rs");
+const PCM_INPUT: &[(Cycle, Button, bool)] = &include!("../../../fixtures/diagnostics/pcm/input.rs");
 
 /// The DMA scene has an independently frozen startup PC and firmware identity.
 #[derive(Deserialize)]
@@ -166,7 +169,8 @@ struct Keypad {
     firmware_sha256: String,
 }
 
-const KEYPAD_INPUT: &[(Cycle, Button, bool)] = &include!("../../../roms/keypad/input.rs");
+const KEYPAD_INPUT: &[(Cycle, Button, bool)] =
+    &include!("../../../fixtures/diagnostics/keypad/input.rs");
 
 /// IRQ guest identity and bounded completion; configuration variants only change
 /// the declared source/master/CPU mask word in the verified original ROM.
@@ -757,14 +761,18 @@ fn build_fixtures(path: &Path) -> Result<()> {
                 "-mcpu=arm7tdmi".as_ref(),
                 "-o".as_ref(),
                 object.as_os_str(),
-                root().join("roms/test-firmware/division.s").as_os_str(),
+                root()
+                    .join("fixtures/diagnostics/test-firmware/division.s")
+                    .as_os_str(),
             ],
         )?;
         tool(
             "arm-none-eabi-ld",
             &[
                 "-T".as_ref(),
-                root().join("roms/test-firmware/linker.ld").as_os_str(),
+                root()
+                    .join("fixtures/diagnostics/test-firmware/linker.ld")
+                    .as_os_str(),
                 "-o".as_ref(),
                 elf.as_os_str(),
                 object.as_os_str(),
@@ -795,7 +803,10 @@ fn build_fixtures(path: &Path) -> Result<()> {
                 return Err(fail("rebuilt test firmware differs from frozen SHA-256"));
             }
         }
-        fs::write(root().join("roms/test-firmware/division.bin"), bytes)?;
+        fs::write(
+            root().join("fixtures/diagnostics/test-firmware/division.bin"),
+            bytes,
+        )?;
         println!("BUILT original test firmware (SWI 0x06 and IRQ vector)");
     }
     for fixture in &manifest.fixture {
@@ -2440,9 +2451,9 @@ fn run() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.first().map(String::as_str) == Some("verify-raster") {
         let identity: toml::Value = toml::from_str(&fs::read_to_string(
-            root().join("roms/raster/manifest.toml"),
+            root().join("fixtures/diagnostics/raster/manifest.toml"),
         )?)?;
-        let bytes = fs::read(root().join("roms/raster.gba"))?;
+        let bytes = fs::read(root().join("fixtures/diagnostics/raster.gba"))?;
         if identity["bytes"].as_integer() != Some(bytes.len() as i64) {
             return Err("Raster ROM size mismatch".into());
         }
@@ -2467,7 +2478,7 @@ fn run() -> Result<()> {
     }
     if args.first().map(String::as_str) == Some("bench-raster") {
         let mut machine = Machine::new();
-        machine.load_rom(include_bytes!("../../../roms/raster.gba"))?;
+        machine.load_rom(include_bytes!("../../../fixtures/diagnostics/raster.gba"))?;
         machine.advance_to(Cycle(12 * CYCLES_PER_FRAME), 2_000_000)?;
         let image = machine.framebuffer().to_vec();
         benchmark_machine("raster", &mut machine, 600, 2_000_000)?;
@@ -2482,9 +2493,9 @@ fn run() -> Result<()> {
     }
     if args.first().map(String::as_str) == Some("verify-blend") {
         let identity: toml::Value = toml::from_str(&fs::read_to_string(
-            root().join("roms/blend/manifest.toml"),
+            root().join("fixtures/diagnostics/blend/manifest.toml"),
         )?)?;
-        let bytes = fs::read(root().join("roms/blend.gba"))?;
+        let bytes = fs::read(root().join("fixtures/diagnostics/blend.gba"))?;
         if identity["bytes"].as_integer() != Some(bytes.len() as i64) {
             return Err("Blend ROM size mismatch".into());
         }
@@ -2509,7 +2520,7 @@ fn run() -> Result<()> {
     }
     if args.first().map(String::as_str) == Some("bench-blend") {
         let mut machine = Machine::new();
-        machine.load_rom(include_bytes!("../../../roms/blend.gba"))?;
+        machine.load_rom(include_bytes!("../../../fixtures/diagnostics/blend.gba"))?;
         machine.advance_to(Cycle(12 * CYCLES_PER_FRAME), 2_000_000)?;
         let image = machine.framebuffer().to_vec();
         benchmark_machine("blend", &mut machine, 600, 2_000_000)?;
@@ -2520,9 +2531,9 @@ fn run() -> Result<()> {
     }
     if args.first().map(String::as_str) == Some("verify-window") {
         let identity: toml::Value = toml::from_str(&fs::read_to_string(
-            root().join("roms/window/manifest.toml"),
+            root().join("fixtures/diagnostics/window/manifest.toml"),
         )?)?;
-        let bytes = fs::read(root().join("roms/window.gba"))?;
+        let bytes = fs::read(root().join("fixtures/diagnostics/window.gba"))?;
         if identity["sha256"].as_str() != Some(hash(&bytes).as_str()) {
             return Err("Window ROM identity mismatch".into());
         }
@@ -2543,7 +2554,7 @@ fn run() -> Result<()> {
     }
     if args.first().map(String::as_str) == Some("bench-window") {
         let mut machine = Machine::new();
-        machine.load_rom(include_bytes!("../../../roms/window.gba"))?;
+        machine.load_rom(include_bytes!("../../../fixtures/diagnostics/window.gba"))?;
         machine.advance_to(Cycle(12 * CYCLES_PER_FRAME), 2_000_000)?;
         let image = machine.framebuffer().to_vec();
         benchmark_machine("window", &mut machine, 600, 2_000_000)?;
@@ -2557,7 +2568,9 @@ fn run() -> Result<()> {
             .unwrap_or_else(|| "600".to_owned())
             .parse()?;
         let mut machine = Machine::new();
-        machine.load_rom(include_bytes!("../../../roms/affine-object.gba"))?;
+        machine.load_rom(include_bytes!(
+            "../../../fixtures/diagnostics/affine-object.gba"
+        ))?;
         machine.advance_to(Cycle(20 * CYCLES_PER_FRAME), 2_000_000)?;
         let image = machine.framebuffer().to_vec();
         benchmark_machine("affine-object", &mut machine, frames, 2_000_000)?;
@@ -2569,13 +2582,14 @@ fn run() -> Result<()> {
     if args.first().map(String::as_str) == Some("verify-affine-object") {
         let capture = option(&args, "--capture")?.map(PathBuf::from);
         let identity: toml::Value = toml::from_str(&fs::read_to_string(
-            root().join("roms/affine-object/manifest.toml"),
+            root().join("fixtures/diagnostics/affine-object/manifest.toml"),
         )?)?;
-        let degenerate = fs::read(root().join("roms/affine-object-degenerate.gba"))?;
+        let degenerate =
+            fs::read(root().join("fixtures/diagnostics/affine-object-degenerate.gba"))?;
         if identity["mgba_degenerate"]["sha256"].as_str() != Some(hash(&degenerate).as_str()) {
             return Err("mGBA degenerate ROM identity mismatch".into());
         }
-        let bytes = fs::read(root().join("roms/affine-object.gba"))?;
+        let bytes = fs::read(root().join("fixtures/diagnostics/affine-object.gba"))?;
         if identity["sha256"].as_str() != Some(hash(&bytes).as_str()) {
             return Err("Affine object ROM identity mismatch".into());
         }
@@ -2606,10 +2620,11 @@ fn run() -> Result<()> {
             fs::create_dir_all(directory)?;
         }
         let identity: toml::Value = toml::from_str(&fs::read_to_string(
-            root().join("roms/affine/manifest.toml"),
+            root().join("fixtures/diagnostics/affine/manifest.toml"),
         )?)?;
         for mode in 1..=5 {
-            let bytes = fs::read(root().join(format!("roms/affine-mode-{mode}.gba")))?;
+            let bytes =
+                fs::read(root().join(format!("fixtures/diagnostics/affine-mode-{mode}.gba")))?;
             if identity[format!("mode_{mode}")]["sha256"].as_str() != Some(hash(&bytes).as_str()) {
                 return Err(format!("Affine mode {mode} ROM identity mismatch").into());
             }
@@ -2654,20 +2669,20 @@ fn run() -> Result<()> {
         }
         let expected: PulseIdentity =
             toml::from_str(&fs::read_to_string(root().join(if noise {
-                "roms/noise/manifest.toml"
+                "fixtures/diagnostics/noise/manifest.toml"
             } else if wave {
-                "roms/wave/manifest.toml"
+                "fixtures/diagnostics/wave/manifest.toml"
             } else {
-                "roms/pulse/manifest.toml"
+                "fixtures/diagnostics/pulse/manifest.toml"
             }))?)?;
         let identity = format!(
             "{:x}",
             Sha256::digest(if noise {
-                include_bytes!("../../../roms/noise.gba").as_slice()
+                include_bytes!("../../../fixtures/diagnostics/noise.gba").as_slice()
             } else if wave {
-                include_bytes!("../../../roms/wave.gba").as_slice()
+                include_bytes!("../../../fixtures/diagnostics/wave.gba").as_slice()
             } else {
-                include_bytes!("../../../roms/pulse.gba").as_slice()
+                include_bytes!("../../../fixtures/diagnostics/pulse.gba").as_slice()
             })
         );
         if expected.sha256 != identity {

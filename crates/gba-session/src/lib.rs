@@ -400,7 +400,7 @@ mod tests {
     fn loading_bios_preserves_a_paused_save_barrier() {
         let mut session = Session::new();
         session
-            .load_rom(include_bytes!("../../../roms/pixels.gba"))
+            .load_rom(include_bytes!("../../../fixtures/diagnostics/pixels.gba"))
             .unwrap();
         session.toggle_pause();
         session.load_bios(&vec![0; gba_core::BIOS_SIZE]).unwrap();
@@ -413,7 +413,7 @@ mod tests {
     fn lifecycle_boundaries_discard_staged_audio() {
         let mut session = Session::new();
         session
-            .load_rom(include_bytes!("../../../roms/pixels.gba"))
+            .load_rom(include_bytes!("../../../fixtures/diagnostics/pixels.gba"))
             .unwrap();
         session.advance_frame().unwrap();
         let mut samples = Vec::new();
@@ -444,7 +444,7 @@ mod tests {
     fn live_work_yield_preserves_progress_and_bounded_catch_up_debt() {
         let mut session = Session::new();
         session
-            .load_rom(include_bytes!("../../../roms/buttons.gba"))
+            .load_rom(include_bytes!("../../../fixtures/diagnostics/buttons.gba"))
             .unwrap();
         session
             .advance_host_time_with_budget(Duration::ZERO, None, 1)
@@ -482,7 +482,7 @@ mod tests {
     fn callback_jitter_preserves_the_absolute_guest_clock() {
         let mut session = Session::new();
         session
-            .load_rom(include_bytes!("../../../roms/buttons.gba"))
+            .load_rom(include_bytes!("../../../fixtures/diagnostics/buttons.gba"))
             .unwrap();
         session.advance_host_time(Duration::ZERO).unwrap();
         session
@@ -504,7 +504,7 @@ mod tests {
     fn pause_discards_pending_recovery_work() {
         let mut session = Session::new();
         session
-            .load_rom(include_bytes!("../../../roms/buttons.gba"))
+            .load_rom(include_bytes!("../../../fixtures/diagnostics/buttons.gba"))
             .unwrap();
         session.advance_host_time(Duration::ZERO).unwrap();
         session
@@ -529,7 +529,7 @@ mod tests {
     fn live_work_limit_without_cycle_progress_remains_fatal() {
         let mut session = Session::new();
         session
-            .load_rom(include_bytes!("../../../roms/buttons.gba"))
+            .load_rom(include_bytes!("../../../fixtures/diagnostics/buttons.gba"))
             .unwrap();
         session
             .advance_host_time_with_budget(Duration::ZERO, None, 0)
@@ -547,7 +547,7 @@ mod tests {
     fn host_pacing_stops_at_the_replay_deadline() {
         let mut session = Session::new();
         session
-            .load_rom(include_bytes!("../../../roms/buttons.gba"))
+            .load_rom(include_bytes!("../../../fixtures/diagnostics/buttons.gba"))
             .unwrap();
         let deadline = Cycle(9 * CYCLES_PER_FRAME);
         for tick in 0..=10 {
@@ -567,7 +567,7 @@ mod tests {
         let run = |hz: u64| {
             let mut session = Session::new();
             session
-                .load_rom(include_bytes!("../../../roms/buttons.gba"))
+                .load_rom(include_bytes!("../../../fixtures/diagnostics/buttons.gba"))
                 .unwrap();
             session.set_button(Button::Right, true);
             for tick in 0..=hz {
@@ -589,7 +589,7 @@ mod tests {
     fn pause_and_focus_loss_release_input_and_reanchor_host_time() {
         let mut session = Session::new();
         session
-            .load_rom(include_bytes!("../../../roms/buttons.gba"))
+            .load_rom(include_bytes!("../../../fixtures/diagnostics/buttons.gba"))
             .unwrap();
         session.advance_host_time(Duration::ZERO).unwrap();
         session
@@ -633,7 +633,7 @@ mod tests {
     fn held_button_reaches_guest_and_moves_once_per_emulated_frame() {
         let mut session = Session::new();
         session
-            .load_rom(include_bytes!("../../../roms/buttons.gba"))
+            .load_rom(include_bytes!("../../../fixtures/diagnostics/buttons.gba"))
             .unwrap();
         session.set_button(Button::Right, true);
         for frame in 1..=3 {

@@ -436,13 +436,13 @@ fn download(name: &str, bytes: &[u8]) -> Result<(), String> {
 /// Run write and read in separate processes to prove full process reopening.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn probe(mode: &str) -> Result<(), String> {
-    #[path = "../../../roms/sram/contract.rs"]
+    #[path = "../../../fixtures/diagnostics/sram/contract.rs"]
     mod contract;
-    #[path = "../../../roms/flash/contract.rs"]
+    #[path = "../../../fixtures/diagnostics/flash/contract.rs"]
     mod flash_contract;
-    #[path = "../../../roms/flash-banked/contract.rs"]
+    #[path = "../../../fixtures/diagnostics/flash-banked/contract.rs"]
     mod banked_contract;
-    #[path = "../../../roms/eeprom/contract.rs"]
+    #[path = "../../../fixtures/diagnostics/eeprom/contract.rs"]
     mod eeprom_contract;
     type GuestRun = fn(Option<&[u8]>, bool, u16) -> gba_session::SaveImage;
     let (rom, run): (&[u8], GuestRun) = if mode.starts_with("eeprom512-") {

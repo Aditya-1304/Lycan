@@ -20,25 +20,27 @@ struct PendingRom {
 }
 
 /// Original score cartridges use the normal loader and persistence route.
-const FLASH_DIAGNOSTIC_ROM: &[u8] = include_bytes!("../../../roms/gba-tests/save/flash64.gba");
-const BANKED_DIAGNOSTIC_ROM: &[u8] = include_bytes!("../../../roms/gba-tests/save/flash128.gba");
-const EEPROM512_ROM: &[u8] = include_bytes!("../../../roms/eeprom512-score.gba");
-const EEPROM8K_ROM: &[u8] = include_bytes!("../../../roms/eeprom8k-score.gba");
-const BANKED_ROM: &[u8] = include_bytes!("../../../roms/flash-banked-score.gba");
-const FLASH_ROM: &[u8] = include_bytes!("../../../roms/flash-score.gba");
-const SRAM_ROM: &[u8] = include_bytes!("../../../roms/sram.gba");
+const FLASH_DIAGNOSTIC_ROM: &[u8] =
+    include_bytes!("../../../fixtures/diagnostics/gba-tests/save/flash64.gba");
+const BANKED_DIAGNOSTIC_ROM: &[u8] =
+    include_bytes!("../../../fixtures/diagnostics/gba-tests/save/flash128.gba");
+const EEPROM512_ROM: &[u8] = include_bytes!("../../../fixtures/diagnostics/eeprom512-score.gba");
+const EEPROM8K_ROM: &[u8] = include_bytes!("../../../fixtures/diagnostics/eeprom8k-score.gba");
+const BANKED_ROM: &[u8] = include_bytes!("../../../fixtures/diagnostics/flash-banked-score.gba");
+const FLASH_ROM: &[u8] = include_bytes!("../../../fixtures/diagnostics/flash-score.gba");
+const SRAM_ROM: &[u8] = include_bytes!("../../../fixtures/diagnostics/sram.gba");
 
 /// Original display diagnostics use controlled ARM startup; retail ROMs retain BIOS boot.
 const DISPLAY_DIAGNOSTIC_ROMS: [&[u8]; 9] = [
-    include_bytes!("../../../roms/raster.gba"),
-    include_bytes!("../../../roms/blend.gba"),
-    include_bytes!("../../../roms/window.gba"),
-    include_bytes!("../../../roms/affine-object.gba"),
-    include_bytes!("../../../roms/affine-mode-1.gba"),
-    include_bytes!("../../../roms/affine-mode-2.gba"),
-    include_bytes!("../../../roms/affine-mode-3.gba"),
-    include_bytes!("../../../roms/affine-mode-4.gba"),
-    include_bytes!("../../../roms/affine-mode-5.gba"),
+    include_bytes!("../../../fixtures/diagnostics/raster.gba"),
+    include_bytes!("../../../fixtures/diagnostics/blend.gba"),
+    include_bytes!("../../../fixtures/diagnostics/window.gba"),
+    include_bytes!("../../../fixtures/diagnostics/affine-object.gba"),
+    include_bytes!("../../../fixtures/diagnostics/affine-mode-1.gba"),
+    include_bytes!("../../../fixtures/diagnostics/affine-mode-2.gba"),
+    include_bytes!("../../../fixtures/diagnostics/affine-mode-3.gba"),
+    include_bytes!("../../../fixtures/diagnostics/affine-mode-4.gba"),
+    include_bytes!("../../../fixtures/diagnostics/affine-mode-5.gba"),
 ];
 
 const WIDTH: usize = SCREEN_WIDTH;
@@ -46,71 +48,80 @@ const HEIGHT: usize = SCREEN_HEIGHT;
 
 const BUTTONS_ROM: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/../../roms/buttons.gba"
+    "/../../fixtures/diagnostics/buttons.gba"
 ));
 
 /// Loading this artifact uses the same session,
 /// master-clock pacing, and completed-frame presentation as dropped ROMs.
 const PALETTE_ROM: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/../../roms/palette.gba"
+    "/../../fixtures/diagnostics/palette.gba"
 ));
 
 /// Guest calculations use the shared session and timed display route on both
 /// platforms; the application only observes the guest's completion mailbox.
 const CALCULATIONS_ROM: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/../../roms/calculations.gba"
+    "/../../fixtures/diagnostics/calculations.gba"
 ));
 
 /// The bitmap-copy guest uses the shared loader and frame pacing on native and
 /// browser hosts; copying, redraw, and return all execute inside the emulated CPU.
-const COPY_ROM: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../roms/copy.gba"));
+const COPY_ROM: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../fixtures/diagnostics/copy.gba"
+));
 
 /// ARM draws the bar after a Thumb routine updates its guest-owned counter.
 const COUNTER_ROM: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/../../roms/counter.gba"
+    "/../../fixtures/diagnostics/counter.gba"
 ));
 
 /// Pinned upstream diagnostic bytes also identify the explicit test-firmware
 /// loading route, including when the same ROM is opened from a file dialog.
-const ARM_DIAGNOSTIC_ROM: &[u8] = include_bytes!("../../../roms/gba-tests/arm/arm.gba");
-const THUMB_DIAGNOSTIC_ROM: &[u8] = include_bytes!("../../../roms/gba-tests/thumb/thumb.gba");
+const ARM_DIAGNOSTIC_ROM: &[u8] =
+    include_bytes!("../../../fixtures/diagnostics/gba-tests/arm/arm.gba");
+const THUMB_DIAGNOSTIC_ROM: &[u8] =
+    include_bytes!("../../../fixtures/diagnostics/gba-tests/thumb/thumb.gba");
 
 /// Original mode-0 scene with guest-owned scrolling and the pinned reference ROM.
-const TILED_ROM: &[u8] = include_bytes!("../../../roms/tiled.gba");
-const STRIPES_ROM: &[u8] = include_bytes!("../../../roms/gba-tests/stripes.gba");
-const TILED_INPUT: &[(Cycle, Button, bool)] = &include!("../../../roms/tiled/input.rs");
+const TILED_ROM: &[u8] = include_bytes!("../../../fixtures/diagnostics/tiled.gba");
+const STRIPES_ROM: &[u8] = include_bytes!("../../../fixtures/diagnostics/gba-tests/stripes.gba");
+const TILED_INPUT: &[(Cycle, Button, bool)] =
+    &include!("../../../fixtures/diagnostics/tiled/input.rs");
 
 /// Explicit original IRQ diagnostic; normal cartridges never map test firmware.
-const KEYPAD_OR_ROM: &[u8] = include_bytes!("../../../roms/keypad-or.gba");
-const KEYPAD_AND_ROM: &[u8] = include_bytes!("../../../roms/keypad-and.gba");
+const KEYPAD_OR_ROM: &[u8] = include_bytes!("../../../fixtures/diagnostics/keypad-or.gba");
+const KEYPAD_AND_ROM: &[u8] = include_bytes!("../../../fixtures/diagnostics/keypad-and.gba");
 /// The same logical input deadlines are used by the bounded headless runner.
-const KEYPAD_INPUT: &[(Cycle, Button, bool)] = &include!("../../../roms/keypad/input.rs");
-const VBLANK_ROM: &[u8] = include_bytes!("../../../roms/vblank.gba");
+const KEYPAD_INPUT: &[(Cycle, Button, bool)] =
+    &include!("../../../fixtures/diagnostics/keypad/input.rs");
+const VBLANK_ROM: &[u8] = include_bytes!("../../../fixtures/diagnostics/vblank.gba");
 /// Original paired noise events with all PSG voices and both Direct Sound FIFOs.
-const NOISE_ROM: &[u8] = include_bytes!("../../../roms/noise.gba");
+const NOISE_ROM: &[u8] = include_bytes!("../../../fixtures/diagnostics/noise.gba");
 /// Original wave effect scene mixed with pulse voices and Direct Sound.
-const WAVE_ROM: &[u8] = include_bytes!("../../../roms/wave.gba");
+const WAVE_ROM: &[u8] = include_bytes!("../../../fixtures/diagnostics/wave.gba");
 /// Original two-voice pulse scene, using the same explicit firmware as PCM.
-const PULSE_ROM: &[u8] = include_bytes!("../../../roms/pulse.gba");
-const PCM_ROM: &[u8] = include_bytes!("../../../roms/pcm.gba");
-const PCM_INPUT: &[(Cycle, Button, bool)] = &include!("../../../roms/pcm/input.rs");
+const PULSE_ROM: &[u8] = include_bytes!("../../../fixtures/diagnostics/pulse.gba");
+const PCM_ROM: &[u8] = include_bytes!("../../../fixtures/diagnostics/pcm.gba");
+const PCM_INPUT: &[(Cycle, Button, bool)] = &include!("../../../fixtures/diagnostics/pcm/input.rs");
 
-const DMA_ROM: &[u8] = include_bytes!("../../../roms/dma.gba");
-const DMA_INPUT: &[(Cycle, Button, bool)] = &include!("../../../roms/dma/input.rs");
+const DMA_ROM: &[u8] = include_bytes!("../../../fixtures/diagnostics/dma.gba");
+const DMA_INPUT: &[(Cycle, Button, bool)] = &include!("../../../fixtures/diagnostics/dma/input.rs");
 /// IRQ variant shares the polling scene assets and scripted logical input.
-const IRQ_SPRITES_ROM: &[u8] = include_bytes!("../../../roms/irq-sprites.gba");
+const IRQ_SPRITES_ROM: &[u8] = include_bytes!("../../../fixtures/diagnostics/irq-sprites.gba");
 /// Original guest-owned sprite scene and its independently verified replay.
-const SPRITES_ROM: &[u8] = include_bytes!("../../../roms/sprites.gba");
-const SPRITE_INPUT: &[(Cycle, Button, bool)] = &include!("../../../roms/sprites/input.rs");
-const MEMORY_ROM: &[u8] = include_bytes!("../../../roms/gba-tests/memory/memory.gba");
+const SPRITES_ROM: &[u8] = include_bytes!("../../../fixtures/diagnostics/sprites.gba");
+const SPRITE_INPUT: &[(Cycle, Button, bool)] =
+    &include!("../../../fixtures/diagnostics/sprites/input.rs");
+const MEMORY_ROM: &[u8] =
+    include_bytes!("../../../fixtures/diagnostics/gba-tests/memory/memory.gba");
 
 /// The replay uses the same ordered cycle transitions verified by gba-tools.
 const DEMO_INPUT: &[(Cycle, Button, bool)] = &include!(concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/../../roms/buttons/input.rs"
+    "/../../fixtures/diagnostics/buttons/input.rs"
 ));
 
 /// Keyboard bindings translate host keys into the session's platform-neutral buttons.

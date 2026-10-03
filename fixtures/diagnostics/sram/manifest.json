@@ -1,0 +1,15 @@
+{
+  "sha256": "34ed9eb504ed6aa4da12d2fd29f408665c585afebb4f2dd4bc685f4bec523dfc",
+  "startup": "cartridge-direct-arm",
+  "backup": "Sram",
+  "mailbox_address": 50331648,
+  "completion_id": 115,
+  "score_address": 50331650,
+  "max_instructions_per_frame": 200000,
+  "frames": 3,
+  "max_cycles": 842750,
+  "score": 1,
+  "new_checkpoint_pc": 134218008,
+  "restored_checkpoint_pc": 134218000,
+  "expected_image": "38400 pixels; first 8 columns of first 8 rows green 0x03e0; all other pixels black"
+}
