@@ -110,6 +110,15 @@ impl Audio {
         output.submit(&self.converted);
     }
 
+    /// Lightweight player presentation; queue diagnostics remain in the debug view.
+    pub fn enabled(&self) -> bool {
+        self.output.is_some()
+    }
+
+    pub fn error(&self) -> Option<&str> {
+        self.error.as_deref()
+    }
+
     /// Formats negotiated rate, bounded queue state and adapter error counters.
     pub fn status(&self) -> String {
         if let Some(error) = &self.error {

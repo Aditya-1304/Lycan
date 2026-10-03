@@ -1,3 +1,5 @@
+mod views;
+
 use crate::audio::Audio;
 use eframe::egui;
 use gba_session::{BUTTONS, Button, CYCLES_PER_FRAME, Cycle, SCREEN_HEIGHT, SCREEN_WIDTH, Session};
@@ -12,7 +14,20 @@ struct RomRead {
     result: Option<(String, Result<Vec<u8>, String>)>,
 }
 
-/// ROM bytes waiting for the preceding session's save barrier to clear.
+/// Firmware completions share the request generation with ROM selection so a
+/// newer drop cannot be restarted by an older picker completion.
+struct BiosRead {
+    generation: u64,
+    result: Option<(String, Result<Vec<u8>, String>)>,
+}
+
+/// Validated firmware retained until the installed cartridge's save barrier clears.
+struct PendingBios {
+    name: String,
+    bytes: Vec<u8>,
+}
+
+/// ROM bytes waiting for startup firmware or the preceding session's save barrier.
 struct PendingRom {
     name: String,
     bytes: Vec<u8>,
@@ -31,6 +46,7 @@ enum Operation {
     RestoringSave,
     ImportingSave,
     ReplacingRom,
+    ReplacingBios,
     Closing,
 }
 
@@ -44,6 +60,7 @@ impl Operation {
             Self::RestoringSave => Some("Restoring save…"),
             Self::ImportingSave => Some("Importing save…"),
             Self::ReplacingRom => Some("Saving current game before loading another ROM."),
+            Self::ReplacingBios => Some("Saving current game before replacing BIOS…"),
             Self::Closing => Some("Saving current game before closing…"),
         }
     }
@@ -163,15 +180,24 @@ pub struct GbaApp {
     /// Presentation mode only; switching modes preserves the active session.
     debug_ui: bool,
     settings: crate::settings::Settings,
+    /// A settings window temporarily owns input without changing explicit pause.
+    settings_open: bool,
+    /// Menus gate logical input; settings additionally suspend execution.
+    ui_keys_owned: bool,
+    /// Still-held keys remain ineligible after a UI interaction until released.
+    suppressed_keys: [bool; 10],
+    notice: Option<String>,
     /// User intent survives file operations, restoration, focus loss and reset.
     user_paused: bool,
     /// Faults are independent of user pause and clear only after reset/install.
     execution_faulted: bool,
     session: Session,
     bios_hash: Option<String>,
+    bios_name: Option<String>,
+    pending_bios: Option<PendingBios>,
     bios_picker_open: bool,
-    bios_sender: std::sync::mpsc::Sender<Option<Result<Vec<u8>, String>>>,
-    bios_receiver: std::sync::mpsc::Receiver<Option<Result<Vec<u8>, String>>>,
+    bios_sender: std::sync::mpsc::Sender<BiosRead>,
+    bios_receiver: std::sync::mpsc::Receiver<BiosRead>,
     storage: crate::saves::Storage,
     save_identity: Option<crate::saves::Identity>,
     save_generation: u64,
@@ -230,10 +256,16 @@ impl GbaApp {
         let mut app = Self {
             debug_ui,
             settings,
+            settings_open: false,
+            ui_keys_owned: false,
+            suppressed_keys: [false; 10],
+            notice: None,
             user_paused: false,
             execution_faulted: false,
             session: Session::new(),
             bios_hash: None,
+            bios_name: None,
+            pending_bios: None,
             bios_picker_open: false,
             bios_sender,
             bios_receiver,
@@ -291,6 +323,7 @@ impl GbaApp {
             || self.restoring_save
             || self.save_import_open
             || self.pending_rom.is_some()
+            || self.pending_bios.is_some()
             || self.close_pending()
     }
 
@@ -305,6 +338,8 @@ impl GbaApp {
             Operation::RestoringSave
         } else if self.save_import_open {
             Operation::ImportingSave
+        } else if self.pending_bios.is_some() {
+            Operation::ReplacingBios
         } else if self.pending_rom.is_some() {
             if self
                 .pending_rom
@@ -333,21 +368,89 @@ impl GbaApp {
         !self.picker_open
             && !self.bios_picker_open
             && self.pending_rom.is_none()
+            && self.pending_bios.is_none()
             && !self.save_import_open
             && !self.close_pending()
     }
 
     fn can_pick_bios(&self) -> bool {
-        // Preserve diagnostic BIOS loading and the existing session reset path,
-        // while preventing an installed-game restart from crossing a save barrier.
         !self.bios_picker_open
             && !self.picker_open
             && !self.restoring_save
             && !self.save_import_open
             && !self.close_pending()
+            && self.pending_bios.is_none()
+            && (!self.loaded
+                || self
+                    .pending_rom
+                    .as_ref()
+                    .is_none_or(|pending| pending.requires_bios))
+    }
+
+    /// Presentation actions use the same predicates as their execution paths.
+    fn can_import_save(&self) -> bool {
+        self.save_identity.is_some()
             && !self.storage.busy
-            && !self.session.persistence_dirty()
-            && (!self.loaded || self.pending_rom.is_none())
+            && !self.picker_open
+            && !self.bios_picker_open
+            && !self.save_import_open
+            && self.pending_rom.is_none()
+            && self.pending_bios.is_none()
+            && !self.close_pending()
+    }
+
+    fn can_export_save(&self) -> bool {
+        self.save_identity.is_some()
+            && !self.storage.busy
+            && self
+                .session
+                .save_status()
+                .is_some_and(|status| status.len > 0)
+    }
+
+    fn report_error(&mut self, message: String) {
+        self.status.clone_from(&message);
+        self.notice = Some(message);
+    }
+
+    /// Invalidate already submitted keys when UI takes ownership after logic.
+    /// The fixed suppression array avoids event collections or per-frame allocation.
+    fn own_ui_keys(&mut self, ctx: &egui::Context) {
+        ctx.input(|input| {
+            for (blocked, key) in self
+                .suppressed_keys
+                .iter_mut()
+                .zip(self.settings.preferences.bindings)
+            {
+                *blocked |= input.key_down(key);
+            }
+        });
+        self.session.release_all_buttons();
+    }
+
+    fn import_cartridge_save(&mut self, ctx: &egui::Context) {
+        if !self.can_import_save() {
+            return;
+        }
+        if let Some(identity) = self.save_identity {
+            self.own_ui_keys(ctx);
+            self.storage.import(ctx, identity, self.save_generation);
+            self.save_import_open = self.storage.busy;
+            self.sync_execution(true, true);
+        }
+    }
+
+    fn export_cartridge_save(&mut self, ctx: &egui::Context) {
+        if !self.can_export_save() {
+            return;
+        }
+        if let Some(identity) = self.save_identity
+            && let Some(image) = self.session.save_image()
+        {
+            self.own_ui_keys(ctx);
+            self.storage
+                .export(ctx, identity, self.save_generation, image);
+        }
     }
 
     /// Synchronizes session flags through its existing reanchoring APIs. The
@@ -361,7 +464,8 @@ impl GbaApp {
             self.session.toggle_pause();
             self.audio.clear();
         }
-        let active = self.loaded && focused && visible && !self.operation_pending();
+        let active =
+            self.loaded && focused && visible && !self.operation_pending() && !self.settings_open;
         self.session.set_active(active);
         if !active || paused {
             self.session.release_all_buttons();
@@ -384,6 +488,9 @@ impl GbaApp {
         if !self.can_pick_bios() {
             return;
         }
+        self.notice = None;
+        self.load_generation = self.load_generation.wrapping_add(1);
+        let generation = self.load_generation;
         self.bios_picker_open = true;
         self.sync_execution(true, true);
         let sender = self.bios_sender.clone();
@@ -401,11 +508,11 @@ impl GbaApp {
                     .await
                     .map(|buffer| js_sys::Uint8Array::new(&buffer).to_vec())
                     .map_err(|error| format!("{error:?}"));
-                Some(bytes)
+                Some((file.file_name(), bytes))
             } else {
                 None
             };
-            let _ = sender.send(result);
+            let _ = sender.send(BiosRead { generation, result });
             ctx.request_repaint();
         };
         #[cfg(not(target_arch = "wasm32"))]
@@ -414,29 +521,43 @@ impl GbaApp {
             .spawn(move || pollster::block_on(task))
         {
             self.bios_picker_open = false;
-            self.status = format!("BIOS picker failed: {error}");
+            self.report_error(format!("BIOS picker failed: {error}"));
         }
         #[cfg(target_arch = "wasm32")]
         wasm_bindgen_futures::spawn_local(task);
     }
 
-    /// Commits validated startup firmware through the existing session operation.
-    /// A failed selection leaves the pending ROM and installed firmware intact.
+    #[cfg(test)]
     fn load_bios_bytes(&mut self, bytes: &[u8]) {
-        // Recheck on completion: a supported drop may have changed the session
-        // while the picker was open. Never reset across a newly active barrier.
-        if self.loaded
-            && (self.restoring_save
-                || self.storage.busy
-                || self.session.persistence_dirty()
-                || self.pending_rom.is_some()
-                || self.save_import_open
-                || self.close_pending())
-        {
-            self.status =
-                "BIOS load blocked by pending cartridge persistence; retry after saving.".into();
+        self.load_bios_request("test BIOS.bin", bytes);
+    }
+
+    /// Validate before staging; the current firmware and session remain installed
+    /// while cartridge restoration or an outstanding save write blocks replacement.
+    fn load_bios_request(&mut self, name: &str, bytes: &[u8]) {
+        if bytes.len() != 16384 {
+            self.report_error(format!(
+                "BIOS must be 16 KiB (16384 bytes); received {} bytes.",
+                bytes.len()
+            ));
             return;
         }
+        if self.loaded
+            && (self.storage.busy || self.restoring_save || self.session.persistence_dirty())
+        {
+            self.pending_bios = Some(PendingBios {
+                name: name.into(),
+                bytes: bytes.to_vec(),
+            });
+            self.sync_execution(true, true);
+            return;
+        }
+        self.install_bios(name, bytes);
+    }
+
+    /// Commits through the existing session operation after the app's save barrier.
+    /// Firmware names/readiness change only on successful installation.
+    fn install_bios(&mut self, name: &str, bytes: &[u8]) {
         match self.session.load_bios(bytes) {
             Ok(()) => {
                 self.audio.clear();
@@ -448,12 +569,28 @@ impl GbaApp {
                     .fill(egui::Color32::BLACK);
                 self.image_generation = self.image_generation.wrapping_add(1);
                 self.bios_hash = Some(format!("{:x}", Sha256::digest(bytes)));
+                self.bios_name = Some(name.into());
                 self.execution_faulted = false;
+                self.notice = None;
                 self.sync_execution(true, true);
-                self.status = "BIOS loaded; select a ROM to boot".into();
+                self.status = if self.loaded {
+                    "BIOS replaced; game restarted"
+                } else {
+                    "BIOS ready; load a ROM to start"
+                }
+                .into();
             }
-            Err(error) => self.status = format!("BIOS load failed: {error}"),
+            Err(error) => self.report_error(format!("BIOS load failed: {error}")),
         }
+    }
+
+    /// Cancellation removes only the queued replacement, never an issued save write.
+    fn cancel_replacement(&mut self) {
+        if let Some(pending) = self.pending_rom.take() {
+            self.restore_backup_override(pending.backup_override);
+        }
+        self.pending_bios = None;
+        self.sync_execution(true, true);
     }
 
     /// Byte identity confines controlled startup to the shipped diagnostics.
@@ -543,7 +680,7 @@ impl GbaApp {
         {
             self.picker_open = false;
             self.restore_backup_override(fallback_override);
-            self.status = format!("ROM picker failed: {error}");
+            self.report_error(format!("ROM picker failed: {error}"));
         }
         #[cfg(target_arch = "wasm32")]
         wasm_bindgen_futures::spawn_local(task);
@@ -564,13 +701,16 @@ impl GbaApp {
     ) {
         self.load_generation = self.load_generation.wrapping_add(1);
         self.picker_open = false;
+        self.bios_picker_open = false;
+        self.pending_bios = None;
+        self.notice = None;
         if !Self::controlled_rom(bytes) && self.bios_hash.is_none() {
             // Validate through the existing loader without installing into the
             // live owner. This bounded startup-only work never runs per frame.
             let mut validation = Session::new();
             if let Err(error) = validation.load_rom_with_backup(bytes, backup_override) {
                 self.restore_backup_override(backup_override);
-                self.status = format!("ROM load failed: {error}");
+                self.report_error(format!("ROM load failed: {error}"));
                 return;
             }
             self.pending_rom = Some(PendingRom {
@@ -644,6 +784,7 @@ impl GbaApp {
                 self.restoring_save = self.save_identity.is_some();
                 self.storage.failed = false;
                 self.execution_faulted = false;
+                self.notice = None;
                 self.pending_rom = None;
                 if self.restoring_save || self.user_paused {
                     self.session.toggle_pause();
@@ -682,7 +823,7 @@ impl GbaApp {
             }
             Err(error) => {
                 self.restore_backup_override(requested_override);
-                self.status = format!("ROM load failed: {error}");
+                self.report_error(format!("ROM load failed: {error}"));
             }
         }
     }
@@ -783,7 +924,11 @@ impl GbaApp {
                             self.storage.status =
                                 "Imported; persistence pending — Resume to display".into();
                         }
-                        Err(error) => self.storage.status = format!("Import rejected: {error}"),
+                        Err(error) => {
+                            self.storage.status = format!("Import rejected: {error}");
+                            self.report_error(self.storage.status.clone());
+                            self.report_error(self.storage.status.clone());
+                        }
                     }
                 }
                 Outcome::Imported(Ok(None)) => {
@@ -800,7 +945,8 @@ impl GbaApp {
                 }
                 Outcome::Exported(Ok(false)) => self.storage.status = "Export cancelled".into(),
                 Outcome::Exported(Err(error)) => {
-                    self.storage.status = format!("Export failed: {error}")
+                    self.storage.status = format!("Export failed: {error}");
+                    self.report_error(self.storage.status.clone());
                 }
             }
         }
@@ -819,6 +965,8 @@ impl GbaApp {
                         self.session.rtc_image(),
                     );
                 }
+            } else if let Some(pending) = self.pending_bios.take() {
+                self.install_bios(&pending.name, &pending.bytes);
             } else if self
                 .pending_rom
                 .as_ref()
@@ -828,7 +976,7 @@ impl GbaApp {
                 self.install_rom(&pending.name, &pending.bytes, pending.backup_override);
             }
         }
-        if self.storage.busy || self.restoring_save {
+        if self.storage.busy {
             ctx.request_repaint_after(Duration::from_millis(20));
         }
     }
@@ -836,17 +984,11 @@ impl GbaApp {
     /// Imports run with the guest paused and after any outstanding write. Exports
     /// include identity and the latest bytes, including data from a failed write.
     fn draw_save_controls(&mut self, ui: &mut egui::Ui) {
-        let Some(identity) = self.save_identity else {
+        if self.save_identity.is_none() {
             return;
-        };
-        ui.label(format!("Backup: {}", self.storage.status));
-        if let Some(status) = self.session.save_status().filter(|status| status.dirty) {
-            ui.label(format!(
-                "Revision {} is pending storage acknowledgement",
-                status.revision
-            ));
         }
-        ui.horizontal(|ui| {
+        ui.label(&self.storage.status);
+        ui.horizontal_wrapped(|ui| {
             if ui
                 .add_enabled(!self.storage.busy, egui::Button::new("Retry save storage"))
                 .clicked()
@@ -856,38 +998,23 @@ impl GbaApp {
             }
             if ui
                 .add_enabled(
-                    !self.storage.busy && self.pending_rom.is_none(),
-                    egui::Button::new("Import save"),
+                    self.can_import_save(),
+                    egui::Button::new("Import cartridge save"),
                 )
                 .clicked()
             {
-                self.user_paused = true;
-                self.sync_execution(true, true);
-                self.storage
-                    .import(ui.ctx(), identity, self.save_generation);
-                self.save_import_open = self.storage.busy;
+                self.import_cartridge_save(ui.ctx());
             }
             if ui
-                // An unresolved EEPROM exposes storage for restore/import, but has
-                // no capacity-bearing snapshot suitable for portable export yet.
                 .add_enabled(
-                    !self.storage.busy
-                        && self
-                            .session
-                            .save_status()
-                            .is_some_and(|status| status.len > 0),
-                    egui::Button::new("Export save"),
+                    self.can_export_save(),
+                    egui::Button::new("Export cartridge save"),
                 )
                 .clicked()
-                && let Some(image) = self.session.save_image()
             {
-                self.storage
-                    .export(ui.ctx(), identity, self.save_generation, image);
+                self.export_cartridge_save(ui.ctx());
             }
         });
-        if self.pending_rom.is_some() {
-            ui.label("ROM replacement awaits the pending save");
-        }
     }
 
     /// Converts the core's row-major BGR555 pixels into the shared egui image.
@@ -908,11 +1035,17 @@ impl GbaApp {
     /// Samples held host keys into the logical button state owned by the session.
     fn poll_keyboard(&mut self, ctx: &egui::Context) {
         ctx.input(|input| {
-            for (button, key) in BINDING_BUTTONS
+            for (slot, (button, key)) in BINDING_BUTTONS
                 .into_iter()
                 .zip(self.settings.preferences.bindings)
+                .enumerate()
             {
-                self.session.set_button(button, input.key_down(key));
+                let down = input.key_down(key);
+                if !down {
+                    self.suppressed_keys[slot] = false;
+                }
+                self.session
+                    .set_button(button, down && !self.suppressed_keys[slot]);
             }
         });
     }
@@ -951,6 +1084,7 @@ impl GbaApp {
         self.audio.clear();
         self.session.reset();
         self.execution_faulted = false;
+        self.notice = None;
         self.sync_execution(true, true);
         self.host_origin = Instant::now();
         self.replay_deadline = None;
@@ -960,137 +1094,6 @@ impl GbaApp {
             .fill(egui::Color32::BLACK);
         self.status = format!("Reset {}", self.rom_name);
         self.image_generation = self.image_generation.wrapping_add(1);
-    }
-
-    /// Selects presentation without altering cartridge, input, or persistence state.
-    fn draw_ui(&mut self, ui: &mut egui::Ui) {
-        if !self.debug_ui {
-            ui.painter()
-                .rect_filled(ui.max_rect(), 0.0, egui::Color32::from_rgb(12, 12, 14));
-        }
-        if let Some(progress) = self.operation().label() {
-            ui.label(progress);
-        }
-        if let Some(warning) = &self.settings.warning {
-            ui.label(warning);
-            if ui.button("Dismiss preferences warning").clicked() {
-                self.settings.warning = None;
-            }
-        }
-        if self.settings.writes_blocked() && ui.button("Reset saved settings").clicked() {
-            self.settings.reset_saved_settings();
-            self.audio.volume = self.settings.preferences.volume;
-            self.audio.muted = self.settings.preferences.muted;
-        }
-        if self.debug_ui {
-            self.draw_debug_ui(ui);
-        } else {
-            self.draw_player_ui(ui);
-        }
-    }
-
-    /// Presents essential player controls using the existing loader and save barriers.
-    fn draw_player_ui(&mut self, ui: &mut egui::Ui) {
-        self.sync_texture(ui.ctx());
-
-        // Place controls first so long cartridge names cannot push them off-screen.
-        ui.horizontal(|ui| {
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui
-                    .add_enabled(self.can_reset(), egui::Button::new("Reset"))
-                    .clicked()
-                {
-                    self.reset_demo();
-                    ui.ctx().request_repaint();
-                }
-                let pause_label = if self.user_paused { "Resume" } else { "Pause" };
-                // Retain the save barriers used by the diagnostic controls.
-                let can_pause = self.can_pause();
-                if ui
-                    .add_enabled(can_pause, egui::Button::new(pause_label))
-                    .clicked()
-                {
-                    self.toggle_user_pause();
-                    ui.ctx().request_repaint();
-                }
-                if ui
-                    .add_enabled(self.can_pick_rom(), egui::Button::new("Load ROM"))
-                    .clicked()
-                {
-                    self.pick_rom(ui.ctx());
-                }
-                if self.bios_hash.is_none()
-                    && ui
-                        .add_enabled(self.can_pick_bios(), egui::Button::new("Load BIOS"))
-                        .clicked()
-                {
-                    self.pick_bios(ui.ctx());
-                }
-                ui.menu_button("Audio", |ui| {
-                    if ui.button("Enable audio").clicked() {
-                        self.audio.start();
-                    }
-                    ui.checkbox(&mut self.audio.muted, "Mute");
-                    ui.add(egui::Slider::new(&mut self.audio.volume, 0.0..=1.0).text("Volume"));
-                });
-                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                    ui.add_space(10.0);
-                    // Keep product identity visible on hosts without window decorations.
-                    ui.label(egui::RichText::new("Lycan").size(18.0).strong());
-                    ui.add_space(4.0);
-                    ui.separator();
-                    let name = if self.rom_name.is_empty() {
-                        "No ROM loaded"
-                    } else {
-                        &self.rom_name
-                    };
-                    let save_state = if self.save_identity.is_none() {
-                        ""
-                    } else if self.storage.failed {
-                        " · Save failed"
-                    } else if self.restoring_save {
-                        " · Restoring"
-                    } else if self.storage.busy || self.session.persistence_dirty() {
-                        " · Saving"
-                    } else {
-                        " · Saved"
-                    };
-                    ui.add(egui::Label::new(format!("{name}{save_state}")).truncate())
-                        .on_hover_text(format!("{name}\n{}", self.storage.status));
-                });
-            });
-        });
-        ui.separator();
-        // Display actionable failures and startup guidance without reserving a
-        // permanent status row during normal play. Hover reveals the full error.
-        if !self.loaded || self.status.contains("failed") {
-            ui.add(egui::Label::new(&self.status).truncate())
-                .on_hover_text(&self.status);
-        }
-        if self.storage.failed {
-            ui.add(egui::Label::new("Save failed; press F1 for recovery controls").truncate())
-                .on_hover_text(&self.storage.status);
-        }
-
-        // Reserve the frame margins before fitting so the framed image also fits.
-        let available = ui.available_size();
-        let size = player_screen_size((available - egui::vec2(12.0, 12.0)).max(egui::Vec2::ZERO));
-        ui.allocate_ui_with_layout(
-            available,
-            egui::Layout::top_down(egui::Align::Center),
-            |ui| {
-                ui.add_space(((available.y - size.y - 12.0) * 0.5).max(0.0));
-                egui::Frame::NONE
-                    .fill(egui::Color32::BLACK)
-                    .inner_margin(6)
-                    .corner_radius(4)
-                    .show(ui, |ui| {
-                        if let Some(texture) = &self.texture {
-                            ui.add(egui::Image::from_texture(texture).fit_to_exact_size(size));
-                        }
-                    });
-            },
-        );
     }
 
     /// Retains all fixture controls and detailed diagnostics for development.
@@ -1609,13 +1612,15 @@ impl eframe::App for GbaApp {
             #[cfg(not(target_arch = "wasm32"))]
             match file.bytes() {
                 Ok(bytes) => self.load_rom_bytes(&name, &bytes),
-                Err(error) => self.status = format!("ROM read failed: {error}"),
+                Err(error) => self.report_error(format!("ROM read failed: {error}")),
             }
             #[cfg(target_arch = "wasm32")]
             {
                 let backup_override = self.backup_override.take();
                 self.load_generation = self.load_generation.wrapping_add(1);
                 self.picker_open = true;
+                self.bios_picker_open = false;
+                self.pending_bios = None;
                 let generation = self.load_generation;
                 let sender = self.rom_sender.clone();
                 let ctx = ctx.clone();
@@ -1631,12 +1636,15 @@ impl eframe::App for GbaApp {
                 });
             }
         }
-        while let Ok(result) = self.bios_receiver.try_recv() {
+        while let Ok(completion) = self.bios_receiver.try_recv() {
+            if completion.generation != self.load_generation {
+                continue;
+            }
             self.bios_picker_open = false;
-            match result {
-                Some(Ok(bytes)) => self.load_bios_bytes(&bytes),
-                Some(Err(error)) => self.status = format!("BIOS read failed: {error}"),
-                None => {} // Cancellation leaves previously valid startup assets intact.
+            match completion.result {
+                Some((name, Ok(bytes))) => self.load_bios_request(&name, &bytes),
+                Some((_, Err(error))) => self.report_error(format!("BIOS read failed: {error}")),
+                None => {} // Cancellation preserves installed firmware and explicit pause.
             }
         }
 
@@ -1651,7 +1659,7 @@ impl eframe::App for GbaApp {
                     Ok(bytes) => self.load_rom_request(&name, &bytes, backup_override),
                     Err(error) => {
                         self.restore_backup_override(backup_override);
-                        self.status = format!("ROM read failed: {error}");
+                        self.report_error(format!("ROM read failed: {error}"));
                     }
                 }
             } else {
@@ -1690,8 +1698,14 @@ impl eframe::App for GbaApp {
             self.status =
                 "Replay cancelled on focus loss; run it again to compare positions".into();
         }
-        if running && self.replay_deadline.is_none() {
+        if running
+            && self.replay_deadline.is_none()
+            && !self.ui_keys_owned
+            && !ctx.egui_wants_keyboard_input()
+        {
             self.poll_keyboard(ctx);
+        } else if self.ui_keys_owned || ctx.egui_wants_keyboard_input() {
+            self.own_ui_keys(ctx);
         }
         let start = Instant::now();
         let now = self.host_origin.elapsed();
@@ -1716,7 +1730,7 @@ impl eframe::App for GbaApp {
             Ok(None) => {}
             Err(error) => {
                 self.audio.set_playing(false);
-                self.status = format!("Guest execution failed: {error}");
+                self.report_error(format!("Guest execution failed: {error}"));
                 self.execution_faulted = true;
                 self.sync_execution(focused, visible);
                 return;
@@ -1800,7 +1814,12 @@ impl eframe::App for GbaApp {
                 }
             };
         }
-        if self.loaded && !self.session.paused() && focused && visible && !self.operation_pending()
+        if self.loaded
+            && !self.session.paused()
+            && focused
+            && visible
+            && !self.operation_pending()
+            && !self.settings_open
         {
             // This wake is a presentation request. Session elapsed-time pacing,
             // rather than callback count, determines how many GBA cycles execute.
@@ -1919,6 +1938,47 @@ mod tests {
         app.toggle_user_pause();
         app.reset_demo();
         assert!(app.session.paused(), "Reset unexpectedly resumed gameplay");
+    }
+
+    // Session focus tests do not cover application windows opening after logic.
+    // Settings must release submitted input immediately and retain pause intent.
+    #[test]
+    fn settings_release_input_and_preserve_explicit_pause() {
+        let mut app = GbaApp::create(false);
+        app.load_rom_bytes("buttons.gba", BUTTONS_ROM);
+        app.session.set_button(Button::Right, true);
+        app.settings_open = true;
+        assert!(!app.sync_execution(true, true));
+        assert!(!app.session.button_pressed(Button::Right));
+        app.settings_open = false;
+        assert!(app.sync_execution(true, true));
+        app.toggle_user_pause();
+        app.settings_open = true;
+        app.sync_execution(true, true);
+        app.settings_open = false;
+        assert!(!app.sync_execution(true, true));
+        assert!(app.user_paused);
+        assert!(app.session.paused());
+    }
+
+    // Picker cancellation tests cannot catch firmware being discarded while a
+    // previously issued cartridge write is still outstanding.
+    #[test]
+    fn bios_replacement_commits_only_after_the_save_barrier() {
+        let mut app = GbaApp::create(false);
+        app.load_rom_bytes("buttons.gba", BUTTONS_ROM);
+        app.load_bios_bytes(&vec![0; 16384]);
+        let previous_hash = app.bios_hash.clone();
+        app.storage.busy = true;
+        let replacement = vec![1; 16384];
+        app.load_bios_bytes(&replacement);
+        assert_eq!(app.bios_hash, previous_hash);
+        app.storage.busy = false;
+        app.poll_save_storage(&egui::Context::default());
+        assert_eq!(
+            app.bios_hash,
+            Some(format!("{:x}", Sha256::digest(&replacement)))
+        );
     }
 
     #[test]
