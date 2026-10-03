@@ -224,12 +224,28 @@ impl GbaApp {
         ui.separator();
         self.draw_player_status(ui);
         let available = ui.available_size();
-        let size = player_screen_size((available - egui::vec2(12.0, 12.0)).max(egui::Vec2::ZERO));
+        // Automatic hiding never changes the saved preference, and hidden legends
+        // reserve no space. Short views keep the framebuffer as the primary content.
+        let deck = available.x >= 600.0 && available.y >= 430.0;
+        let show_legend = self.settings.preferences.legend_visible
+            && (deck || (available.x >= 400.0 && available.y >= 280.0));
+        let legend_height = if show_legend {
+            // Include caption and layout spacing so the final row stays inside
+            // the player region rather than clipping below the framebuffer.
+            (if deck { 112.0 } else { 46.0 })
+                + 6.0
+                + ui.text_style_height(&egui::TextStyle::Small)
+                + 3.0 * ui.spacing().item_spacing.y
+        } else {
+            0.0
+        };
+        let screen_area = available - egui::vec2(0.0, legend_height);
+        let size = player_screen_size((screen_area - egui::vec2(12.0, 12.0)).max(egui::Vec2::ZERO));
         ui.allocate_ui_with_layout(
             available,
             egui::Layout::top_down(egui::Align::Center),
             |ui| {
-                ui.add_space(((available.y - size.y - 12.0) * 0.5).max(0.0));
+                ui.add_space(((screen_area.y - size.y - 12.0) * 0.5).max(0.0));
                 egui::Frame::NONE
                     .fill(egui::Color32::BLACK)
                     .inner_margin(6)
@@ -251,9 +267,88 @@ impl GbaApp {
                             });
                         }
                     });
+                if legend_height > 0.0 {
+                    self.draw_controller_legend(ui, deck);
+                }
             },
         );
         menu_open
+    }
+
+    /// A bounded painted keyboard legend, never a pointer/gameplay controller.
+    /// Highlights read the session's submitted logical state, including releases.
+    fn draw_controller_legend(&self, ui: &mut egui::Ui, deck: bool) {
+        ui.add_space(6.0);
+        let width = ui.available_width().min(if deck { 660.0 } else { 600.0 });
+        let height = if deck { 112.0 } else { 46.0 };
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::hover());
+        if deck {
+            ui.painter().rect_filled(rect.shrink(1.0), 20.0, SURFACE);
+        }
+        // Application slot positions describe the deck; they never change the
+        // hardware Button ordering or the preference mapping.
+        let positions = [
+            [0.87, 0.47],
+            [0.74, 0.68],
+            [0.17, 0.14],
+            [0.83, 0.14],
+            [0.55, 0.80],
+            [0.39, 0.80],
+            [0.17, 0.39],
+            [0.17, 0.83],
+            [0.06, 0.61],
+            [0.28, 0.61],
+        ];
+        for (slot, button) in BINDING_BUTTONS.into_iter().enumerate() {
+            let cell = if deck {
+                let [x, y] = positions[slot];
+                egui::Rect::from_center_size(
+                    rect.min + egui::vec2(width * x, height * y),
+                    egui::vec2(if slot == 5 { 98.0 } else { 72.0 }, 22.0),
+                )
+            } else {
+                let column = slot % 5;
+                let row = slot / 5;
+                egui::Rect::from_min_size(
+                    rect.min + egui::vec2(column as f32 * width / 5.0, row as f32 * 23.0),
+                    egui::vec2(width / 5.0 - 4.0, 21.0),
+                )
+            };
+            let pressed = self.session.button_pressed(button);
+            let stroke = egui::Stroke::new(
+                if pressed { 2.5 } else { 1.0 },
+                if pressed {
+                    ACCENT
+                } else {
+                    egui::Color32::from_gray(90)
+                },
+            );
+            ui.painter().rect(
+                cell,
+                4.0,
+                if pressed {
+                    egui::Color32::from_rgb(45, 61, 91)
+                } else {
+                    BACKGROUND
+                },
+                stroke,
+                egui::StrokeKind::Inside,
+            );
+            ui.painter().text(
+                cell.center(),
+                egui::Align2::CENTER_CENTER,
+                &self.binding_labels[slot].legend,
+                egui::FontId::proportional(11.0),
+                egui::Color32::WHITE,
+            );
+            ui.interact(
+                cell,
+                ui.id().with(("binding-legend", slot)),
+                egui::Sense::hover(),
+            )
+            .on_hover_text(self.binding_labels[slot].full);
+        }
+        ui.label(egui::RichText::new("Keyboard controls; change bindings in Settings.").small());
     }
 
     /// Reuses the application actions; opening this menu gates keys without
@@ -389,7 +484,11 @@ impl GbaApp {
                 });
         }
         if self.settings.writes_blocked() && self.action(ui, true, "Reset saved settings") {
+            let old_bindings = self.settings.preferences.bindings;
             self.settings.reset_saved_settings();
+            if old_bindings != self.settings.preferences.bindings {
+                self.bindings_changed(ui.ctx());
+            }
             self.audio.volume = self.settings.preferences.volume;
             self.audio.muted = self.settings.preferences.muted;
         }
@@ -427,13 +526,14 @@ impl GbaApp {
         }
     }
 
-    /// Settings are a temporary suspension, never a second pause toggle. Current
-    /// bindings are read-only until the remapping pass adds capture semantics.
+    /// Settings suspend execution while capture owns logical-key events.
     fn draw_settings(&mut self, ctx: &egui::Context) {
         if !self.settings_open {
             return;
         }
-        if ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
+        if self.capture.is_none()
+            && ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Escape))
+        {
             self.settings_open = false;
             ctx.memory_mut(|memory| {
                 if let Some(id) = memory.focused() {
@@ -455,19 +555,47 @@ impl GbaApp {
             .show(ctx, |ui| {
                 egui::ScrollArea::vertical().show(ui, |ui| {
                     ui.heading("Controls");
+                    ui.label(
+                        "Keyboard keys are logical keys; positions may differ across layouts.",
+                    );
                     egui::Grid::new("settings-bindings")
-                        .num_columns(2)
-                        .spacing([36.0, 5.0])
+                        .num_columns(3)
+                        .spacing([24.0, 5.0])
                         .show(ui, |ui| {
-                            for (button, key) in BINDING_BUTTONS
-                                .into_iter()
-                                .zip(self.settings.preferences.bindings)
-                            {
+                            for (slot, button) in BINDING_BUTTONS.into_iter().enumerate() {
                                 ui.label(button_name(button));
-                                ui.label(key.name());
+                                ui.label(self.binding_labels[slot].full);
+                                if self.action(ui, self.capture.is_none(), "Change") {
+                                    self.begin_binding_capture(ctx, slot);
+                                }
                                 ui.end_row();
                             }
                         });
+                    if let Some(capture) = &self.capture {
+                        ui.label(format!(
+                            "Binding {} — press a supported key. Escape cancels.",
+                            button_name(BINDING_BUTTONS[capture.slot])
+                        ));
+                        if self.action(ui, true, "Cancel binding") {
+                            self.capture = None;
+                            self.capture_notice = Some("Binding cancelled.".into());
+                        }
+                    }
+                    if let Some(notice) = &self.capture_notice {
+                        ui.label(notice);
+                    }
+                    if self.action(ui, self.capture.is_none(), "Reset bindings") {
+                        if self.settings.preferences.bindings != crate::settings::DEFAULT_BINDINGS {
+                            self.settings.preferences.bindings = crate::settings::DEFAULT_BINDINGS;
+                            self.bindings_changed(ctx);
+                        }
+                        self.capture_notice = Some("Keyboard bindings reset to defaults.".into());
+                    }
+                    ui.checkbox(
+                        &mut self.settings.preferences.legend_visible,
+                        "Show controller legend",
+                    );
+                    ui.label("Keyboard controls; change bindings in Settings.");
                     ui.add_space(12.0);
                     ui.separator();
                     ui.heading("Audio");
@@ -483,6 +611,7 @@ impl GbaApp {
                 });
             });
         if !open || close_clicked {
+            self.capture = None;
             self.settings_open = false;
             ctx.memory_mut(|memory| {
                 if let Some(id) = memory.focused() {
@@ -493,5 +622,29 @@ impl GbaApp {
             self.sync_execution(true, true);
             ctx.request_repaint();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Read-only binding labels leave users unable to change controls at all.
+    // This checks the missing user action rather than widget construction order.
+    #[test]
+    fn controls_settings_exposes_remapping_actions() {
+        let mut app = GbaApp::create(false);
+        app.settings_open = true;
+        let ctx = egui::Context::default();
+        let mut found = false;
+        for _ in 0..3 {
+            let mut output =
+                ctx.run_ui(egui::RawInput::default(), |ui| app.draw_settings(ui.ctx()));
+            output.textures_delta.clear();
+            found |= output.shapes.iter().any(|shape| {
+                matches!(&shape.shape, egui::Shape::Text(text) if text.galley.text() == "Change")
+            });
+        }
+        assert!(found, "Controls settings has no remapping action");
     }
 }

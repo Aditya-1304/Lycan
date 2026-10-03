@@ -161,19 +161,9 @@ const DEMO_INPUT: &[(Cycle, Button, bool)] = &include!(concat!(
     "/../../roms/buttons/input.rs"
 ));
 
-/// Explicit slot order connects persisted host keys to the existing logical buttons.
-const BINDING_BUTTONS: [Button; 10] = [
-    Button::A,
-    Button::B,
-    Button::L,
-    Button::R,
-    Button::Start,
-    Button::Select,
-    Button::Up,
-    Button::Down,
-    Button::Left,
-    Button::Right,
-];
+use crate::input::{
+    BINDING_BUTTONS, BindingLabel, Capture, CaptureResult, binding_labels, button_name,
+};
 
 /// Shared native/browser application displaying pixels produced by guest execution.
 pub struct GbaApp {
@@ -182,6 +172,11 @@ pub struct GbaApp {
     settings: crate::settings::Settings,
     /// A settings window temporarily owns input without changing explicit pause.
     settings_open: bool,
+    /// Transient capture state never reaches persisted preferences.
+    capture: Option<Capture>,
+    capture_notice: Option<String>,
+    /// Formatting is cached at load/edit boundaries, not during gameplay drawing.
+    binding_labels: [BindingLabel; 10],
     /// Menus gate logical input; settings additionally suspend execution.
     ui_keys_owned: bool,
     /// Still-held keys remain ineligible after a UI interaction until released.
@@ -255,8 +250,11 @@ impl GbaApp {
         let (bios_sender, bios_receiver) = std::sync::mpsc::channel();
         let mut app = Self {
             debug_ui,
+            binding_labels: binding_labels(&settings.preferences.bindings),
             settings,
             settings_open: false,
+            capture: None,
+            capture_notice: None,
             ui_keys_owned: false,
             suppressed_keys: [false; 10],
             notice: None,
@@ -426,6 +424,81 @@ impl GbaApp {
             }
         });
         self.session.release_all_buttons();
+    }
+
+    /// Capture starts from a UI-owned frame and immediately invalidates logical
+    /// input submitted by earlier logic. Activation events are not processed here.
+    fn begin_binding_capture(&mut self, ctx: &egui::Context, slot: usize) {
+        self.own_ui_keys(ctx);
+        let released = ctx.input(|input| input.keys_down.is_empty() && !input.pointer.any_down());
+        self.capture = Some(Capture::new(slot, released));
+        self.capture_notice = None;
+    }
+
+    /// Rebuild presentation and suppression together after an atomic edit. Slots
+    /// can exchange host keys, so suppression must be resampled for the new map.
+    fn bindings_changed(&mut self, ctx: &egui::Context) {
+        self.binding_labels = binding_labels(&self.settings.preferences.bindings);
+        self.suppressed_keys = [false; 10];
+        self.own_ui_keys(ctx);
+    }
+
+    /// Capture owns input while settings suspend execution. A completed/cancelled
+    /// event stays ineligible for gameplay until released, including on UI close.
+    fn poll_binding_capture(&mut self, ctx: &egui::Context) {
+        let Some(capture) = &mut self.capture else {
+            return;
+        };
+        let slot = capture.slot;
+        let result = ctx.input(|input| {
+            capture.update(
+                &input.events,
+                input.keys_down.is_empty() && !input.pointer.any_down(),
+            )
+        });
+        match result {
+            CaptureResult::Waiting => {}
+            CaptureResult::Unsupported => {
+                self.capture_notice = Some("Use a supported single key without modifiers; function keys and punctuation are reserved or unsupported.".into());
+            }
+            CaptureResult::Cancelled => {
+                self.capture = None;
+                self.capture_notice = Some("Binding cancelled.".into());
+            }
+            CaptureResult::Key(key) => {
+                let changed = self.settings.preferences.bindings[slot] != key;
+                if let Ok(other) =
+                    crate::input::remap(&mut self.settings.preferences.bindings, slot, key)
+                {
+                    self.capture_notice = Some(if let Some(other) = other {
+                        format!(
+                            "Swapped {} and {} bindings.",
+                            button_name(BINDING_BUTTONS[slot]),
+                            button_name(BINDING_BUTTONS[other])
+                        )
+                    } else {
+                        format!(
+                            "{} bound to {}.",
+                            button_name(BINDING_BUTTONS[slot]),
+                            key.name()
+                        )
+                    });
+                    if changed {
+                        self.bindings_changed(ctx);
+                    }
+                }
+                self.capture = None;
+            }
+        }
+        self.own_ui_keys(ctx);
+        // egui already recorded held/released state. Remove capture-owned events
+        // before drawing so Enter/Space cannot activate retained widget focus and
+        // Escape cancels capture without also dismissing Settings.
+        ctx.input_mut(|input| {
+            input
+                .events
+                .retain(|event| !matches!(event, egui::Event::Key { .. }))
+        });
     }
 
     fn import_cartridge_save(&mut self, ctx: &egui::Context) {
@@ -1542,7 +1615,9 @@ impl GbaApp {
 impl eframe::App for GbaApp {
     /// Executes bounded guest work while running and schedules the next host wake.
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        if ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::F1)) {
+        if self.capture.is_none()
+            && ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::F1))
+        {
             self.debug_ui = !self.debug_ui;
             ctx.request_repaint();
         }
@@ -1692,6 +1767,10 @@ impl eframe::App for GbaApp {
             .is_some_and(|document| !document.hidden());
         #[cfg(not(target_arch = "wasm32"))]
         let visible = !ctx.input(|input| input.viewport().minimized.unwrap_or(false));
+        if !(focused && visible) {
+            self.capture = None;
+        }
+        self.poll_binding_capture(ctx);
         let running = self.sync_execution(focused, visible);
         if self.replay_deadline.is_some() && !(focused && visible) {
             self.replay_deadline = None;
@@ -1700,6 +1779,7 @@ impl eframe::App for GbaApp {
         }
         if running
             && self.replay_deadline.is_none()
+            && self.capture.is_none()
             && !self.ui_keys_owned
             && !ctx.egui_wants_keyboard_input()
         {
@@ -1852,21 +1932,6 @@ fn fitted_screen_size(available: egui::Vec2) -> egui::Vec2 {
     egui::vec2(WIDTH as f32 * scale, HEIGHT as f32 * scale)
 }
 
-fn button_name(button: Button) -> &'static str {
-    match button {
-        Button::A => "A",
-        Button::B => "B",
-        Button::Select => "Select",
-        Button::Start => "Start",
-        Button::Right => "Right",
-        Button::Left => "Left",
-        Button::Up => "Up",
-        Button::Down => "Down",
-        Button::R => "R",
-        Button::L => "L",
-    }
-}
-
 /// Fixed-size samples avoid a growing measurement queue during continued emulation.
 struct Measurements {
     values: [f64; 120],
@@ -1959,6 +2024,71 @@ mod tests {
         assert!(!app.sync_execution(true, true));
         assert!(app.user_paused);
         assert!(app.session.paused());
+    }
+
+    // A captured Enter must not activate a focused application action in the
+    // same frame, and a captured gameplay key must require release before play.
+    // Pure mapping tests cannot catch this app/egui ownership boundary.
+    #[test]
+    fn captured_keys_cannot_activate_ui_or_press_gameplay_on_return() {
+        fn frame(
+            ctx: &egui::Context,
+            key: egui::Key,
+            pressed: bool,
+            draw: impl FnMut(&mut egui::Ui),
+        ) {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    events: vec![egui::Event::Key {
+                        key,
+                        physical_key: None,
+                        pressed,
+                        repeat: false,
+                        modifiers: egui::Modifiers::NONE,
+                    }],
+                    focused: true,
+                    ..Default::default()
+                },
+                draw,
+            );
+            output.textures_delta.clear();
+        }
+        let ctx = egui::Context::default();
+        let mut app = GbaApp::create(false);
+        app.load_rom_bytes("buttons.gba", BUTTONS_ROM);
+        app.settings_open = true;
+        app.session.set_button(Button::A, true);
+        frame(&ctx, egui::Key::Enter, true, |ui| {
+            app.begin_binding_capture(ui.ctx(), 0);
+            assert!(!app.session.button_pressed(Button::A));
+        });
+        frame(&ctx, egui::Key::Enter, false, |ui| {
+            app.poll_binding_capture(ui.ctx());
+            let response = ui.button("Close settings");
+            response.request_focus();
+        });
+        frame(&ctx, egui::Key::Enter, true, |ui| {
+            app.poll_binding_capture(ui.ctx());
+            assert!(
+                !ui.button("Close settings").clicked(),
+                "Captured Enter activated UI"
+            );
+        });
+        assert_eq!(app.settings.preferences.bindings[0], egui::Key::Enter);
+        assert_eq!(app.settings.preferences.bindings[4], egui::Key::Z);
+        assert_eq!(app.binding_labels[0].full, "Enter");
+        app.settings_open = false;
+        app.sync_execution(true, true);
+        app.poll_keyboard(&ctx);
+        assert!(!app.session.button_pressed(Button::A));
+        frame(&ctx, egui::Key::Enter, false, |ui| {
+            app.poll_keyboard(ui.ctx())
+        });
+        frame(&ctx, egui::Key::Enter, true, |ui| {
+            app.poll_keyboard(ui.ctx())
+        });
+        assert!(app.session.button_pressed(Button::A));
+        assert!(!app.session.button_pressed(Button::Start));
     }
 
     // Picker cancellation tests cannot catch firmware being discarded while a

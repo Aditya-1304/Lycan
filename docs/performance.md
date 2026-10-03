@@ -3909,3 +3909,97 @@ with a fresh press, long filenames/small windows, pending replacement cancellati
 and Game-menu cartridge-save import/export/retry. Retain the same ROM/checkpoint,
 viewport/scale and audio conditions for post-change baseline comparison. F1 still
 opens the existing diagnostics. No native/browser UI was controlled automatically.
+
+
+## UI remappable controls and controller legend — implementation evidence
+
+Pass 3 of `../UI.md` was implemented on 2026-10-03 under the user's explicit
+implementation request. Existing native/browser baseline measurements remain
+unchanged. This entry does not complete Passes 4–6 or Slice 32.
+
+### Behavior and ownership
+
+Controls settings now expose all ten existing logical buttons, Change, Reset
+bindings, and one controller-legend preference. The existing supported-key
+allowlist is shared with capture and preference validation. Conflicting keys
+swap atomically; the same key completes without changing the mapping. Unsupported
+keys/modifier combinations explain rejection and keep capture active; Escape
+cancels capture before dismissing Settings. F1 cannot toggle diagnostics during
+capture. Focus/visibility loss and settings closure cancel transient capture.
+
+Capture waits for activation release, ignores repeats, releases submitted logical
+input immediately, and consumes capture-owned key events before widget drawing.
+Held remapping keys remain suppressed after settings closes until release and a
+fresh press. Existing settings suspension and explicit-pause semantics are reused.
+Bindings and legend visibility use the existing versioned preference record and
+eframe save lifecycle. Reset bindings affects no audio/display preference.
+
+A bounded painted controller deck becomes a compact two-row strip on smaller
+views and automatically hides when space is insufficient. Automatic hiding does
+not change the user's preference; hidden legends reserve no space. All ten labels
+come from a shared cache rebuilt only on load or a changed mapping. Tooltips and
+settings expose full logical-key names. Highlights read existing submitted
+session button state and use both fill and stronger outlines. The legend is a
+keyboard reference, with no pointer/gameplay actions or animation.
+
+### Automated evidence
+
+| Check | Result |
+|---|---|
+| Behavioral RED before implementation | Controls had no Change action; after capture was wired, captured Enter also activated a focused application button |
+| `cargo test --locked -p gba-core -p gba-session -p gba-app` | PASS: 74 tests, zero failures; doc tests pass |
+| Focused controls checks | PASS: occupied-key swap, same-key completion, unused-key assignment, reserved-key rejection, activation release, repeat/modifier filtering, Escape, capture/UI isolation, submitted-input release and fresh-press requirement |
+| `cargo clippy --locked --workspace --all-targets -- -D warnings` | PASS |
+| `cargo check --locked -p gba-app` | PASS |
+| `cargo check --locked -p gba-app --target wasm32-unknown-unknown` | PASS |
+| `cargo run --locked --release -p gba-tools -- verify-raster` | PASS: six frozen guest state/timing/scanout checkpoints |
+| `cargo build --locked --release -p gba-app` | PASS |
+| `env -u NO_COLOR trunk --config web/Trunk.toml build --release` | PASS: production browser assets rebuilt |
+| Formatting and diff whitespace checks | PASS |
+| Core/session source and all dependency/feature configuration | Unchanged |
+
+Logs are retained in `target/ui-controls-evidence/`. The mapping/capture unit tests
+were written before their APIs existed (compile-time RED); the two behavioral RED
+logs above record actual missing behavior and event leakage. Existing preference
+load/save/validation tests and explicit-pause/settings regressions remain green.
+
+### Performance boundary and remaining acceptance
+
+Guest execution, framebuffer conversion/upload generation checks, reusable texture
+and image ownership, host pacing, PCM draining, audio bridges/callbacks/Worklet,
+and cartridge persistence algorithms are unchanged. Outside capture, its polling
+returns immediately without collecting events or allocating. Gameplay resolves
+the existing ten-slot map. Legend drawing reads ten button states and paints a
+fixed number of simple shapes/labels; it performs no machine advancement, storage
+work, settings serialization, or binding-label formatting. No new execution
+thread, Worker, lock, per-frame log, repaint timer or dependency was introduced.
+
+- [x] Remapping, atomic swaps, supported-key capture and binding reset implemented.
+- [x] Responsive dynamic legend, submitted-state highlights and cached labels implemented.
+- [x] Required regression/build gates and frozen guest check passed.
+- [x] Core/session and audio/save algorithms unchanged; existing baseline values preserved.
+- [ ] User-confirmed Linux, Chrome and Brave controls/layout acceptance.
+- [ ] Restart persistence and immediate browser refresh after edits checked interactively.
+- [ ] Post-change host UI/total-work timing, sustained speed/audio/memory and visible/hidden legend comparison measured against the existing baseline.
+
+Core isolation and deterministic checks establish regression evidence, not measured
+end-to-end performance parity. No native/browser UI was controlled automatically.
+Post-change host performance is not measured in this pass.
+
+Run from `gba-rs`:
+
+```sh
+./target/release/gba-app
+env -u NO_COLOR trunk --config web/Trunk.toml serve --release
+```
+
+On Linux, Chrome and Brave, check all ten defaults, unused-key remap, conflict
+swap, same-key completion, reserved/unsupported keys and modifier combinations,
+keyboard/mouse capture activation, held/repeated keys, Escape ordering, focus loss,
+reset, and fresh input after settings closes. Check remapped labels/highlights,
+explicit pause through settings, large/short/narrow views, user-hidden and
+automatically hidden legend restoration. Verify normal restart persistence;
+check immediate browser refresh separately rather than assuming durability.
+Use the recorded ROM/checkpoint, viewport/scale and audio conditions for the
+post-change comparison, including visible/hidden legend. F1 still exposes the
+existing diagnostics outside capture.

@@ -2,6 +2,7 @@
 
 mod app;
 mod audio;
+mod input;
 mod saves;
 mod settings;
 
