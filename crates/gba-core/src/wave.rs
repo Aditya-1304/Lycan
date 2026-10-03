@@ -95,8 +95,17 @@ impl Wave {
     pub fn advance(&mut self, elapsed: u64) {
         if self.active {
             let total = self.phase + elapsed;
-            let steps = total / self.period();
-            self.phase = total % self.period();
+            let period = self.period();
+            // Ordinary device advancement reaches one nibble edge at most.
+            // Preserve multi-edge advancement for standalone device callers.
+            let (steps, phase) = if total < period {
+                (0, total)
+            } else if total - period < period {
+                (1, total - period)
+            } else {
+                (total / period, total % period)
+            };
+            self.phase = phase;
             let position = self.position + steps as usize;
             if self.select & 0x20 != 0 && (position / 32) & 1 != 0 {
                 self.bank ^= 1;
