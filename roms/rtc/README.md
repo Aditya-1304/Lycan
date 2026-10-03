@@ -51,8 +51,19 @@ checkpoint runs five frames, at most 200,000 instructions per frame and
 mailbox `0x30`, exact date/control bytes and all 38,400 scanout pixels. It checks
 leap-day rollover, paused elapsed time, reset, reopen, 12-hour settings,
 stale storage acknowledgement, malformed metadata and recorded time replay.
-The one session regression failed before RTC support because reads returned ROM
-bytes instead of the configured date.
+The original session regression failed before RTC support because reads returned
+ROM bytes instead of the configured date. An independent core regression now
+uses the SIIRTC_V001 command IDs and MSB-first command order through GPIO,
+checking status/date/time reads and writes. It caught the original status/date
+swap: status read `0x63` returned the year `0x23` instead of control `0x40`.
+
+The corrected command mapping is status `0x62/0x63`, date/time `0x64/0x65`,
+and time-only `0x66/0x67` (write/read). See
+[Emerald's SIIRTC_V001 library](https://github.com/pret/pokeemerald/blob/master/src/siirtc.c).
+The corrected ROM identity is
+`74dae03408b08d1a733a7fcd3f1c3f25e3036df758f5f65f31870a6e3b9aaf8e`.
+Prior manual acceptance for the old diagnostic identity does not verify this
+corrected protocol; replay the manual checks with the rebuilt fixture.
 
 Separate-process persistence uses the app's native storage implementation. Use a
 fresh directory for the first command; reuse it for the second:

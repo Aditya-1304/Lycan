@@ -1,5 +1,5 @@
 name = "cartridge-clock"
-sha256 = "30b322b02ccf03fc59b43b1ea28d70da845695636c4585b878f9b77211e67367"
+sha256 = "74dae03408b08d1a733a7fcd3f1c3f25e3036df758f5f65f31870a6e3b9aaf8e"
 source = "clock.s"
 linker = "../pixels/linker.ld"
 origin = "Original MIT ARM guest"

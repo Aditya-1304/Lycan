@@ -3546,10 +3546,13 @@ remains outside this update.
 ## Slice 30 — cartridge clock
 
 Implementation and automated acceptance were checked against
-`plan_final.md` §30 on 2026-10-03. Slice 30 acceptance is complete: automated
-checks passed, and the user explicitly confirmed all manual Chrome and Brave
-checks. The browser measurements below are user-supplied diagnostics, preserved
-exactly; no earlier millisecond measurements were changed.
+`plan_final.md` §30 on 2026-10-03. Emerald subsequently exposed a swapped
+status/date-time command map shared by the core and the original diagnostic.
+The corrected protocol passes automated and actual Emerald startup checks.
+Fresh Chrome/Brave replay is pending for the corrected diagnostic identity.
+Earlier user-confirmed manual checks and browser measurements are retained below
+as historical evidence for ROM SHA-256
+`30b322b02ccf03fc59b43b1ea28d70da845695636c4585b878f9b77211e67367`.
 
 | Plan requirement | Implementation and evidence |
 |---|---|
@@ -3569,37 +3572,39 @@ same diagnostic contract as the CLI verifier.
 
 | Evidence | Result |
 |---|---|
-| ROM SHA-256 | `30b322b02ccf03fc59b43b1ea28d70da845695636c4585b878f9b77211e67367` |
+| Corrected ROM SHA-256 | `74dae03408b08d1a733a7fcd3f1c3f25e3036df758f5f65f31870a6e3b9aaf8e` |
 | Final framebuffer SHA-256 (little-endian pixels) | `8ac685f71b78cfd6fab020ea77620f51e5ed59ff283045b1b01d999a96ee9ccb` |
 | Fixture definition | `roms/rtc/manifest.toml`; reproducible build: `python3 roms/rtc/build.py` |
 | Guest completion | Mailbox `0x02000010 = 0x30`; active polling/drawing PC window `0x0800012c..=0x08000340`; a self-branch is not used as success |
 | Bounds | Five frames per checkpoint; 200,000 instructions per frame; at most 1,404,512 cycles per checkpoint; exact full-frame oracle |
-| Final post-reset checkpoint | 1,404,487 guest cycles; 190,161 instructions; PC `0x08000304`; generation 5; configured leap-day date and 12-hour control; detailed checkpoint instruction counts/PCs in `target/rtc-evidence.txt` |
-| Capture | `target/rtc.ppm`; headless rendered preview inspected; visual platform acceptance remains separate |
+| Final post-reset checkpoint | 1,404,487 guest cycles; 190,161 instructions; PC `0x08000304`; generation 5; configured leap-day date and 12-hour control; detailed checkpoint instruction counts/PCs in `target/rtc-corrected-evidence.txt` |
+| Capture | `target/rtc-corrected.ppm`; unchanged final image hash and full-frame pixel oracle pass; corrected browser replay remains pending |
 | Native storage reopen | PASS: separate `--save-probe rtc-write` / `rtc-read` processes; fixed 65-second offline interval; identity/truncation and failed-target rejection; raw export preserved |
-| Native storage evidence | `/tmp/gba-rtc-acceptance-20261003/30b322b02ccf03fc59b43b1ea28d70da845695636c4585b878f9b77211e67367.gbasav` and `.sav` |
-| Core/session tests | PASS: 44 core tests (43 unit + 1 integration), 16 session tests; 60 total |
+| Native storage evidence | `target/rtc-corrected-storage.txt`; isolated corrected-ROM write/read processes, raw export and metadata retention |
+| Core/session tests | PASS: 45 core tests (44 unit + 1 integration), 16 session tests; 61 total. Locked workspace suite: 63 tests including 2 app tests |
 | Clippy | PASS: locked workspace/all-targets with `-D warnings` |
 | Native and WASM app checks | PASS: locked `cargo check -p gba-app`, native and `wasm32-unknown-unknown` |
 | Existing fixture regression runner | PASS: `cargo run --locked -p gba-tools --release -- fixtures run` |
 | Trunk release build | PASS; `env -u NO_COLOR trunk --config web/Trunk.toml build --release` |
 | Environment | Linux 7.2.7-arch1-1 x86_64; rustc 1.98.1; Trunk 0.21.14 |
 | Linux visual/native timings | Not verified / not measured; native headless storage acceptance passed |
-| Chrome / Brave visual, settings, leap-day rollover, pause/hidden-tab resume, reset, reopen and raw export/import | PASS — user explicitly confirmed all manual checks for `rtc.gba` on both browsers |
+| Chrome / Brave checks for original diagnostic | Historical PASS — user confirmed the old ROM's manual checks; these do not prove the corrected command map |
+| Chrome / Brave checks for corrected diagnostic | Pending fresh replay of the same manual lifecycle and export/import checks |
 | Browser millisecond timings | Recorded below from user-supplied 120-sample Chrome and Brave diagnostics |
 | Sustained cycles per wall-clock second / complete frame time | Not measured; no wall-time interval or complete frame/GPU timing was supplied |
 
 Clock initialization uses UTC; guest writes choose the configured calendar base.
 RTC IRQ signaling is outside this read/settings diagnostic. This evidence does
-not claim Pokémon Emerald acceptance. The user confirmed completion of the
-browser commands and six manual checks in `roms/rtc/README.md`, including clock settings and elapsed time across
-pause, reset and reopening. Automated and user-confirmed browser acceptance
-satisfy Slice 30; no required acceptance items remain pending.
+not claim Pokémon Emerald acceptance. The user previously confirmed the manual checks for the original diagnostic.
+Its guest and emulator agreed on an incorrect command map, so those checks could
+not detect the hardware incompatibility. Repeat the six checks in
+`roms/rtc/README.md` using the corrected ROM before closing manual acceptance.
 
-### User-confirmed Chrome and Brave measurements
+### Historical user-confirmed Chrome and Brave measurements
 
 The user reported “i have checked everything manually” and supplied these
-snapshots for `rtc.gba`. Manual acceptance is attributed to that confirmation;
+snapshots for the original `rtc.gba` identity listed above. Manual acceptance
+is attributed to that confirmation;
 the diagnostics themselves record execution, persistence status and stage timings.
 Both browsers reported Running, BIOS not loaded, `Backup: Saved revision 1`,
 `Some(Sram)` with `Identified(Sram)`, and no backup override. Audio was off;
@@ -3625,3 +3630,108 @@ Browser versions, browser-host CPU/GPU, display refresh rate, governor/thermals,
 and measurement wall-time interval were not recorded. The supplied timings
 measure the named app stages; texture submission is not a GPU completion timing.
 The reported `0.000 ms` p95 values are preserved as supplied.
+
+
+### Corrected S-3511 command map and Emerald startup evidence
+
+The core and diagnostic originally exchanged status and date/time commands.
+The corrected map is `0x62/0x63` for status/control, `0x64/0x65` for seven-byte
+date/time, and `0x66/0x67` for three-byte time (write/read). The authoritative
+protocol check is [Emerald's SIIRTC_V001 library](https://github.com/pret/pokeemerald/blob/master/src/siirtc.c).
+Named register selectors now drive payload length, read latching and write commit.
+The guest uses named hardware command constants. Storage encoding is unchanged.
+
+One additional regression exercises GPIO transactions with independently defined
+hardware commands, including MSB-first command order, repeated low-clock writes,
+LSB-first payloads, date/time-only writes, and reset/status restoration.
+RED: `0x63` returned `[0x23]` instead of `[0x40]`. GREEN: the same serial regression
+passes, alongside the corrected guest's lifecycle and full-frame contract.
+The original and corrected diagnostic ROMs have identical instruction layout,
+checkpoint cycles and displayed pixels; their protocol bytes and ROM hashes differ.
+
+The supplied Emerald ROM was booted through the supplied BIOS with fixed Unix
+seconds `1700000000`. A temporary headless observer inspected its actual
+`RtcInit` return at `0x0802f26e`; disassembly identified error status at
+`0x03000db8`, probe byte at `0x03000dcc`, and raw RTC info at `0x03000dc0`.
+These addresses occur only in verification evidence, not emulator behavior.
+The runs used fresh in-memory backup data and performed no persistent save writes.
+
+| Actual guest startup | Result |
+|---|---|
+| Emerald ROM SHA-256 | `a9dec84dfe7f62ab2220bafaef7479da0929d066ece16a6885f6226db19085af` |
+| Supplied BIOS SHA-256 | `fd2547724b505f487e6dcb29ec2ecff3af35a841a77ab2e85fd87350abd36570` |
+| Old core mapping | RTC error `0x0090` (12-hour mode + invalid month); 79,980,274 cycles; 7,975,160 instructions |
+| Corrected core, fresh RTC | RTC error `0x0000`, probe `0x01`; date `2023-11-14`, weekday 2, time `22:13:20`, control `0x40`; 79,974,689 cycles; 7,973,391 instructions |
+| Corrected core, restored zero control | RTC error `0x0000`, probe `0x11`; Emerald's ordinary reset/status-write path restores 24-hour mode; 79,980,272 cycles; 7,975,156 instructions |
+| Startup evidence | `target/emerald-rtc-baseline.txt`, `target/emerald-rtc-fixed.txt`, `target/emerald-rtc-probe.rs`; temporary baseline core used the committed pre-fix RTC implementation |
+| Scope of headless proof | Actual guest initialization validates RTC data. Subsequent native/Chrome/Brave working status is user-confirmed in Slice 31 below; headless startup alone does not prove full gameplay |
+
+Existing clock records retain the same schema; no save deletion or metadata
+migration is required for the command-map fix. The zero-control probe verifies
+that particular recoverable state, not every possible preexisting save scenario.
+
+
+## Slice 31 — Pokémon Emerald: fully working, user-confirmed
+
+On 2026-10-03, after the RTC command-map correction, the user reported the game
+working and explicitly requested that Pokémon Emerald be marked fully working
+on native, Chrome and Brave. This entry records that declaration as manual
+compatibility acceptance for the supplied ROM, separately from automated RTC
+startup verification. No additional code changes were needed for this closeout.
+
+| Platform | Compatibility status | Attribution |
+|---|---|---|
+| Native Linux | Fully working | User confirmation |
+| Chrome | Fully working | User confirmation |
+| Brave | Fully working | User confirmation |
+
+The ROM was reidentified from `local-roms/emerald.gba`: title `POKEMON EMER`,
+game code `BPEE`, revision 0, 16777216 bytes, SHA-256
+`a9dec84dfe7f62ab2220bafaef7479da0929d066ece16a6885f6226db19085af`.
+The supplied BIOS is 16384 bytes, SHA-256
+`fd2547724b505f487e6dcb29ec2ecff3af35a841a77ab2e85fd87350abd36570`.
+Backup detection is `Identified(Flash128)` / `Some(Flash128)`, with no override.
+The snapshot reports Running, Saved revision 1, and `Pacing: real-time`.
+
+### Supplied live diagnostics
+
+The user supplied one snapshot without identifying its platform. These values
+are retained once; they are not assigned to all three platform runs.
+
+| Diagnostic | User-supplied value |
+|---|---:|
+| Core execution mean / p95 | 7.777 / 11.695 ms |
+| Pixel conversion mean / p95 | 0.040 / 0.065 ms |
+| Texture submission mean / p95 | 0.001 / 0.001 ms |
+| Samples per timing stage | 120 |
+| Executed instructions | 1280684976 |
+| GBA cycles | 3967065385 |
+| Output device rate | 48000 Hz |
+| Audio queue / maximum / cap | 67.7 / 80.0 / 80 ms |
+| Audio underrun events / frames | 0 / 0 |
+| Audio overflow events / frames | 78 / 2458 |
+| Audio callbacks / maximum callback size | 21364 / 512 frames |
+| Output audio frames | 10936832 |
+| Device errors | 0 |
+| Core PCM rate | 32768 Hz |
+| Produced PCM samples | 7748174 |
+| PCM staging drops | 0 |
+| Empty FIFO | 14 |
+
+The live counters include overflow and empty-FIFO observations exactly as
+supplied. The user nevertheless reported the game working; this entry does not
+replace those counters with zero or infer audible defects from the snapshot.
+
+The preceding Slice 30 evidence independently proves that the actual Emerald
+startup changes from RTC error `0x0090` to `0x0000` after the protocol correction.
+The current three-platform working status comes from the user's subsequent
+confirmation. Exact early town/route and battle checkpoint names, save/reopen
+sequence, and the particular in-game time-dependent event were not recorded.
+The corrected standalone `rtc.gba` manual replay remains a separate evidence
+item; this Emerald declaration does not supply new diagnostic-ROM timings.
+
+Browser versions, host CPU/GPU, display refresh rate, output device name,
+governor/thermals, wall-time interval and platform-specific timing snapshots
+were not recorded. `Pacing: real-time` is the reported app status; sustained
+cycles per wall-clock second and complete frame/GPU timing were not measured.
+Slice 31's three-platform compatibility status is complete by user confirmation.

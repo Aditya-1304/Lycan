@@ -3,6 +3,13 @@
 .syntax unified
 .cpu arm7tdmi
 .arm
+
+@ S-3511 command IDs from the SIIRTC_V001 wire protocol. Keep status and
+@ seven-byte date/time transactions distinct; response data is LSB-first.
+.equ STATUS_WRITE, 0x62
+.equ STATUS_READ,  0x63
+.equ DATE_WRITE,   0x64
+.equ DATE_READ,    0x65
 .section .text.entry, "ax", %progbits
 .global _start
 _start:
@@ -29,14 +36,14 @@ poll:
     ldrh r1, [r0]
     tst r1, #2
     bne read_clock
-    mov r0, #0x64
+    mov r0, #STATUS_WRITE
     bl command
     mov r0, #0
     bl send
     mov r0, #0
     strh r0, [r8]
 read_clock:
-    mov r0, #0x63
+    mov r0, #DATE_READ
     bl command
     mov r0, #5
     strh r0, [r8, #2]
@@ -49,7 +56,7 @@ read_date:
     bne read_date
     mov r0, #0
     strh r0, [r8]
-    mov r0, #0x65
+    mov r0, #STATUS_READ
     bl command
     mov r0, #5
     strh r0, [r8, #2]
@@ -64,13 +71,13 @@ read_date:
     b poll
 configure:
     push {r4-r7, lr}
-    mov r0, #0x64
+    mov r0, #STATUS_WRITE
     bl command
     mov r0, #0x40
     bl send
     mov r0, #0
     strh r0, [r8]
-    mov r0, #0x62
+    mov r0, #DATE_WRITE
     bl command
     ldr r4, =date
     mov r5, #7

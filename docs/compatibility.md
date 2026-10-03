@@ -1,5 +1,10 @@
 # Supplied BIOS startup and bounded game probes
 
+Current Emerald status (2026-10-03): **fully working on native Linux, Chrome and
+Brave, user-confirmed after the RTC command-map correction**. The compatibility
+row below and `performance.md` Slice 31 record this update. The initial Slice 20
+paragraphs describe historical verification status.
+
 Slice 20 implementation is ready for supplied-file verification. Actual retail
 BIOS execution, the upstream BIOS guest result, and all five game observations
 remain **not verified**. No private BIOS or commercial ROM path was supplied for
@@ -72,7 +77,7 @@ result must stay unresolved unless a documented `--backup` override is supplied.
 | Game | ROM region/revision/size/hash | BIOS hash | Save detection | Startup/input/audio | Reset/save | Linux/Chrome/Brave |
 | --- | --- | --- | --- | --- | --- | --- |
 | Pokémon FireRed | not recorded | not recorded | not verified | not verified | not verified | not verified |
-| Pokémon Emerald | not recorded | not recorded | not verified | not verified | not verified | not verified |
+| Pokémon Emerald | `BPEE`, revision 0, 16777216 bytes; SHA-256 `a9dec84dfe7f62ab2220bafaef7479da0929d066ece16a6885f6226db19085af`; region not separately recorded | `fd2547724b505f487e6dcb29ec2ecff3af35a841a77ab2e85fd87350abd36570` | `Identified(Flash128)`; no override | Fully working — user-confirmed; corrected RTC startup passes headlessly | Fully working — user-confirmed; snapshot reports Saved revision 1; exact reset/reopen scenario not recorded | Native Linux: fully working; Chrome: fully working; Brave: fully working — user-confirmed |
 | Zelda: The Minish Cap | not recorded | not recorded | not verified | not verified | not verified | not verified |
 | Metroid Fusion | not recorded | not recorded | not verified | not verified | not verified | not verified |
 | Super Mario Advance 2 | not recorded | not recorded | not verified | not verified | not verified | not verified |
