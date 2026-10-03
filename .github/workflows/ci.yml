@@ -38,7 +38,7 @@ jobs:
       - name: Build fixtures
         run: |
           cargo run --locked -p gba-tools -- build-fixtures
-          git diff --exit-code -- roms
+          git diff --exit-code -- fixtures/diagnostics
 
       - name: Install Node runtime
         uses: actions/setup-node@v7
@@ -47,50 +47,50 @@ jobs:
 
       - name: Advanced display contracts
         run: |
-          python3 roms/affine/build.py
-          python3 roms/affine-object/build.py
-          python3 roms/window/build.py
-          python3 roms/blend/build.py
-          python3 roms/raster/build.py
+          python3 fixtures/diagnostics/affine/build.py
+          python3 fixtures/diagnostics/affine-object/build.py
+          python3 fixtures/diagnostics/window/build.py
+          python3 fixtures/diagnostics/blend/build.py
+          python3 fixtures/diagnostics/raster/build.py
 
           git diff --exit-code -- \
-            roms/affine-mode-1.gba \
-            roms/affine-mode-2.gba \
-            roms/affine-mode-3.gba \
-            roms/affine-mode-4.gba \
-            roms/affine-mode-5.gba \
-            roms/affine-object.gba \
-            roms/affine-object-degenerate.gba \
-            roms/window.gba \
-            roms/blend.gba \
-            roms/raster.gba
+            fixtures/diagnostics/affine-mode-1.gba \
+            fixtures/diagnostics/affine-mode-2.gba \
+            fixtures/diagnostics/affine-mode-3.gba \
+            fixtures/diagnostics/affine-mode-4.gba \
+            fixtures/diagnostics/affine-mode-5.gba \
+            fixtures/diagnostics/affine-object.gba \
+            fixtures/diagnostics/affine-object-degenerate.gba \
+            fixtures/diagnostics/window.gba \
+            fixtures/diagnostics/blend.gba \
+            fixtures/diagnostics/raster.gba
 
-          python3 roms/affine/verify.py
-          python3 roms/affine-object/verify.py
-          python3 roms/window/verify.py
-          python3 roms/blend/verify.py
-          python3 roms/raster/verify.py
+          python3 fixtures/diagnostics/affine/verify.py
+          python3 fixtures/diagnostics/affine-object/verify.py
+          python3 fixtures/diagnostics/window/verify.py
+          python3 fixtures/diagnostics/blend/verify.py
+          python3 fixtures/diagnostics/raster/verify.py
 
       - name: WASM timing runtime
         run: |
-          python3 roms/cartridge/verify_wasm.py --diagnostics --vblank --keypad --dma --pcm
+          python3 fixtures/diagnostics/cartridge/verify_wasm.py --diagnostics --vblank --keypad --dma --pcm
           node --check web/audio.js
           node --check web/pcm-worklet.js
           node web/pcm-worklet.test.cjs
 
       - name: Backup contracts
         run: |
-          python3 roms/backup/verify.py
-          python3 roms/sram/verify.py
-          python3 roms/flash/verify.py
-          python3 roms/flash-banked/verify.py
-          python3 roms/eeprom/verify.py
+          python3 fixtures/diagnostics/backup/verify.py
+          python3 fixtures/diagnostics/sram/verify.py
+          python3 fixtures/diagnostics/flash/verify.py
+          python3 fixtures/diagnostics/flash-banked/verify.py
+          python3 fixtures/diagnostics/eeprom/verify.py
 
       - name: PSG audio contracts
         run: |
-          python3 roms/pulse/verify.py
-          python3 roms/wave/verify.py
-          python3 roms/noise/verify.py
+          python3 fixtures/diagnostics/pulse/verify.py
+          python3 fixtures/diagnostics/wave/verify.py
+          python3 fixtures/diagnostics/noise/verify.py
 
       - name: Formatting
         run: |

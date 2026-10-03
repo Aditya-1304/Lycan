@@ -9,3 +9,7 @@
 
 # Optional user-owned game directory used by bounded startup probes.
 /local-roms/
+
+# Keep removed documentation and legacy ROM directories local.
+/roms/
+/docs/

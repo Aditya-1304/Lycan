@@ -198,8 +198,8 @@ pub fn probe(scene: &str) -> Result<(), String> {
     use gba_session::Button;
     use std::time::{Duration, Instant};
     let rom: &[u8] = match scene {
-        "pcm" => include_bytes!("../../../roms/pcm.gba"),
-        "noise" => include_bytes!("../../../roms/noise.gba"),
+        "pcm" => include_bytes!("../../../fixtures/diagnostics/pcm.gba"),
+        "noise" => include_bytes!("../../../fixtures/diagnostics/noise.gba"),
         _ => return Err("Audio probe scene must be pcm or noise".to_owned()),
     };
     let mut session = Session::new();

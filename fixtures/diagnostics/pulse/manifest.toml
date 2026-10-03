@@ -1,0 +1,11 @@
+sha256 = "be3429a0ec75d688765fce04cae070df3369367fb2f8f685815dcd5d1b4f1eed"
+startup = "skip-bios with explicit test firmware"
+mailbox = "0x03000000 = 0x77"
+halt_pc_range = ["0x080000fc", "0x0800010c"]
+frames = 184
+max_instructions = 500000
+cycles = 51684864
+samples = 100947
+wav_sha256 = "7edf6d0743f84a87166ac13322b2337bde407009965e44dd5829579db3fa641e"
+lead_frequencies = [1536, 1642, 1707, 1792]
+second_frequencies = [1024, 1236, 1366, 1536]

@@ -1,0 +1,22 @@
+# Original interactive ARM Slice-25 raster/HBlank-DMA guest.
+# Freeze bytes/hash from the first intentional build.
+# build.py must never rewrite these expectations.
+
+bytes = 1880
+sha256 = "6955629784fedcb3a5157dc0640339bdd8e9270bf3c582b78e2865fbc5d0e68d"
+
+mailbox_id = 166
+mailbox_address = 50331648
+
+instruction_limit = 2000000
+cycle_overshoot_limit = 32
+
+capture_frames = [12, 13, 17, 18, 22, 23]
+
+hblank_request_cycle = 1008
+
+startup = "controlled ARM, no BIOS, no backup"
+
+rustboyadvance_revision = "1d7ff23a6adb42d803ebd393c3d27d94e4fea15e"
+mgba_revision = "c3c8e5e813f245028de118a56734e1dc0f35ce2a"
+nanoboyadvance_revision = "55b5cf0ae3d929582ac5bfd486558173502b8354"
