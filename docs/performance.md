@@ -3735,3 +3735,84 @@ governor/thermals, wall-time interval and platform-specific timing snapshots
 were not recorded. `Pacing: real-time` is the reported app status; sustained
 cycles per wall-clock second and complete frame/GPU timing were not measured.
 Slice 31's three-platform compatibility status is complete by user confirmation.
+
+
+## UI state and settings foundation — implementation evidence
+
+Pass 1 of `../UI.md` was implemented on 2026-10-03 under the user's explicit
+implementation request. Existing native/browser baseline records and all supplied
+millisecond values above are preserved. No new baseline capture was requested.
+This entry does not complete later UI passes or Slice 32.
+
+The application now retains one validated ROM-first startup request until a valid
+BIOS arrives, preserving its backup override. BIOS-first and controlled fixture
+startup continue through existing session operations. Typed operation progress and
+shared action predicates distinguish readiness, explicit user pause, restoration,
+file operations, save barriers and execution faults. Temporary suspension uses
+existing session activation/reanchoring; reset retains explicit pause. Picker
+cancellation preserves previously valid assets. Diagnostic BIOS loading remains
+available when existing persistence barriers permit it.
+
+`gba-app` alone enables eframe persistence and serde. Version-one preferences use
+`lycan.preferences`, creation storage and the standard application save hook.
+Defaults cover all ten logical bindings, 50% volume, unmuted audio, a visible
+legend and Fit scaling. Valid bindings and audio preferences apply at startup;
+legend/scaling controls and presentation belong to subsequent passes. Invalid
+binding groups reset independently of valid audio/display preferences. Volume
+is clamped or defaulted; malformed records recover with a dismissible warning.
+Newer versions use safe defaults and block writes until explicit Reset saved
+settings. Unavailable storage leaves usable in-memory preferences. No BIOS, ROM,
+cartridge bytes, fullscreen or transient runtime state enters this record.
+Standard autosave/shutdown saving is used; immediate-refresh durability is not
+claimed.
+
+### Automated verification
+
+| Check | Result |
+|---|---|
+| Meaningful RED before implementation | ROM-first request discarded; reset resumed explicit pause; preference round-trip/validation/newer-version guard absent |
+| Additional RED during review | Damaged binding group discarded valid mute/volume; repaired to reset bindings independently |
+| `cargo test --locked -p gba-core -p gba-session -p gba-app` | PASS: 68 tests, zero failures; doc tests pass |
+| `cargo clippy --locked --workspace --all-targets -- -D warnings` | PASS |
+| `cargo check --locked -p gba-app` | PASS |
+| `cargo check --locked -p gba-app --target wasm32-unknown-unknown` | PASS |
+| `cargo run --locked --release -p gba-tools -- verify-raster` | PASS: frozen guest identity, timing/state/scanout contracts |
+| Core/session source and configuration diff | Unchanged |
+
+`cargo build --locked --release -p gba-app`: PASS.
+`env -u NO_COLOR trunk --config web/Trunk.toml build --release`: PASS;
+production browser assets rebuilt in `dist/`. Formatting and diff whitespace
+checks passed. Logs are retained in `target/ui-foundation-evidence/`.
+
+### Performance boundary and remaining acceptance
+
+Machine advancement remains in `App::logic`. Framebuffer conversion/upload,
+reusable buffers, session pacing/persistence and audio adapters are unchanged.
+The recurring application additions are fixed-size state checks and ten key
+lookups. Settings decoding/validation happens at creation; serialization happens
+only in eframe's save hook. ROM-first validation happens once per file request,
+without executing guest instructions. Waiting for BIOS does not schedule an idle
+repaint loop. No new threads, Workers, locks, animation or gameplay tracing were
+introduced; existing async picker/storage paths remain in use.
+
+- [x] ROM-first/BIOS-first startup state and preference foundation implemented.
+- [x] Regression, lint, native/WASM compilation and frozen raster checks passed.
+- [x] Core hardware, timing, renderer, PCM and session algorithms unchanged.
+- [ ] User-confirmed Linux, Chrome and Brave startup/picker/pause/reset behavior.
+- [ ] Standard restart persistence and immediate refresh after an edit checked on each platform.
+- [ ] Post-change host timing, sustained audio/speed and memory compared with the recorded baseline.
+
+Unchanged core source and green automated checks establish isolation/regression
+results, not measured end-to-end performance parity. No post-change UI timing or
+manual platform result is inferred from prior baseline acceptance.
+
+Run from `gba-rs` for manual checks:
+
+```sh
+./target/release/gba-app --debug-ui
+env -u NO_COLOR trunk --config web/Trunk.toml serve --release
+```
+
+Check normal startup without `--debug-ui` for both file orders. Use the existing
+diagnostic view for the same ROM/checkpoint, viewport/scale, toolchain and audio
+conditions as the baseline. No native/browser UI was controlled automatically.
