@@ -4003,3 +4003,128 @@ check immediate browser refresh separately rather than assuming durability.
 Use the recorded ROM/checkpoint, viewport/scale and audio conditions for the
 post-change comparison, including visible/hidden legend. F1 still exposes the
 existing diagnostics outside capture.
+
+
+## UI input ownership and lifecycle hardening — implementation evidence
+
+Pass 4 of `../UI.md` was implemented on 2026-10-03 under the user's explicit
+implementation request. Existing native/browser baseline measurements and all
+user-supplied millisecond values remain unchanged. This entry does not complete
+Passes 5–6 or Slice 32.
+
+### Input and lifecycle behavior
+
+One input batch has an explicit Gameplay, UI, or Rebinding owner. The standard
+eframe `raw_input_hook` records logical-key transitions before egui resolves
+keyboard navigation. Gameplay presses go to a fixed ten-slot host map and are
+filtered before widget navigation/activation; key-ups remain available to egui.
+Settings, open menus/popups, keyboard-focused widgets, pointer interaction with
+application controls, modifier combinations, and blocking operations gate game
+input. Menus gate keys without introducing an execution pause. Clicking the game
+surface releases retained widget focus, including in the existing diagnostics.
+
+UI transitions immediately release submitted logical buttons. Focus loss, hidden
+or minimized state, explicit pause, pending file/import/replacement operations,
+and reset preserve held-key suppression until an actual release. A genuinely new
+press after closing Settings is accepted without the former stale UI-ownership
+frame. If a key-up was not delivered while the application was unfocused, release
+that key once after returning; the app conservatively keeps it suppressed rather
+than treating a background-held repeat as a fresh gameplay press.
+
+Capture now stages one bounded result before egui begins its pass, so Tab/arrows
+cannot move application focus and Enter/Space cannot activate controls. A fixed
+capture-only key array preserves activation-release and repeat detection even
+though capture presses are filtered out of egui. Held state survives an atomic
+swap or assignment to a previously unused key; capture/rebinding keys still
+require release before gameplay. No event collection is cloned or accumulated.
+
+Host focus/visibility facts are updated before queued completions and actions.
+Reset, BIOS/ROM installation, save restoration/import, replacement cancellation,
+and settings closure use those actual facts instead of assuming a focused,
+visible window. Explicit pause remains separate from temporary blockers. Existing
+session active/pause/reset boundaries reanchor host time and clear guest PCM;
+existing audio lifecycle methods invalidate output queues and resampler history.
+Reset and replacement continue to use existing enabled predicates/save barriers.
+
+The browser guard cancels defaults only for mapped logical keys on the focused
+`gba_canvas` while gameplay owns input. It leaves UI navigation, modifier/browser
+shortcuts, unrelated keys and other page targets to the existing integration. A
+revision counter retains blur/hide/pagehide interruptions even when the next Rust
+callback sees a visible, focused page. The app then enters the existing inactive
+boundary once before resuming, discarding background pacing debt and stale audio.
+The existing browser audio listeners still silence/clear playback immediately.
+No fullscreen or audio-startup/retry behavior from Pass 5 was added.
+
+### Automated evidence
+
+| Check | Result |
+|---|---|
+| Meaningful behavioral RED before fixes | Held Right returned after focus loss; hidden Reset resumed execution; gameplay Tab navigated application widgets; a held filtered gameplay key completed capture; a fresh press after Settings was discarded; captured Tab navigated Settings |
+| `cargo test --locked -p gba-core -p gba-session -p gba-app` | PASS: 80 tests, zero failures; doc tests pass |
+| Focused transition regressions | PASS: all six RED scenarios above, release/fresh-press recovery, reset suppression, hidden BIOS replacement completion/save barrier, overlapping settings suspension and reanchored return |
+| Existing preference/capture/explicit-pause regressions | PASS |
+| `cargo clippy --locked --workspace --all-targets -- -D warnings` | PASS |
+| `cargo check --locked -p gba-app` | PASS |
+| `cargo check --locked -p gba-app --target wasm32-unknown-unknown` | PASS |
+| `node --test web/input.test.cjs` | PASS: production browser guard, scoped defaults and between-frame lifecycle interruption checks |
+| `node --test web/pcm-worklet.test.cjs` | PASS: existing production Worklet/bridge regression suite |
+| `node --check` for `web/input.js`, `web/audio.js`, `web/pcm-worklet.js` | PASS |
+| `cargo run --locked --release -p gba-tools -- verify-raster` | PASS: six frozen guest state/timing/scanout checkpoints |
+| `cargo build --locked --release -p gba-app` | PASS |
+| `env -u NO_COLOR trunk --config web/Trunk.toml build --release` | PASS: production assets rebuilt; `dist/input.js` is present and referenced by `dist/index.html` |
+| Formatting and diff whitespace checks | PASS |
+| Core/session source, audio adapters/Worklet, dependency/feature configuration | Unchanged |
+
+Logs are retained in `target/ui-input-evidence/`. Rust RED logs record actual
+behavioral failures before their fixes. Browser tests were written before the new
+bridge file existed (missing-file RED); their GREEN run executes production code
+with only DOM/EventTarget facts replaced. No native/browser UI was controlled
+automatically, and no prior platform confirmation is reused as Pass 4 acceptance.
+
+### Performance boundary and remaining acceptance
+
+Core hardware, timing, rendering, PCM generation, host pacing and cartridge
+persistence algorithms are unchanged. Session advancement remains bounded in
+`App::logic`; presentation helpers do not execute the machine. Texture ownership,
+framebuffer generation checks and image/PCM buffer reuse are unchanged.
+
+Routine input work uses the fixed ten-slot map and borrows the existing event
+batch. Capture-only domain scanning runs while Settings suspends execution. There
+is one bounded staged capture result, with no input/event queue, Worker, thread,
+new lock, growing history, diagnostic log or preference writer. Browser mappings
+are converted only at load/completed edits; browser ownership changes are sent
+only on transitions. Host lifecycle synchronization in the raw hook runs only on
+host state changes/interruption, avoiding a second routine audio synchronization
+per frame. The common execution predicate also gates idle repaint requests.
+
+- [x] Gameplay/UI/capture ownership and held-key suppression implemented.
+- [x] Actual host-state completion handling, explicit-pause preservation and existing lifecycle/barrier reuse implemented.
+- [x] Six focused behavioral RED scenarios demonstrated GREEN; required build/regression gates passed.
+- [x] Core/session/audio/save algorithms and dependency configuration unchanged; existing baselines preserved.
+- [ ] User-confirmed Linux, desktop Chrome and Brave input/lifecycle acceptance.
+- [ ] Post-change host UI/total-work timing, sustained speed/audio/memory compared with the recorded baseline.
+
+Passing gates and unchanged core establish regression/isolation evidence, not
+measured end-to-end performance parity. Post-change host performance is not
+measured in this pass.
+
+Run from `gba-rs`:
+
+```sh
+./target/release/gba-app
+env -u NO_COLOR trunk --config web/Trunk.toml serve --release
+```
+
+On Linux, Chrome and Brave, hold a game key while entering menus, Settings, a file
+picker/import or Pause; return and verify release/fresh-press behavior. Remap Tab,
+Space, Enter and navigation keys; check that gameplay does not navigate controls
+or scroll the page, while Settings retains keyboard navigation. Check pointer
+and keyboard activation of Pause/Reset/Settings and nested backup/audio menus,
+unsupported/repeated capture, Escape ordering, and fresh input immediately after
+Settings closes. Preserve explicit pause through settings, file cancellation,
+replacement failure/cancellation and focus loss. Check hidden/minimized/blurred
+return (including a rapid blur/return), capture cancellation, silent suspension,
+no historical audio or catch-up burst, and reset/replacement barriers with save
+operations pending. Use the same recorded ROM/checkpoint, viewport/scale and audio
+conditions for post-change timing and sustained gameplay checks. Fullscreen and
+expanded audio UX remain in Pass 5.

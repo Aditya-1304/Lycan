@@ -4,6 +4,19 @@ use crate::settings::supported_key;
 use eframe::egui::{self, Key};
 use gba_session::Button;
 
+/// Exclusive owner of one host input batch. UI interaction does not itself pause
+/// the machine; settings and file operations have separate execution blockers.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum InputOwner {
+    Gameplay,
+    #[default]
+    Ui,
+    Rebinding,
+}
+
+#[cfg(target_arch = "wasm32")]
+pub mod browser;
+
 /// Persisted slots are application order, independent of KEYINPUT bit order.
 pub const BINDING_BUTTONS: [Button; 10] = [
     Button::A,

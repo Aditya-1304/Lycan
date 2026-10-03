@@ -162,7 +162,7 @@ const DEMO_INPUT: &[(Cycle, Button, bool)] = &include!(concat!(
 ));
 
 use crate::input::{
-    BINDING_BUTTONS, BindingLabel, Capture, CaptureResult, binding_labels, button_name,
+    BINDING_BUTTONS, BindingLabel, Capture, CaptureResult, InputOwner, binding_labels, button_name,
 };
 
 /// Shared native/browser application displaying pixels produced by guest execution.
@@ -174,13 +174,32 @@ pub struct GbaApp {
     settings_open: bool,
     /// Transient capture state never reaches persisted preferences.
     capture: Option<Capture>,
+    /// One deferred result transfers capture across egui's begin-pass boundary.
+    /// No event vector is cloned, retained or queued by the application.
+    pending_capture: Option<(CaptureResult, bool)>,
+    /// Capture-only held keys preserve repeat detection when its presses are
+    /// filtered before egui. The fixed enum domain requires no growing collection.
+    capture_keys_down: [bool; egui::Key::ALL.len()],
     capture_notice: Option<String>,
     /// Formatting is cached at load/edit boundaries, not during gameplay drawing.
     binding_labels: [BindingLabel; 10],
-    /// Menus gate logical input; settings additionally suspend execution.
-    ui_keys_owned: bool,
     /// Still-held keys remain ineligible after a UI interaction until released.
     suppressed_keys: [bool; 10],
+    /// Actual key events retain held state when egui clears focus-local keys.
+    /// A missed background key-up is handled conservatively: release once on return.
+    host_keys_down: [bool; 10],
+    input_owner: InputOwner,
+    /// Host facts are updated before completions/actions; no action assumes focus.
+    host_focused: bool,
+    host_visible: bool,
+    /// The last rendered game surface distinguishes gameplay clicks from controls
+    /// before drawing processes this frame's pointer activation.
+    game_rect: Option<egui::Rect>,
+    pointer_ui_owned: bool,
+    #[cfg(target_arch = "wasm32")]
+    browser_revision: u32,
+    #[cfg(target_arch = "wasm32")]
+    browser_gameplay: bool,
     notice: Option<String>,
     /// User intent survives file operations, restoration, focus loss and reset.
     user_paused: bool,
@@ -254,9 +273,20 @@ impl GbaApp {
             settings,
             settings_open: false,
             capture: None,
+            pending_capture: None,
+            capture_keys_down: [false; egui::Key::ALL.len()],
             capture_notice: None,
-            ui_keys_owned: false,
             suppressed_keys: [false; 10],
+            host_keys_down: [false; 10],
+            input_owner: InputOwner::Ui,
+            host_focused: true,
+            host_visible: true,
+            game_rect: None,
+            pointer_ui_owned: false,
+            #[cfg(target_arch = "wasm32")]
+            browser_revision: 0,
+            #[cfg(target_arch = "wasm32")]
+            browser_gameplay: false,
             notice: None,
             user_paused: false,
             execution_faulted: false,
@@ -307,6 +337,8 @@ impl GbaApp {
             load_generation: 0,
             picker_open: false,
         };
+        #[cfg(target_arch = "wasm32")]
+        crate::input::browser::set_bindings(&app.settings.preferences.bindings);
         if debug_ui {
             app.load_rom_bytes("pcm.gba", PCM_ROM);
         }
@@ -411,34 +443,247 @@ impl GbaApp {
         self.notice = Some(message);
     }
 
-    /// Invalidate already submitted keys when UI takes ownership after logic.
-    /// The fixed suppression array avoids event collections or per-frame allocation.
+    /// Records key-up independently of focus-local egui state. Losing focus must
+    /// not turn an OS repeat into a fresh gameplay press after keys_down is cleared.
+    fn observe_host_keys(&mut self, events: &[egui::Event]) {
+        for event in events {
+            if let egui::Event::Key {
+                key,
+                pressed,
+                modifiers,
+                ..
+            } = event
+                && let Some(slot) = self
+                    .settings
+                    .preferences
+                    .bindings
+                    .iter()
+                    .position(|binding| binding == key)
+            {
+                self.host_keys_down[slot] = *pressed;
+                if !pressed {
+                    self.suppressed_keys[slot] = false;
+                } else if !modifiers.is_none() {
+                    self.suppressed_keys[slot] = true;
+                }
+            }
+        }
+    }
+
+    /// Suppression survives suspension and reset until an actual key-up. This
+    /// bounded state never advances the machine or allocates an input collection.
+    fn block_host_keys(&mut self) {
+        for (blocked, held) in self.suppressed_keys.iter_mut().zip(self.host_keys_down) {
+            *blocked |= held;
+        }
+        self.session.release_all_buttons();
+    }
+
+    /// Invalidate input submitted by earlier logic when a widget takes ownership.
     fn own_ui_keys(&mut self, ctx: &egui::Context) {
         ctx.input(|input| {
-            for (blocked, key) in self
-                .suppressed_keys
+            self.observe_host_keys(&input.events);
+            for (held, key) in self
+                .host_keys_down
                 .iter_mut()
                 .zip(self.settings.preferences.bindings)
             {
-                *blocked |= input.key_down(key);
+                *held |= input.key_down(key);
             }
         });
-        self.session.release_all_buttons();
+        self.block_host_keys();
+    }
+
+    fn keyboard_ui_owned(&self, ctx: &egui::Context) -> bool {
+        self.settings_open
+            || self.capture.is_some()
+            || egui::Popup::is_any_open(ctx)
+            || ctx.egui_wants_keyboard_input()
+    }
+
+    /// Runs before egui resolves navigation/activation. Mapped gameplay presses
+    /// reach our fixed held-state map but never widgets. Releases remain available
+    /// to egui so a key pressed while UI-owned cannot leave its key state stuck.
+    fn prepare_host_input(&mut self, ctx: &egui::Context, raw: &mut egui::RawInput) {
+        self.observe_host_keys(&raw.events);
+        #[cfg(not(target_arch = "wasm32"))]
+        let visible = !raw.viewport().minimized.unwrap_or(false);
+        #[cfg(target_arch = "wasm32")]
+        let visible = web_sys::window()
+            .and_then(|window| window.document())
+            .is_some_and(|document| !document.hidden());
+        let interrupted = raw
+            .events
+            .iter()
+            .any(|event| matches!(event, egui::Event::WindowFocused(false)));
+        #[cfg(target_arch = "wasm32")]
+        let interrupted = {
+            let revision = crate::input::browser::lifecycle_revision();
+            let changed = revision != self.browser_revision;
+            self.browser_revision = revision;
+            changed || interrupted
+        };
+        // Blur and return can share a single batch (or no browser animation frame).
+        // Enter the existing inactive boundary once before restoring current facts.
+        if interrupted {
+            self.sync_execution(false, visible);
+            self.update_browser_input(false);
+        }
+        if self.host_focused != raw.focused || self.host_visible != visible {
+            self.sync_execution(raw.focused, visible);
+        }
+        let running = self.execution_allowed();
+        let modifiers = raw
+            .events
+            .iter()
+            .rev()
+            .find_map(|event| match event {
+                egui::Event::ModifiersChanged(modifiers)
+                | egui::Event::Key { modifiers, .. }
+                | egui::Event::PointerButton { modifiers, .. } => Some(*modifiers),
+                _ => None,
+            })
+            .unwrap_or_else(|| ctx.input(|input| input.modifiers));
+        let mut pointer_ui_event = false;
+        for event in &raw.events {
+            if let egui::Event::PointerButton { pos, pressed, .. } = event {
+                let outside_game = !self.game_rect.is_some_and(|rect| rect.contains(*pos));
+                pointer_ui_event |= self.pointer_ui_owned || outside_game;
+                self.pointer_ui_owned = *pressed && outside_game;
+            }
+        }
+        self.input_owner = if self.capture.is_some() {
+            InputOwner::Rebinding
+        } else if !running
+            || self.keyboard_ui_owned(ctx)
+            || pointer_ui_event
+            || self.pointer_ui_owned
+            || !modifiers.is_none()
+        {
+            InputOwner::Ui
+        } else {
+            InputOwner::Gameplay
+        };
+        if self.input_owner == InputOwner::Rebinding {
+            self.stage_binding_capture(ctx, raw);
+        } else if self.input_owner == InputOwner::Gameplay {
+            let keys = &self.settings.preferences.bindings;
+            raw.events.retain(|event| {
+                !matches!(event,
+                egui::Event::Key { key, pressed: true, modifiers, .. }
+                if modifiers.is_none() && keys.contains(key))
+            });
+        } else {
+            self.block_host_keys();
+        }
+        self.update_browser_input(self.input_owner == InputOwner::Gameplay);
+    }
+
+    /// Capture must run before egui chooses Tab/arrow focus targets or keyboard
+    /// activation. A single result is applied in logic after begin-pass; key-ups
+    /// remain visible to egui to retire activation-key state safely.
+    fn stage_binding_capture(&mut self, ctx: &egui::Context, raw: &mut egui::RawInput) {
+        let Some(capture) = &mut self.capture else {
+            return;
+        };
+        for event in &mut raw.events {
+            if let egui::Event::Key {
+                key,
+                pressed,
+                repeat,
+                ..
+            } = event
+                && let Some(slot) = egui::Key::ALL.iter().position(|candidate| candidate == key)
+            {
+                if *pressed {
+                    *repeat |= self.capture_keys_down[slot];
+                }
+                self.capture_keys_down[slot] = *pressed;
+            }
+        }
+        let pointer_down = raw
+            .events
+            .iter()
+            .rev()
+            .find_map(|event| {
+                if let egui::Event::PointerButton { pressed, .. } = event {
+                    Some(*pressed)
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_else(|| ctx.input(|input| input.pointer.any_down()));
+        let result = capture.update(
+            &raw.events,
+            !self.capture_keys_down.contains(&true) && !pointer_down,
+        );
+        let held = if let CaptureResult::Key(key) = result {
+            egui::Key::ALL
+                .iter()
+                .position(|candidate| *candidate == key)
+                .is_some_and(|slot| self.capture_keys_down[slot])
+        } else {
+            false
+        };
+        self.pending_capture = Some((result, held));
+        self.block_host_keys();
+        raw.events
+            .retain(|event| !matches!(event, egui::Event::Key { pressed: true, .. }));
+    }
+
+    /// The page guard changes only on ownership transitions. It cancels browser
+    /// defaults for mapped keys on the focused canvas, never for other page input.
+    fn update_browser_input(&mut self, gameplay: bool) {
+        #[cfg(target_arch = "wasm32")]
+        if self.browser_gameplay != gameplay {
+            self.browser_gameplay = gameplay;
+            crate::input::browser::set_gameplay(gameplay);
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        let _ = gameplay;
     }
 
     /// Capture starts from a UI-owned frame and immediately invalidates logical
     /// input submitted by earlier logic. Activation events are not processed here.
     fn begin_binding_capture(&mut self, ctx: &egui::Context, slot: usize) {
         self.own_ui_keys(ctx);
-        let released = ctx.input(|input| input.keys_down.is_empty() && !input.pointer.any_down());
+        let released = !self.host_keys_down.contains(&true)
+            && ctx.input(|input| input.keys_down.is_empty() && !input.pointer.any_down());
         self.capture = Some(Capture::new(slot, released));
+        self.pending_capture = None;
+        ctx.input(|input| {
+            self.capture_keys_down = std::array::from_fn(|index| {
+                let key = egui::Key::ALL[index];
+                input.key_down(key)
+                    || self
+                        .settings
+                        .preferences
+                        .bindings
+                        .iter()
+                        .position(|binding| *binding == key)
+                        .is_some_and(|slot| self.host_keys_down[slot])
+            });
+        });
         self.capture_notice = None;
     }
 
     /// Rebuild presentation and suppression together after an atomic edit. Slots
     /// can exchange host keys, so suppression must be resampled for the new map.
-    fn bindings_changed(&mut self, ctx: &egui::Context) {
+    fn bindings_changed(&mut self, ctx: &egui::Context, previous: [egui::Key; 10]) {
+        let held = self.host_keys_down;
+        ctx.input(|input| {
+            self.host_keys_down = std::array::from_fn(|slot| {
+                let key = self.settings.preferences.bindings[slot];
+                input.key_down(key)
+                    || previous
+                        .iter()
+                        .position(|old| *old == key)
+                        .is_some_and(|old| held[old])
+            });
+        });
         self.binding_labels = binding_labels(&self.settings.preferences.bindings);
+        #[cfg(target_arch = "wasm32")]
+        crate::input::browser::set_bindings(&self.settings.preferences.bindings);
         self.suppressed_keys = [false; 10];
         self.own_ui_keys(ctx);
     }
@@ -446,16 +691,32 @@ impl GbaApp {
     /// Capture owns input while settings suspend execution. A completed/cancelled
     /// event stays ineligible for gameplay until released, including on UI close.
     fn poll_binding_capture(&mut self, ctx: &egui::Context) {
+        if self.capture.is_none() {
+            return;
+        }
+        ctx.input(|input| self.observe_host_keys(&input.events));
         let Some(capture) = &mut self.capture else {
             return;
         };
         let slot = capture.slot;
-        let result = ctx.input(|input| {
-            capture.update(
-                &input.events,
-                input.keys_down.is_empty() && !input.pointer.any_down(),
-            )
-        });
+        let host_released = !self.host_keys_down.contains(&true);
+        let staged = self.pending_capture.take();
+        let (result, captured_held) = if let Some(staged) = staged {
+            staged
+        } else {
+            let result = ctx.input(|input| {
+                capture.update(
+                    &input.events,
+                    host_released && input.keys_down.is_empty() && !input.pointer.any_down(),
+                )
+            });
+            let held = if let CaptureResult::Key(key) = result {
+                ctx.input(|input| input.key_down(key))
+            } else {
+                false
+            };
+            (result, held)
+        };
         match result {
             CaptureResult::Waiting => {}
             CaptureResult::Unsupported => {
@@ -466,7 +727,8 @@ impl GbaApp {
                 self.capture_notice = Some("Binding cancelled.".into());
             }
             CaptureResult::Key(key) => {
-                let changed = self.settings.preferences.bindings[slot] != key;
+                let previous = self.settings.preferences.bindings;
+                let changed = previous[slot] != key;
                 if let Ok(other) =
                     crate::input::remap(&mut self.settings.preferences.bindings, slot, key)
                 {
@@ -484,8 +746,12 @@ impl GbaApp {
                         )
                     });
                     if changed {
-                        self.bindings_changed(ctx);
+                        self.bindings_changed(ctx, previous);
                     }
+                    // The captured press was withheld from egui. Preserve its
+                    // real held state across an unused-key assignment as well.
+                    self.host_keys_down[slot] = captured_held;
+                    self.suppressed_keys[slot] |= captured_held;
                 }
                 self.capture = None;
             }
@@ -509,7 +775,7 @@ impl GbaApp {
             self.own_ui_keys(ctx);
             self.storage.import(ctx, identity, self.save_generation);
             self.save_import_open = self.storage.busy;
-            self.sync_execution(true, true);
+            self.sync_execution(self.host_focused, self.host_visible);
         }
     }
 
@@ -526,9 +792,30 @@ impl GbaApp {
         }
     }
 
+    /// Temporary execution blockers and explicit pause are independent. Use the
+    /// same predicate for input routing, browser ownership and idle repaint policy.
+    fn session_active(&self) -> bool {
+        self.loaded
+            && self.host_focused
+            && self.host_visible
+            && !self.operation_pending()
+            && !self.settings_open
+    }
+
+    fn execution_allowed(&self) -> bool {
+        self.session_active() && !self.user_paused && !self.execution_faulted
+    }
+
     /// Synchronizes session flags through its existing reanchoring APIs. The
     /// operation gate is constant-size and never performs guest or storage work.
     fn sync_execution(&mut self, focused: bool, visible: bool) -> bool {
+        self.host_focused = focused;
+        self.host_visible = visible;
+        if !(focused && visible) {
+            self.capture = None;
+            self.pending_capture = None;
+            self.pointer_ui_owned = false;
+        }
         let paused = self.user_paused
             || self.restoring_save
             || self.execution_faulted
@@ -537,11 +824,10 @@ impl GbaApp {
             self.session.toggle_pause();
             self.audio.clear();
         }
-        let active =
-            self.loaded && focused && visible && !self.operation_pending() && !self.settings_open;
+        let active = self.session_active();
         self.session.set_active(active);
         if !active || paused {
-            self.session.release_all_buttons();
+            self.block_host_keys();
         }
         self.audio.set_playing(active && !paused);
         active && !paused
@@ -551,7 +837,7 @@ impl GbaApp {
         if self.can_pause() {
             self.user_paused = !self.user_paused;
             self.replay_deadline = None;
-            self.sync_execution(true, true);
+            self.sync_execution(self.host_focused, self.host_visible);
         }
     }
 
@@ -565,7 +851,7 @@ impl GbaApp {
         self.load_generation = self.load_generation.wrapping_add(1);
         let generation = self.load_generation;
         self.bios_picker_open = true;
-        self.sync_execution(true, true);
+        self.sync_execution(self.host_focused, self.host_visible);
         let sender = self.bios_sender.clone();
         let ctx = ctx.clone();
         let selection = rfd::AsyncFileDialog::new()
@@ -622,7 +908,7 @@ impl GbaApp {
                 name: name.into(),
                 bytes: bytes.to_vec(),
             });
-            self.sync_execution(true, true);
+            self.sync_execution(self.host_focused, self.host_visible);
             return;
         }
         self.install_bios(name, bytes);
@@ -645,7 +931,7 @@ impl GbaApp {
                 self.bios_name = Some(name.into());
                 self.execution_faulted = false;
                 self.notice = None;
-                self.sync_execution(true, true);
+                self.sync_execution(self.host_focused, self.host_visible);
                 self.status = if self.loaded {
                     "BIOS replaced; game restarted"
                 } else {
@@ -663,7 +949,7 @@ impl GbaApp {
             self.restore_backup_override(pending.backup_override);
         }
         self.pending_bios = None;
-        self.sync_execution(true, true);
+        self.sync_execution(self.host_focused, self.host_visible);
     }
 
     /// Byte identity confines controlled startup to the shipped diagnostics.
@@ -715,7 +1001,7 @@ impl GbaApp {
         self.load_generation = self.load_generation.wrapping_add(1);
         let generation = self.load_generation;
         self.picker_open = true;
-        self.sync_execution(true, true);
+        self.sync_execution(self.host_focused, self.host_visible);
         let sender = self.rom_sender.clone();
         let ctx = ctx.clone();
         let dialog = rfd::AsyncFileDialog::new()
@@ -793,7 +1079,7 @@ impl GbaApp {
                 requires_bios: true,
             });
             self.status = "ROM ready; Load BIOS to start".into();
-            self.sync_execution(true, true);
+            self.sync_execution(self.host_focused, self.host_visible);
             return;
         }
         // Replacement is a save barrier. Retain the old machine until its last
@@ -806,7 +1092,7 @@ impl GbaApp {
                 requires_bios: false,
             });
             self.status = "Saving current game before loading another ROM".into();
-            self.sync_execution(true, true);
+            self.sync_execution(self.host_focused, self.host_visible);
             return;
         }
         self.install_rom(name, bytes, backup_override);
@@ -952,7 +1238,7 @@ impl GbaApp {
                                 "No stored backup; new cartridge"
                             }
                             .into();
-                            self.sync_execution(true, true);
+                            self.sync_execution(self.host_focused, self.host_visible);
                         }
                         Err(error) => {
                             self.storage.failed = true;
@@ -993,7 +1279,7 @@ impl GbaApp {
                             // score still held in CPU registers. Keep execution paused.
                             self.reset_demo();
                             self.user_paused = true;
-                            self.sync_execution(true, true);
+                            self.sync_execution(self.host_focused, self.host_visible);
                             self.storage.status =
                                 "Imported; persistence pending — Resume to display".into();
                         }
@@ -1105,20 +1391,18 @@ impl GbaApp {
         }
     }
 
-    /// Samples held host keys into the logical button state owned by the session.
+    /// Submit only logical transitions from the bounded host map. Raw gameplay
+    /// events have already been removed before egui's navigation pass.
     fn poll_keyboard(&mut self, ctx: &egui::Context) {
         ctx.input(|input| {
-            for (slot, (button, key)) in BINDING_BUTTONS
-                .into_iter()
-                .zip(self.settings.preferences.bindings)
-                .enumerate()
-            {
-                let down = input.key_down(key);
-                if !down {
-                    self.suppressed_keys[slot] = false;
-                }
-                self.session
-                    .set_button(button, down && !self.suppressed_keys[slot]);
+            self.observe_host_keys(&input.events);
+            for (slot, button) in BINDING_BUTTONS.into_iter().enumerate() {
+                self.session.set_button(
+                    button,
+                    self.host_keys_down[slot]
+                        && !self.suppressed_keys[slot]
+                        && input.modifiers.is_none(),
+                );
             }
         });
     }
@@ -1154,11 +1438,12 @@ impl GbaApp {
         if !self.can_reset() {
             return;
         }
+        self.block_host_keys();
         self.audio.clear();
         self.session.reset();
         self.execution_faulted = false;
         self.notice = None;
-        self.sync_execution(true, true);
+        self.sync_execution(self.host_focused, self.host_visible);
         self.host_origin = Instant::now();
         self.replay_deadline = None;
         self.last_guest_generation = 0;
@@ -1285,7 +1570,7 @@ impl GbaApp {
                     if let Err(error) = self.session.set_button_at(cycle, button, pressed) {
                         self.status = format!("Replay input failed: {error}");
                         self.user_paused = true;
-                        self.sync_execution(true, true);
+                        self.sync_execution(self.host_focused, self.host_visible);
                         return;
                     }
                 }
@@ -1323,7 +1608,7 @@ impl GbaApp {
                     if let Err(error) = self.session.set_button_at(cycle, button, pressed) {
                         self.status = format!("Replay input failed: {error}");
                         self.user_paused = true;
-                        self.sync_execution(true, true);
+                        self.sync_execution(self.host_focused, self.host_visible);
                         return;
                     }
                 }
@@ -1347,7 +1632,7 @@ impl GbaApp {
                     if let Err(error) = self.session.set_button_at(cycle, button, pressed) {
                         self.status = format!("Replay input failed: {error}");
                         self.user_paused = true;
-                        self.sync_execution(true, true);
+                        self.sync_execution(self.host_focused, self.host_visible);
                         return;
                     }
                 }
@@ -1395,7 +1680,7 @@ impl GbaApp {
                     if let Err(error) = self.session.set_button_at(cycle, button, pressed) {
                         self.status = format!("Replay input failed: {error}");
                         self.user_paused = true;
-                        self.sync_execution(true, true);
+                        self.sync_execution(self.host_focused, self.host_visible);
                         return;
                     }
                 }
@@ -1607,12 +1892,28 @@ impl GbaApp {
         ui.separator();
         if let Some(texture) = &self.texture {
             let size = fitted_screen_size(ui.available_size());
-            ui.add(egui::Image::from_texture(texture).fit_to_exact_size(size));
+            let response = ui.add(
+                egui::Image::from_texture(texture)
+                    .fit_to_exact_size(size)
+                    .sense(egui::Sense::click()),
+            );
+            self.game_rect = Some(response.rect);
+            if response.clicked() {
+                ui.ctx().memory_mut(|memory| {
+                    if let Some(id) = memory.focused() {
+                        memory.surrender_focus(id);
+                    }
+                });
+            }
         }
     }
 }
 
 impl eframe::App for GbaApp {
+    fn raw_input_hook(&mut self, ctx: &egui::Context, raw: &mut egui::RawInput) {
+        self.prepare_host_input(ctx, raw);
+    }
+
     /// Executes bounded guest work while running and schedules the next host wake.
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         if self.capture.is_none()
@@ -1758,18 +2059,8 @@ impl eframe::App for GbaApp {
         {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
-        let focused = ctx.input(|input| input.focused);
-        // Browser visibility is distinct from keyboard focus. A hidden tab must
-        // suspend emulation even when the host throttles animation callbacks.
-        #[cfg(target_arch = "wasm32")]
-        let visible = web_sys::window()
-            .and_then(|window| window.document())
-            .is_some_and(|document| !document.hidden());
-        #[cfg(not(target_arch = "wasm32"))]
-        let visible = !ctx.input(|input| input.viewport().minimized.unwrap_or(false));
-        if !(focused && visible) {
-            self.capture = None;
-        }
+        let focused = self.host_focused;
+        let visible = self.host_visible;
         self.poll_binding_capture(ctx);
         let running = self.sync_execution(focused, visible);
         if self.replay_deadline.is_some() && !(focused && visible) {
@@ -1779,12 +2070,11 @@ impl eframe::App for GbaApp {
         }
         if running
             && self.replay_deadline.is_none()
-            && self.capture.is_none()
-            && !self.ui_keys_owned
-            && !ctx.egui_wants_keyboard_input()
+            && self.input_owner == InputOwner::Gameplay
+            && !self.keyboard_ui_owned(ctx)
         {
             self.poll_keyboard(ctx);
-        } else if self.ui_keys_owned || ctx.egui_wants_keyboard_input() {
+        } else if self.replay_deadline.is_none() {
             self.own_ui_keys(ctx);
         }
         let start = Instant::now();
@@ -1894,13 +2184,7 @@ impl eframe::App for GbaApp {
                 }
             };
         }
-        if self.loaded
-            && !self.session.paused()
-            && focused
-            && visible
-            && !self.operation_pending()
-            && !self.settings_open
-        {
+        if self.execution_allowed() {
             // This wake is a presentation request. Session elapsed-time pacing,
             // rather than callback count, determines how many GBA cycles execute.
             ctx.request_repaint();
@@ -2089,6 +2373,270 @@ mod tests {
         });
         assert!(app.session.button_pressed(Button::A));
         assert!(!app.session.button_pressed(Button::Start));
+    }
+
+    // Session release alone cannot stop app polling from resubmitting a held key
+    // after focus loss. This tests the host/session boundary, not core KEYINPUT.
+    #[test]
+    fn held_key_requires_release_after_focus_loss_and_reset() {
+        let mut app = GbaApp::create(false);
+        app.load_rom_bytes("buttons.gba", BUTTONS_ROM);
+        let ctx = egui::Context::default();
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                events: vec![egui::Event::Key {
+                    key: egui::Key::ArrowRight,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: egui::Modifiers::NONE,
+                }],
+                ..Default::default()
+            },
+            |ui| {
+                app.poll_keyboard(ui.ctx());
+                assert!(app.session.button_pressed(Button::Right));
+                app.sync_execution(false, true);
+                app.sync_execution(true, true);
+                app.poll_keyboard(ui.ctx());
+                assert!(
+                    !app.session.button_pressed(Button::Right),
+                    "Held key returned after focus loss"
+                );
+            },
+        );
+        output.textures_delta.clear();
+        for pressed in [false, true] {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    events: vec![egui::Event::Key {
+                        key: egui::Key::ArrowRight,
+                        physical_key: None,
+                        pressed,
+                        repeat: false,
+                        modifiers: egui::Modifiers::NONE,
+                    }],
+                    ..Default::default()
+                },
+                |ui| app.poll_keyboard(ui.ctx()),
+            );
+            output.textures_delta.clear();
+        }
+        assert!(app.session.button_pressed(Button::Right));
+        app.reset_demo();
+        app.poll_keyboard(&ctx);
+        assert!(
+            !app.session.button_pressed(Button::Right),
+            "Reset restored held input"
+        );
+    }
+
+    // A completion/reset must not assume visibility or focus and reactivate a
+    // background machine. Session-only lifecycle tests do not exercise app actions.
+    #[test]
+    fn hidden_reset_and_replacement_completion_do_not_resume_execution() {
+        let mut app = GbaApp::create(false);
+        app.load_rom_bytes("buttons.gba", BUTTONS_ROM);
+        app.sync_execution(false, false);
+        app.reset_demo();
+        app.session.advance_host_time(Duration::ZERO).unwrap();
+        app.session
+            .advance_host_time(Duration::from_secs(100))
+            .unwrap();
+        assert_eq!(
+            app.session.cycles(),
+            Cycle(0),
+            "Reset resumed hidden execution"
+        );
+        app.storage.busy = true;
+        app.load_bios_bytes(&vec![0; 16384]);
+        assert!(app.pending_bios.is_some());
+        assert!(!app.can_reset());
+        app.storage.busy = false;
+        app.poll_save_storage(&egui::Context::default());
+        app.session.advance_host_time(Duration::ZERO).unwrap();
+        app.session
+            .advance_host_time(Duration::from_secs(200))
+            .unwrap();
+        assert_eq!(
+            app.session.cycles(),
+            Cycle(0),
+            "Replacement completion resumed hidden execution"
+        );
+        app.settings_open = true;
+        app.sync_execution(true, true);
+        assert!(!app.sync_execution(true, true));
+        app.settings_open = false;
+        assert!(app.sync_execution(true, true));
+        app.session
+            .advance_host_time(Duration::from_secs(300))
+            .unwrap();
+        assert_eq!(
+            app.session.cycles(),
+            Cycle(0),
+            "Background time became catch-up debt"
+        );
+    }
+
+    // A remapped navigation key must act on the guest instead of moving focus to
+    // application controls. Removing events after egui starts the pass is too late.
+    #[test]
+    fn gameplay_tab_does_not_navigate_application_widgets() {
+        let mut app = GbaApp::create(false);
+        app.load_rom_bytes("buttons.gba", BUTTONS_ROM);
+        app.settings.preferences.bindings[0] = egui::Key::Tab;
+        let ctx = egui::Context::default();
+        for _ in 0..2 {
+            let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+                let _ = ui.button("Pause");
+                let _ = ui.button("Settings");
+            });
+            output.textures_delta.clear();
+        }
+        let mut raw = egui::RawInput {
+            focused: true,
+            events: vec![egui::Event::Key {
+                key: egui::Key::Tab,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+            ..Default::default()
+        };
+        eframe::App::raw_input_hook(&mut app, &ctx, &mut raw);
+        let mut output = ctx.run_ui(raw, |ui| {
+            app.poll_keyboard(ui.ctx());
+            let _ = ui.button("Pause");
+            let _ = ui.button("Settings");
+        });
+        output.textures_delta.clear();
+        assert!(app.session.button_pressed(Button::A));
+        assert!(
+            ctx.memory(|memory| memory.focused().is_none()),
+            "Gameplay Tab moved application focus"
+        );
+    }
+
+    // Gameplay presses are intentionally absent from egui's keys_down. Capture
+    // must also wait for our host-held map, or a repeated held key becomes a binding.
+    #[test]
+    fn capture_waits_for_keys_held_before_gameplay_event_filtering() {
+        let mut app = GbaApp::create(false);
+        app.load_rom_bytes("buttons.gba", BUTTONS_ROM);
+        let ctx = egui::Context::default();
+        for (index, pressed) in [true, true, false].into_iter().enumerate() {
+            let mut raw = egui::RawInput {
+                focused: true,
+                events: vec![egui::Event::Key {
+                    key: egui::Key::ArrowRight,
+                    physical_key: None,
+                    pressed,
+                    repeat: index == 1,
+                    modifiers: egui::Modifiers::NONE,
+                }],
+                ..Default::default()
+            };
+            eframe::App::raw_input_hook(&mut app, &ctx, &mut raw);
+            let mut output = ctx.run_ui(raw, |ui| {
+                if index == 0 {
+                    app.poll_keyboard(ui.ctx());
+                    app.settings_open = true;
+                    app.begin_binding_capture(ui.ctx(), 0);
+                } else {
+                    app.poll_binding_capture(ui.ctx());
+                }
+            });
+            output.textures_delta.clear();
+            assert!(
+                app.capture.is_some(),
+                "A previously held gameplay key completed capture"
+            );
+            assert_eq!(app.settings.preferences.bindings[0], egui::Key::Z);
+        }
+    }
+
+    // Previous-frame UI ownership must not suppress a genuinely new press after
+    // Settings closes. Held-key tests do not cover this separate transition gap.
+    #[test]
+    fn fresh_key_after_settings_close_is_not_suppressed_by_stale_ui_ownership() {
+        let mut app = GbaApp::create(false);
+        app.load_rom_bytes("buttons.gba", BUTTONS_ROM);
+        app.settings_open = true;
+        let ctx = egui::Context::default();
+        for key in [None, Some(egui::Key::Escape), Some(egui::Key::ArrowRight)] {
+            let mut raw = egui::RawInput {
+                focused: true,
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(760.0, 540.0),
+                )),
+                events: key
+                    .map(|key| {
+                        vec![egui::Event::Key {
+                            key,
+                            physical_key: None,
+                            pressed: true,
+                            repeat: false,
+                            modifiers: egui::Modifiers::NONE,
+                        }]
+                    })
+                    .unwrap_or_default(),
+                ..Default::default()
+            };
+            eframe::App::raw_input_hook(&mut app, &ctx, &mut raw);
+            let mut output = ctx.run_ui(raw, |ui| {
+                app.poll_keyboard(ui.ctx());
+                app.draw_ui(ui);
+            });
+            output.textures_delta.clear();
+        }
+        assert!(!app.settings_open);
+        assert!(
+            app.session.button_pressed(Button::Right),
+            "A fresh press after Settings was discarded"
+        );
+    }
+
+    // Capture owns Tab before egui resolves focus movement. Consuming it later
+    // prevents button clicks but still leaks navigation into Settings widgets.
+    #[test]
+    fn captured_tab_does_not_navigate_application_widgets() {
+        let mut app = GbaApp::create(false);
+        app.load_rom_bytes("buttons.gba", BUTTONS_ROM);
+        app.settings_open = true;
+        let ctx = egui::Context::default();
+        for _ in 0..2 {
+            let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+                let _ = ui.button("Change");
+                let _ = ui.button("Close settings");
+            });
+            output.textures_delta.clear();
+        }
+        app.capture = Some(Capture::new(0, true));
+        let mut raw = egui::RawInput {
+            focused: true,
+            events: vec![egui::Event::Key {
+                key: egui::Key::Tab,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+            ..Default::default()
+        };
+        eframe::App::raw_input_hook(&mut app, &ctx, &mut raw);
+        let mut output = ctx.run_ui(raw, |ui| {
+            app.poll_binding_capture(ui.ctx());
+            let _ = ui.button("Change");
+            let _ = ui.button("Close settings");
+        });
+        output.textures_delta.clear();
+        assert_eq!(app.settings.preferences.bindings[0], egui::Key::Tab);
+        assert!(
+            ctx.memory(|memory| memory.focused().is_none()),
+            "Captured Tab navigated Settings"
+        );
     }
 
     // Picker cancellation tests cannot catch firmware being discarded while a
