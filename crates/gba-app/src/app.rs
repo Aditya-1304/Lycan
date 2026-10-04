@@ -47,6 +47,7 @@ enum Operation {
     ImportingSave,
     ReplacingRom,
     ReplacingBios,
+    ReturningHome,
     Closing,
 }
 
@@ -61,6 +62,7 @@ impl Operation {
             Self::ImportingSave => Some("Importing save…"),
             Self::ReplacingRom => Some("Saving current game before loading another ROM."),
             Self::ReplacingBios => Some("Saving current game before replacing BIOS…"),
+            Self::ReturningHome => Some("Saving current game before returning home…"),
             Self::Closing => Some("Saving current game before closing…"),
         }
     }
@@ -267,6 +269,8 @@ pub struct GbaApp {
     #[cfg(not(target_arch = "wasm32"))]
     close_when_saved: bool,
     pending_rom: Option<PendingRom>,
+    /// Navigation waits for the installed cartridge's existing persistence barrier.
+    home_pending: bool,
 
     audio: Audio,
     rom_name: String,
@@ -369,6 +373,7 @@ impl GbaApp {
             #[cfg(not(target_arch = "wasm32"))]
             close_when_saved: false,
             pending_rom: None,
+            home_pending: false,
 
             audio,
             rom_name: String::new(),
@@ -418,12 +423,15 @@ impl GbaApp {
             || self.save_import_open
             || self.pending_rom.is_some()
             || self.pending_bios.is_some()
+            || self.home_pending
             || self.close_pending()
     }
 
     fn operation(&self) -> Operation {
         if self.close_pending() {
             Operation::Closing
+        } else if self.home_pending {
+            Operation::ReturningHome
         } else if self.bios_picker_open {
             Operation::ReadingBios
         } else if self.picker_open {
@@ -464,6 +472,7 @@ impl GbaApp {
             && self.pending_rom.is_none()
             && self.pending_bios.is_none()
             && !self.save_import_open
+            && !self.home_pending
             && !self.close_pending()
     }
 
@@ -472,6 +481,7 @@ impl GbaApp {
             && !self.picker_open
             && !self.restoring_save
             && !self.save_import_open
+            && !self.home_pending
             && !self.close_pending()
             && self.pending_bios.is_none()
             && (!self.loaded
@@ -491,6 +501,7 @@ impl GbaApp {
             && !self.save_import_open
             && self.pending_rom.is_none()
             && self.pending_bios.is_none()
+            && !self.home_pending
             && !self.close_pending()
     }
 
@@ -1018,6 +1029,37 @@ impl GbaApp {
             self.restore_backup_override(pending.backup_override);
         }
         self.pending_bios = None;
+        self.home_pending = false;
+        self.sync_execution(self.host_focused, self.host_visible);
+    }
+
+    /// Returning home suspends input immediately; the normal storage poll commits
+    /// navigation only after restore/write completion. Failures retain recovery UI.
+    fn request_home(&mut self, ctx: &egui::Context) {
+        if !self.loaded || self.operation_pending() {
+            return;
+        }
+        self.home_pending = true;
+        self.replay_deadline = None;
+        self.own_ui_keys(ctx);
+        self.audio.clear();
+        self.sync_execution(self.host_focused, self.host_visible);
+        ctx.request_repaint();
+    }
+
+    /// Detach presentation from the saved cartridge while retaining installed BIOS.
+    /// The dormant session is replaced through the normal loader on the next ROM;
+    /// no guest reset, save acknowledgement or firmware change occurs here.
+    fn finish_return_home(&mut self) {
+        self.home_pending = false;
+        self.loaded = false;
+        self.save_identity = None;
+        self.save_generation = self.save_generation.wrapping_add(1);
+        self.rom_name.clear();
+        self.user_paused = false;
+        self.execution_faulted = false;
+        self.notice = None;
+        self.status = "BIOS ready; load a ROM to start".into();
         self.sync_execution(self.host_focused, self.host_visible);
     }
 
@@ -1299,6 +1341,8 @@ impl GbaApp {
                         self.session.rtc_image(),
                     );
                 }
+            } else if self.home_pending {
+                self.finish_return_home();
             } else if let Some(pending) = self.pending_bios.take() {
                 self.install_bios(&pending.name, &pending.bytes);
             } else if self
@@ -2364,6 +2408,59 @@ fn player_screen_layout(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Replacement tests do not cover navigation away from a dirty cartridge.
+    // Returning home must wait for acknowledgement and keep failed saves recoverable.
+    #[test]
+    fn return_home_waits_for_save_and_preserves_bios() {
+        let mut app = GbaApp::create(false);
+        app.load_bios_bytes(&vec![0; 16384]);
+        let bios = app.bios_hash.clone();
+        app.load_rom_bytes("sram.gba", SRAM_ROM);
+        app.restoring_save = false;
+        app.sync_execution(true, true);
+        app.session.advance_frame().unwrap();
+        let image = app.session.save_image().unwrap();
+        assert!(app.session.persistence_dirty());
+        let identity = app.save_identity.unwrap();
+        let generation = app.save_generation;
+        app.session.set_button(Button::A, true);
+        let ctx = egui::Context::default();
+        app.request_home(&ctx);
+        assert!(app.loaded);
+        assert!(!app.execution_allowed());
+        assert!(!app.session.button_pressed(Button::A));
+        assert!(!app.can_pick_rom());
+        app.storage.busy = true;
+        app.poll_save_storage(&ctx);
+        assert!(app.loaded);
+        app.storage.busy = false;
+        app.apply_save_completion(crate::saves::Completion {
+            identity,
+            generation,
+            revision: image.revision,
+            rtc_revision: None,
+            outcome: crate::saves::Outcome::Written(Err("disk full".into())),
+        });
+        app.poll_save_storage(&ctx);
+        assert!(app.loaded);
+        assert!(app.session.persistence_dirty());
+        assert!(app.can_export_save());
+        app.apply_save_completion(crate::saves::Completion {
+            identity,
+            generation,
+            revision: image.revision,
+            rtc_revision: None,
+            outcome: crate::saves::Outcome::Written(Ok(())),
+        });
+        app.poll_save_storage(&ctx);
+        assert!(!app.loaded);
+        assert_eq!(app.bios_hash, bios);
+        assert!(app.save_identity.is_none());
+        assert!(!app.execution_allowed());
+        assert!(app.can_pick_rom());
+        assert!(app.save_generation > generation);
+    }
 
     // Export is a recovery copy, never acknowledgement of a failed automatic
     // write. Its completion must not replace the persistent underlying reason.

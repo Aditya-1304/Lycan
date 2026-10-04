@@ -316,11 +316,21 @@ impl GbaApp {
                 ui.label(
                     egui::RichText::new("Lycan")
                         .strong()
-                        .size(21.0)
+                        .size(25.0)
                         .color(ACCENT),
                 );
-                // Anchor actions to the trailing edge while reserving a separate
-                // leading region for branding. Wrapped rows remain right-aligned.
+                // Group the Game menu with branding, using the same button
+                // height as player actions while retaining its popup behavior.
+                ui.add_space(12.0);
+                let (menu_response, menu_inner) = egui::containers::menu::MenuButton::from_button(
+                    egui::Button::new("Game").min_size(egui::vec2(0.0, 30.0)),
+                )
+                .ui(ui, |ui| self.draw_game_menu(ui));
+                if menu_inner.is_none() && menu_response.clicked() {
+                    menu_response.surrender_focus();
+                }
+                // Player actions stay anchored to the trailing edge. Wrapped
+                // rows remain right-aligned in narrower viewports.
                 ui.with_layout(
                     egui::Layout::right_to_left(egui::Align::Center).with_main_wrap(true),
                     |ui| {
@@ -345,14 +355,9 @@ impl GbaApp {
                         if self.action(ui, self.can_pause(), pause_label) {
                             self.toggle_user_pause();
                         }
-                        let menu = ui.menu_button("Game", |ui| self.draw_game_menu(ui));
-                        if menu.inner.is_none() && menu.response.clicked() {
-                            menu.response.surrender_focus();
-                        }
-                        menu.inner.is_some()
                     },
-                )
-                .inner
+                );
+                menu_inner.is_some()
             })
             .inner;
         // Place audio beneath the actions, sharing the metadata row when there
@@ -501,33 +506,34 @@ impl GbaApp {
         if deck {
             ui.painter().rect_filled(rect.shrink(1.0), 20.0, SURFACE);
         }
-        // Application slot positions describe the deck; they never change the
-        // hardware Button ordering or the preference mapping.
+        // Shared row centers align shoulders, the directional cross and action
+        // keys inside the existing deck bounds. Slots remain presentation-only;
+        // hardware Button ordering and persisted bindings are unchanged.
         let positions = [
-            [0.87, 0.47],
-            [0.74, 0.68],
-            [0.17, 0.14],
-            [0.83, 0.14],
-            [0.55, 0.80],
-            [0.39, 0.80],
-            [0.17, 0.39],
-            [0.17, 0.83],
-            [0.06, 0.61],
-            [0.28, 0.61],
+            [0.89, 44.0 / 112.0],
+            [0.75, 70.0 / 112.0],
+            [0.22, 16.0 / 112.0],
+            [0.84, 16.0 / 112.0],
+            [0.66, 98.0 / 112.0],
+            [0.49, 98.0 / 112.0],
+            [0.22, 44.0 / 112.0],
+            [0.22, 98.0 / 112.0],
+            [0.08, 70.0 / 112.0],
+            [0.36, 70.0 / 112.0],
         ];
         for (slot, button) in BINDING_BUTTONS.into_iter().enumerate() {
             let cell = if deck {
                 let [x, y] = positions[slot];
                 egui::Rect::from_center_size(
                     rect.min + egui::vec2(width * x, height * y),
-                    egui::vec2(if slot == 5 { 98.0 } else { 72.0 }, 22.0),
+                    egui::vec2(if slot == 5 { 104.0 } else { 88.0 }, 24.0),
                 )
             } else {
                 let column = slot % 5;
                 let row = slot / 5;
                 egui::Rect::from_min_size(
                     rect.min + egui::vec2(column as f32 * width / 5.0, row as f32 * 23.0),
-                    egui::vec2(width / 5.0 - 4.0, 21.0),
+                    egui::vec2(width / 5.0 - 2.0, 22.0),
                 )
             };
             let pressed = self.session.button_pressed(button);
@@ -554,7 +560,7 @@ impl GbaApp {
                 cell.center(),
                 egui::Align2::CENTER_CENTER,
                 &self.binding_labels[slot].legend,
-                egui::FontId::proportional(11.0),
+                egui::FontId::proportional(if deck { 12.0 } else { 11.0 }),
                 egui::Color32::WHITE,
             );
             ui.interact(
@@ -584,6 +590,15 @@ impl GbaApp {
             ui.close();
         }
         ui.separator();
+        if self.action(
+            ui,
+            self.loaded && !self.operation_pending(),
+            "Exit game to home",
+        ) {
+            self.request_home(ui.ctx());
+            ui.close();
+        }
+        ui.separator();
         self.draw_save_controls(ui);
         ui.separator();
         ui.strong("Backup override for next ROM");
@@ -591,31 +606,41 @@ impl GbaApp {
     }
 
     /// Backup detection choices remain request-local and available outside F1.
+    /// Nested menus use submenu ownership; a standalone ComboBox would replace
+    /// the parent popup's memory slot and disappear before a choice can be made.
     fn draw_backup_override(&mut self, ui: &mut egui::Ui) {
-        egui::ComboBox::from_id_salt("player-backup-override")
-            .selected_text(self.backup_override.map_or("Automatic", |kind| match kind {
-                gba_session::BackupType::None => "No save hardware",
-                gba_session::BackupType::Eeprom => "EEPROM (detect capacity)",
-                gba_session::BackupType::Sram => "SRAM",
-                gba_session::BackupType::Flash64 => "Flash 64 KiB",
-                gba_session::BackupType::Flash128 => "Flash 128 KiB",
-                gba_session::BackupType::Eeprom512 => "EEPROM 512 B",
-                gba_session::BackupType::Eeprom8k => "EEPROM 8 KiB",
-            }))
-            .show_ui(ui, |ui| {
-                ui.selectable_value(&mut self.backup_override, None, "Automatic");
-                for (name, kind) in [
-                    ("No save hardware", gba_session::BackupType::None),
-                    ("EEPROM (detect capacity)", gba_session::BackupType::Eeprom),
-                    ("SRAM", gba_session::BackupType::Sram),
-                    ("Flash 64 KiB", gba_session::BackupType::Flash64),
-                    ("Flash 128 KiB", gba_session::BackupType::Flash128),
-                    ("EEPROM 512 B", gba_session::BackupType::Eeprom512),
-                    ("EEPROM 8 KiB", gba_session::BackupType::Eeprom8k),
-                ] {
-                    ui.selectable_value(&mut self.backup_override, Some(kind), name);
-                }
-            });
+        let selected = self.backup_override.map_or("Automatic", |kind| match kind {
+            gba_session::BackupType::None => "No save hardware",
+            gba_session::BackupType::Eeprom => "EEPROM (detect capacity)",
+            gba_session::BackupType::Sram => "SRAM",
+            gba_session::BackupType::Flash64 => "Flash 64 KiB",
+            gba_session::BackupType::Flash128 => "Flash 128 KiB",
+            gba_session::BackupType::Eeprom512 => "EEPROM 512 B",
+            gba_session::BackupType::Eeprom8k => "EEPROM 8 KiB",
+        });
+        if egui::containers::menu::is_in_menu(ui) {
+            ui.menu_button(selected, |ui| self.draw_backup_choices(ui));
+        } else {
+            egui::ComboBox::from_id_salt("player-backup-override")
+                .selected_text(selected)
+                .show_ui(ui, |ui| self.draw_backup_choices(ui));
+        }
+    }
+
+    /// Launch and player menus share the same typed next-load override choices.
+    fn draw_backup_choices(&mut self, ui: &mut egui::Ui) {
+        ui.selectable_value(&mut self.backup_override, None, "Automatic");
+        for (name, kind) in [
+            ("No save hardware", gba_session::BackupType::None),
+            ("EEPROM (detect capacity)", gba_session::BackupType::Eeprom),
+            ("SRAM", gba_session::BackupType::Sram),
+            ("Flash 64 KiB", gba_session::BackupType::Flash64),
+            ("Flash 128 KiB", gba_session::BackupType::Flash128),
+            ("EEPROM 512 B", gba_session::BackupType::Eeprom512),
+            ("EEPROM 8 KiB", gba_session::BackupType::Eeprom8k),
+        ] {
+            ui.selectable_value(&mut self.backup_override, Some(kind), name);
+        }
     }
 
     /// Render cartridge identity and save metadata without initiating persistence.
@@ -652,8 +677,16 @@ impl GbaApp {
         if let Some(progress) = self.operation().label() {
             ui.label(progress);
         }
-        if (self.pending_rom.is_some() || self.pending_bios.is_some())
-            && self.action(ui, true, "Cancel replacement")
+        if (self.pending_rom.is_some() || self.pending_bios.is_some() || self.home_pending)
+            && self.action(
+                ui,
+                true,
+                if self.home_pending {
+                    "Cancel return home"
+                } else {
+                    "Cancel replacement"
+                },
+            )
         {
             self.cancel_replacement();
         }
@@ -715,9 +748,12 @@ impl GbaApp {
         });
         if self.storage.busy {
             ui.label("Save operation in progress; import/export wait for its completion.");
-        } else if self.pending_rom.is_some() || self.pending_bios.is_some() || self.close_pending()
+        } else if self.pending_rom.is_some()
+            || self.pending_bios.is_some()
+            || self.home_pending
+            || self.close_pending()
         {
-            ui.small("Import waits until replacement/close is cancelled. Export leaves the save barrier intact.");
+            ui.small("Import waits until replacement, return home or close is cancelled. Export leaves the save barrier intact.");
         }
         ui.small("Import validates format, ROM identity and capacity, then restarts paused. Resume explicitly when ready.");
         ui.small(
@@ -1109,6 +1145,88 @@ impl GbaApp {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Existing popup tests cover Escape, but not a nested selector being closed
+    // by its parent before the user can choose a backup type.
+    #[test]
+    fn game_menu_backup_selector_accepts_a_choice() {
+        fn frame(
+            app: &mut GbaApp,
+            ctx: &egui::Context,
+            events: Vec<egui::Event>,
+        ) -> egui::FullOutput {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(1000.0, 700.0),
+                    )),
+                    events,
+                    ..Default::default()
+                },
+                |ui| app.draw_ui(ui),
+            );
+            output.textures_delta.clear();
+            output
+        }
+        fn click(
+            app: &mut GbaApp,
+            ctx: &egui::Context,
+            output: &mut egui::FullOutput,
+            label: &str,
+        ) {
+            let pos = output
+                .shapes
+                .iter()
+                .find_map(|shape| {
+                    if let egui::Shape::Text(text) = &shape.shape
+                        && text.galley.text() == label
+                    {
+                        Some(text.pos + text.galley.size() * 0.5)
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or_else(|| {
+                    panic!(
+                        "{label} must be visible; rendered: {:?}",
+                        output
+                            .shapes
+                            .iter()
+                            .filter_map(|shape| if let egui::Shape::Text(text) = &shape.shape {
+                                Some(text.galley.text())
+                            } else {
+                                None
+                            })
+                            .collect::<Vec<_>>()
+                    )
+                });
+            for pressed in [true, false] {
+                *output = frame(
+                    app,
+                    ctx,
+                    vec![
+                        egui::Event::PointerMoved(pos),
+                        egui::Event::PointerButton {
+                            pos,
+                            button: egui::PointerButton::Primary,
+                            pressed,
+                            modifiers: egui::Modifiers::NONE,
+                        },
+                    ],
+                );
+            }
+            *output = frame(app, ctx, vec![]);
+        }
+        let mut app = GbaApp::create(false);
+        app.load_rom_bytes("buttons.gba", BUTTONS_ROM);
+        let ctx = egui::Context::default();
+        let mut output = frame(&mut app, &ctx, vec![]);
+        click(&mut app, &ctx, &mut output, "Game");
+        click(&mut app, &ctx, &mut output, "Automatic");
+        click(&mut app, &ctx, &mut output, "SRAM");
+        assert_eq!(app.backup_override, Some(gba_session::BackupType::Sram));
+    }
 
     // Changing sections must not leave an invisible binding capture active.
     // Existing close/settings tests do not cover navigation inside the dialog.
