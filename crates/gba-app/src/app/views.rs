@@ -221,7 +221,7 @@ impl GbaApp {
                             self.draw_notices(ui);
                             ui.add_space(12.0);
                             ui.separator();
-                            self.draw_audio_controls_with_layout(ui, 220.0, !self.settings_open, true);
+                            self.draw_audio_controls_with_layout(ui, 220.0, !self.settings_open, true, false);
                             ui.add_space(12.0);
                             ui.vertical_centered(|ui| {
                                 if self.action(ui, true, "Settings") {
@@ -310,62 +310,113 @@ impl GbaApp {
     fn draw_player_contents(&mut self, ui: &mut egui::Ui, viewport_height: f32) -> bool {
         let top = ui.cursor().top();
         self.sync_texture(ui.ctx());
-        let narrow = ui.available_width() < 640.0;
         let menu_open = ui
-            .horizontal_wrapped(|ui| {
-                ui.spacing_mut().item_spacing = egui::vec2(8.0, 6.0);
+            .horizontal(|ui| {
+                ui.add_space(16.0);
                 ui.label(
                     egui::RichText::new("Lycan")
                         .strong()
                         .size(21.0)
                         .color(ACCENT),
                 );
-                let menu = ui.menu_button("Game", |ui| self.draw_game_menu(ui));
-                let pause_label = if self.user_paused { "Resume" } else { "Pause" };
-                if self.action(ui, self.can_pause(), pause_label) {
-                    self.toggle_user_pause();
-                }
-                let reset = ui
-                    .add_enabled(
-                        self.can_reset(),
-                        egui::Button::new("Reset").min_size(egui::vec2(0.0, 30.0)),
-                    )
-                    .on_hover_text(RESET_HELP);
-                if reset.clicked() {
-                    self.own_ui_keys(ui.ctx());
-                    reset.surrender_focus();
-                    self.reset_demo();
-                }
-                if self.action(ui, true, "Settings") {
-                    self.open_settings(ui.ctx());
-                }
-                self.draw_fullscreen_control(ui, !self.settings_open);
-                let mut audio_open = false;
-                if narrow {
-                    audio_open = ui
-                        .menu_button("Audio", |ui| {
-                            self.draw_audio_controls(ui, 160.0, !self.settings_open)
-                        })
-                        .inner
-                        .is_some();
-                } else {
-                    self.draw_audio_controls(ui, 150.0, !self.settings_open);
-                }
-                if menu.inner.is_none() && menu.response.clicked() {
-                    menu.response.surrender_focus();
-                }
-                menu.inner.is_some() || audio_open
+                // Anchor actions to the trailing edge while reserving a separate
+                // leading region for branding. Wrapped rows remain right-aligned.
+                ui.with_layout(
+                    egui::Layout::right_to_left(egui::Align::Center).with_main_wrap(true),
+                    |ui| {
+                        ui.spacing_mut().item_spacing = egui::vec2(8.0, 6.0);
+                        ui.add_space(16.0);
+                        self.draw_fullscreen_control(ui, !self.settings_open);
+                        if self.action(ui, true, "Settings") {
+                            self.open_settings(ui.ctx());
+                        }
+                        let reset = ui
+                            .add_enabled(
+                                self.can_reset(),
+                                egui::Button::new("Reset").min_size(egui::vec2(0.0, 30.0)),
+                            )
+                            .on_hover_text(RESET_HELP);
+                        if reset.clicked() {
+                            self.own_ui_keys(ui.ctx());
+                            reset.surrender_focus();
+                            self.reset_demo();
+                        }
+                        let pause_label = if self.user_paused { "Resume" } else { "Pause" };
+                        if self.action(ui, self.can_pause(), pause_label) {
+                            self.toggle_user_pause();
+                        }
+                        let menu = ui.menu_button("Game", |ui| self.draw_game_menu(ui));
+                        if menu.inner.is_none() && menu.response.clicked() {
+                            menu.response.surrender_focus();
+                        }
+                        menu.inner.is_some()
+                    },
+                )
+                .inner
             })
             .inner;
-        // Title has its own bounded row, so file names never displace actions.
-        ui.add(egui::Label::new(&self.rom_name).truncate())
-            .on_hover_text(&self.rom_name);
+        // Place audio beneath the actions, sharing the metadata row when there
+        // is sufficient room. Narrow views give each group its own bounded row.
+        let narrow = ui.available_width() < 640.0;
+        if narrow {
+            self.draw_player_metadata(ui);
+        }
+        ui.allocate_ui_with_layout(
+            egui::vec2(ui.available_width(), 30.0),
+            egui::Layout::right_to_left(egui::Align::Center),
+            |ui| {
+                ui.add_space(16.0);
+                ui.allocate_ui_with_layout(
+                    egui::vec2(270.0_f32.min(ui.available_width()), 30.0),
+                    egui::Layout::left_to_right(egui::Align::Center),
+                    |ui| {
+                        self.draw_audio_controls_with_layout(
+                            ui,
+                            150.0,
+                            !self.settings_open,
+                            false,
+                            true,
+                        );
+                    },
+                );
+                if !narrow {
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(ui.available_width(), 30.0),
+                        egui::Layout::left_to_right(egui::Align::Center),
+                        |ui| self.draw_player_metadata(ui),
+                    );
+                }
+            },
+        );
         ui.separator();
-        egui::ScrollArea::vertical()
-            .id_salt("player-status")
-            .max_height((viewport_height * 0.3).clamp(40.0, 180.0))
-            .auto_shrink([false, true])
-            .show(ui, |ui| self.draw_player_status(ui));
+        // Empty status containers must not reserve space above the framebuffer.
+        // Keep all progress, recovery actions and notices visible when present.
+        if self.operation().label().is_some()
+            || self.pending_rom.is_some()
+            || self.pending_bios.is_some()
+            || self.execution_faulted
+            || self.user_paused
+            || self.storage.failed
+            || self.save_failure.is_some()
+            || self.notice.is_some()
+            || self.settings.warning.is_some()
+            || self.settings.writes_blocked()
+        {
+            egui::ScrollArea::vertical()
+                .id_salt("player-status")
+                .max_height((viewport_height * 0.3).clamp(40.0, 180.0))
+                .auto_shrink([false, true])
+                .show(ui, |ui| {
+                    egui::Frame::NONE
+                        .inner_margin(egui::Margin {
+                            left: 16,
+                            right: 16,
+                            top: 0,
+                            bottom: 0,
+                        })
+                        .show(ui, |ui| self.draw_player_status(ui));
+                });
+        }
         let available = egui::vec2(
             ui.available_width(),
             (viewport_height - (ui.cursor().top() - top)).max(0.0),
@@ -567,6 +618,34 @@ impl GbaApp {
             });
     }
 
+    /// Render cartridge identity and save metadata without initiating persistence.
+    fn draw_player_metadata(&mut self, ui: &mut egui::Ui) {
+        // Keep cartridge metadata aligned with branding. Save status reads only
+        // existing persistence metadata and does not initiate storage work.
+        ui.horizontal_wrapped(|ui| {
+            ui.add_space(16.0);
+            ui.add(egui::Label::new(egui::RichText::new(&self.rom_name).size(15.0)).truncate())
+                .on_hover_text(&self.rom_name);
+
+            if self.save_identity.is_some() {
+                let status = if self.restoring_save {
+                    "Restoring save…"
+                } else if self.storage.busy || self.session.persistence_dirty() {
+                    "Saving…"
+                } else if self
+                    .session
+                    .save_status()
+                    .is_some_and(|status| status.len == 0)
+                {
+                    "Save capacity unresolved"
+                } else {
+                    "Saved"
+                };
+                ui.label(status);
+            }
+        });
+    }
+
     /// Save banners use lightweight metadata. Snapshot cloning is confined to an
     /// explicit write/export action in the existing adapter path.
     fn draw_player_status(&mut self, ui: &mut egui::Ui) {
@@ -584,22 +663,6 @@ impl GbaApp {
             ui.add(egui::Label::new(&self.status).wrap());
         } else if self.user_paused {
             ui.label("Paused");
-        }
-        if self.save_identity.is_some() {
-            let status = if self.restoring_save {
-                "Restoring save…"
-            } else if self.storage.busy || self.session.persistence_dirty() {
-                "Saving…"
-            } else if self
-                .session
-                .save_status()
-                .is_some_and(|status| status.len == 0)
-            {
-                "Save capacity unresolved"
-            } else {
-                "Saved"
-            };
-            ui.small(status);
         }
         if self.storage.failed || self.save_failure.is_some() {
             egui::Frame::NONE.fill(SURFACE).inner_margin(10).corner_radius(6)
@@ -749,17 +812,18 @@ impl GbaApp {
     /// All controls edit the same remembered volume and independent mute. Device
     /// readiness is asynchronous on web; diagnostics stay in the debug view.
     pub(super) fn draw_audio_controls(&mut self, ui: &mut egui::Ui, width: f32, enabled: bool) {
-        self.draw_audio_controls_with_layout(ui, width, enabled, false);
+        self.draw_audio_controls_with_layout(ui, width, enabled, false, false);
     }
 
-    /// Startup places mute, the slider and its value on centered rows. The player
-    /// and Settings retain their existing horizontal controls and status labels.
+    /// Startup centers the controls; the player omits redundant labels while
+    /// retaining actionable audio states. Settings keeps its descriptive labels.
     fn draw_audio_controls_with_layout(
         &mut self,
         ui: &mut egui::Ui,
         width: f32,
         enabled: bool,
         centered: bool,
+        compact_labels: bool,
     ) {
         use crate::audio::AudioState;
         let state = self.audio.state();
@@ -796,7 +860,11 @@ impl GbaApp {
                         ui.spacing_mut().slider_width = slider_width;
                         let widget = egui::Slider::new(&mut percent, 0.0..=100.0)
                             .suffix("%")
-                            .text(if centered { "" } else { "Volume" })
+                            .text(if centered || compact_labels {
+                                ""
+                            } else {
+                                "Volume"
+                            })
                             .show_value(!centered);
                         if centered {
                             // Slider creates its own horizontal UI. Bound that UI
@@ -827,7 +895,7 @@ impl GbaApp {
                     self.audio.apply_gain();
                     self.own_ui_keys(ui.ctx());
                 }
-                if !centered || state != AudioState::Ready {
+                if (!centered && !compact_labels) || state != AudioState::Ready {
                     ui.label(match state {
                         #[cfg(target_arch = "wasm32")]
                         AudioState::Starting => "Starting",
