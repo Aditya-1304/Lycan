@@ -7,6 +7,11 @@ use sha2::{Digest, Sha256};
 use std::{sync::Arc, time::Duration};
 use web_time::Instant;
 
+/// Open-source guest firmware shipped with both application targets. A fixed
+/// array length rejects an incomplete BIOS asset at compile time. Firmware
+/// execution remains in the core; user overrides use the existing picker path.
+const BUNDLED_BIOS: &[u8; 16384] = include_bytes!("../../../third_party/gba-bios/gba_bios.bin");
+
 /// Completion of a picker or dropped-file request. None means dialog cancellation.
 struct RomRead {
     generation: u64,
@@ -327,6 +332,13 @@ impl GbaApp {
     }
 
     fn create_with_settings(debug_ui: bool, settings: crate::settings::Settings) -> Self {
+        // Initial firmware installation has no picker, save, input, or device
+        // lifecycle effects. The fixed-size asset satisfies load_bios's size
+        // invariant; subsequent user overrides retain the staged installer.
+        let mut session = Session::new();
+        session
+            .load_bios(BUNDLED_BIOS)
+            .expect("bundled BIOS must satisfy the compile-time 16 KiB invariant");
         let mut audio = Audio::default();
         audio.volume = settings.preferences.volume;
         audio.muted = settings.preferences.muted;
@@ -358,9 +370,9 @@ impl GbaApp {
             integer_fallback: false,
             user_paused: false,
             execution_faulted: false,
-            session: Session::new(),
-            bios_hash: None,
-            bios_name: None,
+            session,
+            bios_hash: Some(format!("{:x}", Sha256::digest(BUNDLED_BIOS))),
+            bios_name: Some("Bundled open-source BIOS".into()),
             pending_bios: None,
             bios_picker_open: false,
             bios_sender,
@@ -395,7 +407,7 @@ impl GbaApp {
             status: if debug_ui {
                 "Loading pcm.gba".to_owned()
             } else {
-                "Load a BIOS and ROM".to_owned()
+                "BIOS ready; load a ROM to start".to_owned()
             },
             #[cfg(not(target_arch = "wasm32"))]
             capture_path: std::env::var_os("GBA_CAPTURE_PATH").map(Into::into),
@@ -2553,20 +2565,43 @@ mod tests {
         assert_eq!(fit.size, player_screen_size(egui::vec2(500.0, 340.0)));
     }
 
-    // A valid cartridge selected before firmware must survive until BIOS startup.
+    // A cartridge outside the shipped diagnostic identities must boot through
+    // the bundled firmware without waiting for a manual BIOS picker request.
     #[test]
-    fn rom_first_waits_for_bios_and_boots_the_retained_request() {
+    fn bundled_bios_starts_a_rom_without_manual_firmware_selection() {
         let mut app = GbaApp::create(false);
         let mut rom = BUTTONS_ROM.to_vec();
         rom.push(0); // Distinct from controlled fixture identity: use retail startup.
-        app.load_rom_bytes("pending.gba", &rom);
-        assert!(!app.loaded);
-        assert!(app.pending_rom.is_some(), "ROM-first request was discarded");
-        app.load_bios_bytes(&vec![0; 16384]);
+        app.load_rom_bytes("game.gba", &rom);
         app.poll_save_storage(&egui::Context::default());
-        assert!(app.loaded);
-        assert_eq!(app.rom_name, "pending.gba");
+        assert!(app.loaded, "ROM still waits for a user-supplied BIOS");
+        assert_eq!(app.rom_name, "game.gba");
         assert!(app.pending_rom.is_none());
+        assert_eq!(
+            app.bios_hash.as_deref(),
+            Some("661a9afb93624f2c5e77d07dab137bd8d23cff79e8639c62fe621b49bb064749")
+        );
+        // The upstream BIOS displays its own logo for 120 frames. Allow a
+        // bounded startup interval, then require the cartridge-owned mailbox
+        // rather than treating accepted bytes as proof that guest boot works.
+        app.session.set_active(true);
+        for _ in 0..180 {
+            app.session.advance_frame().unwrap();
+            if app.session.inspect16(0x0300_0000).unwrap() == 0x005b {
+                break;
+            }
+        }
+        assert_eq!(app.session.inspect16(0x0300_0000).unwrap(), 0x005b);
+
+        // Invalid overrides must retain working firmware; a valid selection
+        // must replace it through the normal app path, not revert to default.
+        let default_hash = app.bios_hash.clone();
+        app.load_bios_request("truncated.bin", &[0; 32]);
+        assert_eq!(app.bios_hash, default_hash);
+        assert!(app.loaded);
+        app.load_bios_request("custom.bin", &[0; 16384]);
+        assert_eq!(app.bios_name.as_deref(), Some("custom.bin"));
+        assert_ne!(app.bios_hash, default_hash);
     }
 
     // Reset must not resume a game the user explicitly paused.

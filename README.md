@@ -60,13 +60,20 @@ specific gameplay rather than compatibility with the entire GBA library.
 Open **[lycan-44o.pages.dev](https://lycan-44o.pages.dev/)**. Emulation runs locally
 in your browser through WebAssembly.
 
-1. Choose **Load BIOS** and select your GBA BIOS file (16 KiB).
-2. Choose **Load ROM** and select a `.gba` game.
+1. Choose **Load ROM** and select a `.gba` game. An open-source BIOS is included
+   and loaded automatically.
+2. To use your own 16 KiB BIOS, choose **Change BIOS** on the launch screen or
+   **Replace BIOS…** in the **Game** menu. Replacing it restarts the current game
+   after pending cartridge saves finish.
 3. Use the keyboard controls below. Open **Settings** to change bindings,
    scaling, or audio preferences.
 
-BIOS and game files are supplied by the user and are not included in this
-repository. The bundled diagnostic ROMs also provide a way to try the emulator
+Commercial BIOS and game files are not included. The default firmware is the
+[open-source gba-bios v1.0](https://github.com/ez-me/gba-bios/releases/tag/1.0),
+with its license and source in [`third_party/gba-bios`](third_party/gba-bios).
+An override applies to the current app session; a fresh launch uses the bundled
+BIOS again. Compatibility can differ between replacement and original firmware.
+The bundled diagnostic ROMs also provide a way to try the emulator
 without a commercial game; shipped diagnostics use their own startup path.
 
 ### Desktop
@@ -78,7 +85,8 @@ automatically generated **Source code** archives contain source, not a runnable
 application. You can also build from source using the instructions below.
 
 Extract the Linux package and run `./lycan` from the extracted directory, then use
-**Load BIOS** and **Load ROM** just as in the browser. Native Linux and the browser
+**Load ROM** just as in the browser; the default BIOS is built into the executable.
+The same BIOS override controls are available. Native Linux and the browser
 are the project's current validation targets; other desktop platforms have not
 been established here as supported releases.
 
@@ -160,6 +168,11 @@ trunk --config web/Trunk.toml build --release
 ```
 
 The generated site is written to `dist/`.
+It includes the BIOS notices and source under `third_party/gba-bios/`.
+
+Native release packages must include `LICENSE` and the complete
+`third_party/gba-bios/` directory beside the executable, preserving the bundled
+firmware's source, license, and attribution.
 
 ## Development
 
@@ -237,6 +250,10 @@ diagnostics from [mGBA](https://github.com/mgba-emu/mgba),
 ## License
 
 Lycan is licensed under the [MIT License](LICENSE).
+The bundled open-source BIOS is distributed under the GNU GPL version 2; see
+its [license](third_party/gba-bios/LICENSE) and
+[distribution notice](third_party/gba-bios/NOTICE.md). The MIT License does not
+apply to that firmware.
 Third-party diagnostics retain their own license notices.
 Game Boy Advance is a trademark of Nintendo. Lycan is an independent project
 and is not affiliated with Nintendo.

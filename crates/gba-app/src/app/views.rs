@@ -154,7 +154,7 @@ impl GbaApp {
                                     egui::RichText::new("Game Boy Advance Emulator").size(17.0),
                                 );
                                 ui.add_space(12.0);
-                                ui.label("Load a BIOS and ROM to start playing.");
+                                ui.label("Load a ROM to start. A default BIOS is included.");
                                 ui.add_space(18.0);
                                 let button_width = if ui.available_width() >= 452.0 {
                                     220.0
@@ -166,7 +166,7 @@ impl GbaApp {
                                     if ui
                                         .add_enabled(
                                             self.can_pick_bios(),
-                                            egui::Button::new("Load BIOS")
+                                            egui::Button::new("Change BIOS")
                                                 .min_size(egui::vec2(button_width, 52.0)),
                                         )
                                         .clicked()
