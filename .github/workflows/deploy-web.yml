@@ -1,0 +1,71 @@
+name: Deploy Web Emulator
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  deployments: write
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install pinned Rust toolchain
+        run: |
+          rustup toolchain install 1.98.1 \
+            --profile minimal \
+            --component rustfmt \
+            --component clippy \
+            --target wasm32-unknown-unknown
+
+      - name: Install pinned Trunk
+        run: |
+          cargo install \
+            --locked \
+            trunk \
+            --version 0.21.14
+
+      - name: Format
+        run: |
+          cargo fmt --all -- --check
+
+      - name: Test core
+        run: |
+          cargo test --locked -p gba-core
+
+      - name: Test session
+        run: |
+          cargo test --locked -p gba-session
+
+      - name: Check WASM application
+        run: |
+          cargo check \
+            --locked \
+            -p gba-app \
+            --target wasm32-unknown-unknown
+
+      - name: Build browser release
+        run: |
+          trunk \
+            --config web/Trunk.toml \
+            build \
+            --release
+
+      - name: Deploy to Cloudflare Pages
+        uses: cloudflare/wrangler-action@v4
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: >
+            pages deploy dist
+            --project-name=lycan
+            --branch=main
+          gitHubToken: ${{ secrets.GITHUB_TOKEN }}

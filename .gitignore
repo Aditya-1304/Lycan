@@ -13,3 +13,5 @@
 # Keep removed documentation and legacy ROM directories local.
 /roms/
 /docs/
+
+.wrangler/
